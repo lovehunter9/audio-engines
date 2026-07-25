@@ -7,6 +7,9 @@
 REGISTRY ?= docker.io/lovehunter9
 BASE ?= qwen
 TAG ?= dev
+# Local-only escape hatch, e.g. behind a proxy:
+#   EXTRA="--build-arg HTTP_PROXY=http://... --build-arg HTTPS_PROXY=http://..."
+EXTRA ?=
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 IMAGE := $(REGISTRY)/audio-$(BASE):$(TAG)
@@ -19,7 +22,7 @@ build-push:
 	  --build-arg VERSION=$(TAG) \
 	  --build-arg COMMIT=$(COMMIT) \
 	  --build-arg BUILD_DATE=$(BUILD_DATE) \
-	  --push .
+	  $(EXTRA) --push .
 
 build:
 	docker build \
@@ -27,7 +30,7 @@ build:
 	  -t $(IMAGE) \
 	  --build-arg VERSION=$(TAG) \
 	  --build-arg COMMIT=$(COMMIT) \
-	  --build-arg BUILD_DATE=$(BUILD_DATE) .
+	  --build-arg BUILD_DATE=$(BUILD_DATE) $(EXTRA) .
 
 lint:
 	python -m compileall -q wrapper

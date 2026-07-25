@@ -17,7 +17,19 @@ on:
       - 'wrapper/**'
       - 'bases/qwen/**'
       - '.github/workflows/qwen-ci.yml'
+  # Dev builds: dispatch from any branch and publish to your own namespace, e.g.
+  # namespace=lovehunter9 + image_tag=audio-stt-test1 publishes
+  # lovehunter9/audio-qwen:audio-stt-test1. Empty image_tag = main/tag rules.
   workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -49,6 +61,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
 
+      # The vLLM CUDA base alone is ~10 GB compressed / 20 GB+ unpacked, which
+      # does not fit next to the runner's preinstalled toolchains.
+      - name: free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
       # Image namespace HARDCODED to beclab/audio-qwen (Docker Hub org). NOT
       # derived from DOCKERHUB_USERNAME: the secret is the LOGIN identity (a
       # personal account with push permission to the org); the namespace is the
@@ -57,13 +77,26 @@ jobs:
         id: meta
         env:
           DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          DH_NAMESPACE: beclab
+          DH_NAMESPACE: ${{ inputs.namespace || 'beclab' }}
           DH_REPO: audio-qwen
+          DEV_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           SHORT_SHA=${GITHUB_SHA::7}
           IMAGE="${DH_NAMESPACE}/${DH_REPO}"
+          if [ -n "${DEV_TAG:-}" ]; then
+            if [ -z "${DH_USER:-}" ]; then
+              echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
+            fi
+            {
+              echo "build_date=${BUILD_DATE}"
+              echo "push=true"
+              echo "version=${DEV_TAG}"
+              echo "tags=${IMAGE}:${DEV_TAG}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           IS_MAIN=false; IS_TAG=false; TAG_NAME=""
           if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             case "${{ github.ref }}" in
@@ -107,6 +140,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASS }}
 
+      # No type=gha cache: these layers dwarf the 10 GB per-repo cache limit, so
+      # caching only thrashes it, and pulling the base on a runner is fast.
       - name: docker build (push on main / tag)
         uses: docker/build-push-action@v6
         with:
@@ -119,5 +154,5 @@ jobs:
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Plain image, no attestation index — same shape as the local build.
+          provenance: false
