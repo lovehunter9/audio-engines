@@ -1,0 +1,49 @@
+# pyannote audio base image CI. Triggers + path filters live here; the build
+# itself is the shared build-image workflow.
+name: pyannote-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wrapper/**'
+      - 'bases/pyannote/**'
+      - '.github/workflows/pyannote-ci.yml'
+      - '.github/workflows/build-image.yml'
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'bases/pyannote/**'
+      - '.github/workflows/pyannote-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev builds: dispatch from any branch and publish to your own namespace —
+  # namespace=<ns> + image_tag=<tag> publishes <ns>/audio-pyannote:<tag>. Leave
+  # image_tag empty for the normal main/tag publishing rules.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pyannote-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: pyannote
+      repo: audio-pyannote
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
