@@ -18,15 +18,17 @@ LABEL org.opencontainers.image.title="audio-qwen" \
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --ignore-installed blinker \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         qwen-asr soundfile librosa av websockets python-multipart \
-        "fastapi>=0.110" "uvicorn>=0.29"
+        "fastapi>=0.110" "uvicorn>=0.29" \
+    && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 WORKDIR /app
 COPY wrapper /app/wrapper
-ENV PYTHONPATH=/app \
+ENV AUDIO_BASE=qwen \
+    PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     WRAPPER_PORT=8000
 
 # Default: serve directly (local dev / docker run). The Olares chart overrides
 # command with a thin sentinel-wait shell (templates/wrappers.yaml) that execs
 # this same module after llm-init finishes the model download.
-CMD ["python3", "-m", "wrapper.app"]
+CMD ["audio-python", "-m", "wrapper.app"]

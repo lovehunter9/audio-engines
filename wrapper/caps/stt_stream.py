@@ -4,7 +4,6 @@
 # WebSocket) off the SAME load. Ported from the tested stream.py; deps baked at
 # build time (no runtime pip); contract surface via wrapper.gpu + wrapper.contract.
 import os
-import sys
 import json
 import asyncio
 import logging
