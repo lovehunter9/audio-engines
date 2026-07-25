@@ -24,6 +24,11 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
+# Qwen3ForcedAligner.align() takes `language` as a REQUIRED argument, but tolerates
+# an unknown value (verified: "auto"/"xx" align byte-identically to "en"/"zh"), so
+# callers may omit it and still get correct timestamps.
+DEFAULT_LANGUAGE = "auto"
+
 _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
 # Serialise .align() across connections AND run it off the event loop: its
 # blocking inference (30~110s under vGPU) otherwise freezes uvicorn.
@@ -116,14 +121,13 @@ def build_app(supports):
                     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
                         _sf.write(_f.name, _arr[_lo:_hi], _sr, format="WAV", subtype="PCM_16")
                         _sp = _f.name
-                    _lg = (str(_seg.get("language") or language or "")).strip() or None
-                    _kw = {"language": _lg} if _lg else {}
+                    _lg = (str(_seg.get("language") or language or "")).strip() or DEFAULT_LANGUAGE
 
-                    def _do_seg(_p=_sp, _t=_st, _k=_kw):
+                    def _do_seg(_p=_sp, _t=_st, _l=_lg):
                         try:
-                            return _state["model"].align(audio=_p, text=_t, **_k)
+                            return _state["model"].align(audio=_p, text=_t, language=_l)
                         except TypeError:
-                            return _state["model"].align(_p, _t)
+                            return _state["model"].align(_p, _t, _l)
 
                     async with _align_lock:
                         _res = await asyncio.to_thread(_do_seg)
@@ -147,14 +151,13 @@ def build_app(supports):
             f.write(data)
             path = f.name
         try:
-            lang = (language or "").strip() or None
-            kw = {"language": lang} if lang else {}
+            lang = (language or "").strip() or DEFAULT_LANGUAGE
 
             def _do_align():
                 try:
-                    return _state["model"].align(audio=path, text=text, **kw)
+                    return _state["model"].align(audio=path, text=text, language=lang)
                 except TypeError:
-                    return _state["model"].align(path, text)
+                    return _state["model"].align(path, text, lang)
 
             async with _align_lock:
                 results = await asyncio.to_thread(_do_align)
@@ -174,7 +177,7 @@ def build_app(supports):
             except Exception:
                 pass
         return {"model": MODEL_NAME, "mode": "align", "device": _state["device"],
-                "language": (language or None), "units": units}
+                "language": lang, "units": units}
 
     return app
 
