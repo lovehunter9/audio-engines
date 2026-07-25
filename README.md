@@ -32,21 +32,33 @@ until the engine's `/v1/models` is alive.
 wrapper/                 shared Python package (used by every base)
   gpu.py                 generic gpu_* /metrics
   contract.py            /v1/models + /health surface (load-gated)
-  app.py                 entrypoint: dispatch by MODEL_SUPPORTS
+  audioio.py             decoding shared by the torch caps
+  app.py                 entrypoint: dispatch by AUDIO_BASE + MODEL_SUPPORTS
   caps/                  capability implementations
 bases/<base>/Dockerfile  FROM the engine base image + build-time deps + wrapper
-.github/workflows/       one <base>-ci.yml per base (workflow_dispatch + push/tags)
+.github/workflows/       build-image.yml (shared) + one <base>-ci.yml per base
 Makefile                 local hand-build to a personal registry (dev phase)
 ```
+
+Every image bakes `AUDIO_BASE` and a `/usr/local/bin/audio-python` symlink to
+the interpreter that owns the deps (NeMo, for one, keeps them in a venv), so
+`wrapper/app.py` can route the same cap name to the right engine and every
+chart's sentinel shell can run the identical `exec audio-python -m wrapper.app`.
 
 ## Bases
 
 | Base | Image | Capabilities | Engine / runtime | Status |
 |---|---|---|---|---|
-| `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr in-process vLLM (`Qwen3ASRModel.LLM`) | active |
-| `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` | faster-whisper (CTranslate2) | planned |
-| `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | planned |
-| `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | planned |
+| `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr in-process vLLM (`Qwen3ASRModel.LLM`) | validated |
+| `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` | faster-whisper (CTranslate2) | built, not yet validated |
+| `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | built, not yet validated |
+| `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | built, not yet validated |
+
+`stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
+which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
+Within a base, capabilities that need DIFFERENT models (`align` vs the `stt`
+pair; each of the four pyannote caps) are separate clones — the wrapper serves
+the first match and says so in the log.
 
 > Keep this table in sync whenever a base is added or its capabilities change.
 
@@ -74,14 +86,15 @@ builder; see the `EXTRA` hook in the `Makefile`.
 ## Adding a new engine base
 
 1. `bases/<base>/Dockerfile` — `FROM` the engine's base image, `pip install` all
-   deps at **build time** (no runtime pip), `COPY wrapper /app/wrapper`, default
-   `CMD ["python3", "-m", "wrapper.app"]`.
-2. `wrapper/caps/<cap>.py` — implement the capabilities; expose `/v1/audio/*` and
-   wire `wrapper.gpu.mount_metrics` + `wrapper.contract.register` so the contract
-   above is satisfied.
-3. Teach `wrapper/app.py` to dispatch the new `MODEL_SUPPORTS` values.
-4. `.github/workflows/<base>-ci.yml` — copy `qwen-ci.yml`, change the paths and
-   the `DH_REPO` namespace.
+   deps at **build time** (no runtime pip), assert the imports so a broken base
+   fails the build, `COPY wrapper /app/wrapper`, set `ENV AUDIO_BASE=<base>`,
+   symlink `audio-python`, default `CMD ["audio-python", "-m", "wrapper.app"]`.
+2. `wrapper/caps/<cap>.py` — implement the capabilities as `build_app(supports)`
+   + `run(supports)`; expose `/v1/audio/*` and wire `wrapper.gpu.mount_metrics` +
+   `wrapper.contract.register` so the contract above is satisfied.
+3. Add the base to `ROUTES` in `wrapper/app.py`.
+4. `.github/workflows/<base>-ci.yml` — copy `qwen-ci.yml` and change the paths,
+   `base` and `repo`; the build itself is the shared `build-image.yml`.
 5. Update the **Bases** table above.
 
 ## Branching
