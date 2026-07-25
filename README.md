@@ -59,13 +59,17 @@ Makefile                 local hand-build to a personal registry (dev phase)
 `DOCKERHUB_PASS` repo secrets (login identity with push access to the `beclab`
 org; the namespace is hardcoded, not derived from the username).
 
-**Local (dev).** No separate dev build script — the SAME Dockerfile, just a
-different registry/tag:
+**Dev.** Same Dockerfile, different destination — no separate dev build path.
+Either dispatch the workflow with `namespace` + `image_tag` to publish
+`<ns>/audio-<base>:<tag>` from a feature branch, or build by hand:
 
 ```bash
-make build-push BASE=qwen TAG=dev1                 # -> lovehunter9/audio-qwen:dev1
-make build-push BASE=qwen TAG=dev1 REGISTRY=...     # override registry
+export REGISTRY=docker.io/<your-namespace>   # required, no default
+make build-push BASE=qwen TAG=dev1           # -> <your-namespace>/audio-qwen:dev1
 ```
+
+A hand build behind an HTTP proxy needs the proxy passed through to the
+builder; see the `EXTRA` hook in the `Makefile`.
 
 ## Adding a new engine base
 

@@ -17,9 +17,9 @@ on:
       - 'wrapper/**'
       - 'bases/qwen/**'
       - '.github/workflows/qwen-ci.yml'
-  # Dev builds: dispatch from any branch and publish to your own namespace, e.g.
-  # namespace=lovehunter9 + image_tag=audio-stt-test1 publishes
-  # lovehunter9/audio-qwen:audio-stt-test1. Empty image_tag = main/tag rules.
+  # Dev builds: dispatch from any branch and publish to your own namespace —
+  # namespace=<ns> + image_tag=<tag> publishes <ns>/audio-qwen:<tag>. Leave
+  # image_tag empty for the normal main/tag publishing rules.
   workflow_dispatch:
     inputs:
       namespace:
