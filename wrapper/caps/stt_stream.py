@@ -161,7 +161,7 @@ def build_app(supports):
         endpoints.append({"method": "POST", "path": "/v1/audio/transcriptions",
                           "description": "Offline transcription (single / batch segments)"})
     if has_stream:
-        endpoints.append({"method": "GET", "path": "/v1/audio/stream",
+        endpoints.append({"method": "WS", "path": "/v1/audio/stream",
                           "description": "Streaming ASR (WebSocket)"})
 
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,

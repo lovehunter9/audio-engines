@@ -41,6 +41,12 @@ def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
+    # The self-report lists itself: a caller reading /v1/models should see every
+    # path the engine serves, and each cap only knows its own.
+    advertised = [{"method": "GET", "path": "/v1/models",
+                   "description": "Model self-report (id / mode / supports / endpoints)"}]
+    advertised.extend(endpoints)
+
     def _err():
         try:
             return error() if callable(error) else error
@@ -51,7 +57,7 @@ def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None
     def models():
         if not is_ready():
             raise HTTPException(status_code=503, detail=_err() or "model not loaded yet")
-        return models_payload(model_name, mode, supports, endpoints)
+        return models_payload(model_name, mode, supports, advertised)
 
     @app.get("/health")
     def health():
