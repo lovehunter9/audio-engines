@@ -53,12 +53,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A base too big to unpack on a runner ships an append.env instead of a
+      # Dockerfile and is published through the registry by crane — see
+      # scripts/append-image.sh.
+      - name: pick build method
+        id: method
+        run: |
+          if [ -f "bases/${{ inputs.base }}/append.env" ]; then
+            echo "kind=append" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=docker" >> "$GITHUB_OUTPUT"
+          fi
+
       # The CUDA bases are tens of GB unpacked and the runner has ONE ~72 GB
       # filesystem — /mnt is a directory on it, not a second disk, so relocating
       # Docker there frees nothing. The only real room comes from deleting the
       # preinstalled toolchains and the runner's cached images. Must run BEFORE
       # buildx starts, since the builder stores everything in /var/lib/docker.
       - name: make room for the image
+        if: steps.method.outputs.kind == 'docker'
         run: |
           df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
@@ -142,10 +155,12 @@ jobs:
           password: ${{ secrets.DOCKERHUB_PASS }}
 
       - uses: docker/setup-buildx-action@v3
+        if: steps.method.outputs.kind == 'docker'
 
       # No type=gha cache: these layers dwarf the 10 GB per-repo cache limit, so
       # caching only thrashes it, and pulling the base on a runner is fast.
       - name: docker build (push on main / tag)
+        if: steps.method.outputs.kind == 'docker'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -159,3 +174,30 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           # Plain image, no attestation index — same shape as the local build.
           provenance: false
+
+      - name: install crane
+        if: steps.method.outputs.kind == 'append'
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      # Nothing to push to on a PR (no secrets, no login), and crane cannot
+      # produce the image without a registry to mount the base's blobs into, so a
+      # PR check on this base is limited to the lint job above.
+      - name: crane append (push on main / tag)
+        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
+        env:
+          BASE: ${{ inputs.base }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ steps.meta.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            IMAGE="$tag" ./scripts/append-image.sh
+          done

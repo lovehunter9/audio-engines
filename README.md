@@ -36,11 +36,13 @@ wrapper/                 shared Python package (used by every base)
   app.py                 entrypoint: dispatch by AUDIO_BASE + MODEL_SUPPORTS
   caps/                  capability implementations
 bases/<base>/Dockerfile  FROM the engine base image + build-time deps + wrapper
+bases/<base>/append.env  instead of a Dockerfile, for a base too big to unpack
+scripts/append-image.sh  registry-level build for those (crane, no unpack)
 .github/workflows/       build-image.yml (shared) + one <base>-ci.yml per base
 Makefile                 local hand-build to a personal registry (dev phase)
 ```
 
-Every image bakes `AUDIO_BASE` and a `/usr/local/bin/audio-python` symlink to
+Every image bakes `AUDIO_BASE` and a `/usr/local/bin/audio-python` pointing at
 the interpreter that owns the deps (NeMo, for one, keeps them in a venv), so
 `wrapper/app.py` can route the same cap name to the right engine and every
 chart's sentinel shell can run the identical `exec audio-python -m wrapper.app`.
@@ -71,7 +73,16 @@ the first match and says so in the log.
 `DOCKERHUB_PASS` repo secrets (login identity with push access to the `beclab`
 org; the namespace is hardcoded, not derived from the username).
 
-**Dev.** Same Dockerfile, different destination — no separate dev build path.
+**Bases too big to unpack.** `docker build` unpacks the whole base image to run
+even a single `COPY`, and `nemo`'s upstream (25.7 GB compressed, ~55 GB unpacked)
+exceeds a runner's entire disk. Such a base declares `bases/<base>/append.env`
+instead of a Dockerfile; CI and `make build-push` then both call
+`scripts/append-image.sh`, which uses crane to push the wrapper as one small
+layer and cross-repo-mount the rest inside the registry — seconds, no unpack, no
+disk. The cost is that nothing can be installed or checked at build time, so the
+upstream image must already carry every import.
+
+**Dev.** Same recipe, different destination — no separate dev build path.
 Either dispatch the workflow with `namespace` + `image_tag` to publish
 `<ns>/audio-<base>:<tag>` from a feature branch, or build by hand:
 
@@ -89,6 +100,8 @@ builder; see the `EXTRA` hook in the `Makefile`.
    deps at **build time** (no runtime pip), assert the imports so a broken base
    fails the build, `COPY wrapper /app/wrapper`, set `ENV AUDIO_BASE=<base>`,
    symlink `audio-python`, default `CMD ["audio-python", "-m", "wrapper.app"]`.
+   If the upstream image is too big to unpack, write `append.env` instead (see
+   `bases/nemo/append.env`) — but only then, since it gives up build-time deps.
 2. `wrapper/caps/<cap>.py` — implement the capabilities as `build_app(supports)`
    + `run(supports)`; expose `/v1/audio/*` and wire `wrapper.gpu.mount_metrics` +
    `wrapper.contract.register` so the contract above is satisfied.

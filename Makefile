@@ -4,6 +4,10 @@
 #
 #   make build-push REGISTRY=docker.io/<ns> BASE=qwen TAG=dev1
 #
+# A base whose upstream image is too big to unpack on a build host has an
+# append.env instead of a Dockerfile; build-push then publishes it through the
+# registry with crane, exactly as CI does. See scripts/append-image.sh.
+#
 # REGISTRY is deliberately unset: dev images belong in your own namespace, so
 # name it per invocation or export it from your shell.
 REGISTRY ?=
@@ -21,13 +25,18 @@ require-registry:
 	@test -n "$(REGISTRY)" || { echo "REGISTRY is required, e.g. REGISTRY=docker.io/<ns>"; exit 1; }
 
 build-push: require-registry
-	docker buildx build --platform linux/amd64 \
-	  -f bases/$(BASE)/Dockerfile \
-	  -t $(IMAGE) \
-	  --build-arg VERSION=$(TAG) \
-	  --build-arg COMMIT=$(COMMIT) \
-	  --build-arg BUILD_DATE=$(BUILD_DATE) \
-	  $(EXTRA) --push .
+	@if [ -f bases/$(BASE)/append.env ]; then \
+	  BASE=$(BASE) IMAGE=$(IMAGE) VERSION=$(TAG) COMMIT=$(COMMIT) \
+	    BUILD_DATE=$(BUILD_DATE) ./scripts/append-image.sh; \
+	else \
+	  docker buildx build --platform linux/amd64 \
+	    -f bases/$(BASE)/Dockerfile \
+	    -t $(IMAGE) \
+	    --build-arg VERSION=$(TAG) \
+	    --build-arg COMMIT=$(COMMIT) \
+	    --build-arg BUILD_DATE=$(BUILD_DATE) \
+	    $(EXTRA) --push .; \
+	fi
 
 build: require-registry
 	docker build \
