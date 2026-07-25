@@ -20,9 +20,13 @@ LABEL org.opencontainers.image.title="audio-fasterwhisper" \
 # transformers only if absent, since it is what CT2 converts FROM (the wrapper
 # converts transformers-format Whisper checkpoints on first load).
 #
-# The final import check covers the WEB deps too, so this fails the BUILD rather
-# than a user's clone — an earlier version only checked the engine deps and shipped
-# an image whose wrapper died on `import fastapi`.
+# audio-python must be a WRAPPER SCRIPT, never a symlink: the engine lives in a
+# venv, and CPython decides it is in one by looking for pyvenv.cfg next to the
+# executable. A symlink in /usr/local/bin has no pyvenv.cfg beside it, so python
+# starts against the system prefix, the venv's site-packages never enter sys.path
+# and the wrapper dies on `import fastapi` — while a build check run against the
+# interpreter's real path passes. Hence the final check goes THROUGH audio-python:
+# verify the exact command the chart executes, not an equivalent-looking one.
 RUN set -eux; \
     PY=; \
     for cand in "$(command -v python3 || true)" /Whisper-WebUI/venv/bin/python3 /usr/bin/python3; do \
@@ -34,10 +38,11 @@ RUN set -eux; \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
     "$PY" -c "import transformers" >/dev/null 2>&1 \
         || "$PY" -m pip install --no-cache-dir --root-user-action=ignore transformers; \
-    "$PY" -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
-    "$PY" -c "from ctranslate2.converters import TransformersConverter"; \
-    command -v ffmpeg >/dev/null; \
-    ln -sf "$PY" /usr/local/bin/audio-python
+    printf '#!/bin/sh\nexec %s "$@"\n' "$PY" > /usr/local/bin/audio-python; \
+    chmod 755 /usr/local/bin/audio-python; \
+    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    audio-python -c "from ctranslate2.converters import TransformersConverter"; \
+    command -v ffmpeg >/dev/null
 
 WORKDIR /app
 COPY wrapper /app/wrapper
