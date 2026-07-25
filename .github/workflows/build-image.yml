@@ -53,20 +53,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The CUDA bases are ~10 GB compressed / 20 GB+ unpacked, and pulling,
-      # building and exporting one needs far more room than the runner's root
-      # disk has. Its scratch disk at /mnt is both empty and larger, so give
-      # Docker that instead — and drop the preinstalled toolchains on the way.
-      # Must run BEFORE buildx starts, since the builder lives in /var/lib/docker.
+      # The CUDA bases are tens of GB unpacked and the runner has ONE ~72 GB
+      # filesystem — /mnt is a directory on it, not a second disk, so relocating
+      # Docker there frees nothing. The only real room comes from deleting the
+      # preinstalled toolchains and the runner's cached images. Must run BEFORE
+      # buildx starts, since the builder stores everything in /var/lib/docker.
       - name: make room for the image
         run: |
+          df -h /
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
-                      /opt/hostedtoolcache/CodeQL /usr/share/swift
-          sudo systemctl stop docker
-          sudo mv /var/lib/docker /mnt/docker
-          sudo ln -s /mnt/docker /var/lib/docker
-          sudo systemctl start docker
-          df -h / /mnt
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
+                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google
+          sudo apt-get clean
+          docker image prune -af
+          df -h /
 
       # The namespace is the publishing DESTINATION and is NOT derived from
       # DOCKERHUB_USERNAME, which is the LOGIN identity (a personal account with
