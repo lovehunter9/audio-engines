@@ -6,6 +6,7 @@
 import os
 import asyncio
 import logging
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -45,11 +46,57 @@ _state = {"ready": False, "error": None, "model": None, "pipeline": None,
 
 
 def _locate():
-    # Resolve the CT2 model dir from the shared HF cache populated by llm-init.
+    # Resolve the model dir from the shared HF cache populated by llm-init.
     from huggingface_hub import snapshot_download
 
     return snapshot_download(MODEL_REPO, local_files_only=True,
                              cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+
+
+def _is_ct2(d):
+    # CT2 writes model.bin; transformers writes model.safetensors/pytorch_model.bin.
+    return os.path.isfile(os.path.join(d, "model.bin"))
+
+
+# Files faster-whisper reads next to the weights. Without them it would reach
+# out to the Hub for the tokenizer, which fails in the engine's offline runtime.
+_CT2_COPY = ("tokenizer.json", "preprocessor_config.json", "tokenizer_config.json",
+             "special_tokens_map.json", "added_tokens.json", "normalizer.json",
+             "vocab.json", "merges.txt")
+
+
+def _ensure_ct2(src, quantization):
+    # A Whisper checkpoint in transformers format (openai/whisper-large-v3 and
+    # every fine-tune of it) cannot be loaded by CTranslate2 as-is, and users
+    # legitimately want those model ids. Convert once into the shared HF cache
+    # volume so restarts and sibling instances reuse it.
+    if _is_ct2(src):
+        return src
+
+    root = os.environ.get("FW_CT2_CACHE") or os.path.join(
+        os.environ.get("HF_HUB_CACHE") or "/cache/hf/hub", "ct2-converted")
+    out = os.path.join(root, MODEL_REPO.replace("/", "--"))
+    if os.path.isfile(os.path.join(out, ".ct2-complete")):
+        log.info("using previously converted CT2 model at %s", out)
+        return out
+
+    from ctranslate2.converters import TransformersConverter
+
+    log.info("%s is not CTranslate2; converting (this runs once, minutes)", MODEL_REPO)
+    # Per-pid staging dir: two instances of the same model may load at once and
+    # must not delete each other's half-written conversion.
+    tmp = "%s.converting.%d" % (out, os.getpid())
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(root, exist_ok=True)
+    copy_files = [f for f in _CT2_COPY if os.path.isfile(os.path.join(src, f))]
+    TransformersConverter(src, copy_files=copy_files,
+                          load_as_float16=quantization.startswith("float16")).convert(
+        tmp, quantization=quantization, force=True)
+    shutil.rmtree(out, ignore_errors=True)
+    os.rename(tmp, out)
+    open(os.path.join(out, ".ct2-complete"), "w").close()
+    log.info("converted %s -> %s (%s)", MODEL_REPO, out, quantization)
+    return out
 
 
 def _load():
@@ -61,7 +108,7 @@ def _load():
         if dev == "auto":
             dev = "cuda" if torch.cuda.is_available() else "cpu"
         ctype = COMPUTE_TYPE if dev == "cuda" else "int8"
-        path = _locate()
+        path = _ensure_ct2(_locate(), ctype)
         model = WhisperModel(path, device=dev, compute_type=ctype)
         pipeline = None
         if BATCHED:

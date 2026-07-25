@@ -16,7 +16,9 @@ LABEL org.opencontainers.image.title="audio-fasterwhisper" \
 # --system-site-packages: pip sees fastapi in the system python, reports
 # "already satisfied", installs nothing, and the venv still cannot import it at
 # runtime. The base's CUDA-matched ctranslate2 + faster_whisper build must never
-# be replaced by a generic wheel, so only the web layer is added.
+# be replaced by a generic wheel, so only the web layer is added — and
+# transformers only if absent, since it is what CT2 converts FROM (the wrapper
+# converts transformers-format Whisper checkpoints on first load).
 #
 # The final import check covers the WEB deps too, so this fails the BUILD rather
 # than a user's clone — an earlier version only checked the engine deps and shipped
@@ -30,7 +32,10 @@ RUN set -eux; \
     : "${PY:?no interpreter in this image can import faster_whisper}"; \
     "$PY" -m pip install --no-cache-dir --root-user-action=ignore --ignore-installed \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
+    "$PY" -c "import transformers" >/dev/null 2>&1 \
+        || "$PY" -m pip install --no-cache-dir --root-user-action=ignore transformers; \
     "$PY" -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    "$PY" -c "from ctranslate2.converters import TransformersConverter"; \
     command -v ffmpeg >/dev/null; \
     ln -sf "$PY" /usr/local/bin/audio-python
 
