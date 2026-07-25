@@ -16,9 +16,14 @@ LABEL org.opencontainers.image.title="audio-fasterwhisper" \
 # --system-site-packages: pip sees fastapi in the system python, reports
 # "already satisfied", installs nothing, and the venv still cannot import it at
 # runtime. The base's CUDA-matched ctranslate2 + faster_whisper build must never
-# be replaced by a generic wheel, so only the web layer is added — and
-# transformers only if absent, since it is what CT2 converts FROM (the wrapper
-# converts transformers-format Whisper checkpoints on first load).
+# be replaced by a generic wheel, so only the web layer is added.
+#
+# transformers is what CT2 converts FROM when the user names a transformers-format
+# checkpoint (openai/whisper-large-v3). It must be >= 4.56: this image's ctranslate2
+# calls from_pretrained(dtype=...), and older transformers forwards that unknown
+# kwarg into the model constructor and dies with "unexpected keyword argument
+# 'dtype'". 4.56+ still accepts the legacy torch_dtype, so this floor is safe for
+# any ctranslate2. Only the converter path uses it — faster_whisper does not.
 #
 # audio-python must be a WRAPPER SCRIPT, never a symlink: the engine lives in a
 # venv, and CPython decides it is in one by looking for pyvenv.cfg next to the
@@ -36,12 +41,13 @@ RUN set -eux; \
     : "${PY:?no interpreter in this image can import faster_whisper}"; \
     "$PY" -m pip install --no-cache-dir --root-user-action=ignore --ignore-installed \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    "$PY" -c "import transformers" >/dev/null 2>&1 \
-        || "$PY" -m pip install --no-cache-dir --root-user-action=ignore transformers; \
+    "$PY" -m pip install --no-cache-dir --root-user-action=ignore "transformers>=4.56"; \
     printf '#!/bin/sh\nexec %s "$@"\n' "$PY" > /usr/local/bin/audio-python; \
     chmod 755 /usr/local/bin/audio-python; \
     audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
-    audio-python -c "from ctranslate2.converters import TransformersConverter"; \
+    audio-python -c "from ctranslate2.converters import TransformersConverter; \
+import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
+assert v >= (4, 56), t.__version__"; \
     command -v ffmpeg >/dev/null
 
 WORKDIR /app

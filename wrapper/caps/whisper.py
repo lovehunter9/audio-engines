@@ -89,9 +89,15 @@ def _ensure_ct2(src, quantization):
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(root, exist_ok=True)
     copy_files = [f for f in _CT2_COPY if os.path.isfile(os.path.join(src, f))]
-    TransformersConverter(src, copy_files=copy_files,
-                          load_as_float16=quantization.startswith("float16")).convert(
-        tmp, quantization=quantization, force=True)
+    try:
+        TransformersConverter(src, copy_files=copy_files,
+                              load_as_float16=quantization.startswith("float16")).convert(
+            tmp, quantization=quantization, force=True)
+    except BaseException:
+        # A half-written conversion is multiple GB on a shared cache volume and
+        # nothing would ever reclaim it, since the next attempt stages elsewhere.
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
     shutil.rmtree(out, ignore_errors=True)
     os.rename(tmp, out)
     open(os.path.join(out, ".ct2-complete"), "w").close()
