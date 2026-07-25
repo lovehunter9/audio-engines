@@ -19,6 +19,7 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --ignore-ins
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         qwen-asr soundfile librosa av websockets python-multipart \
         "fastapi>=0.110" "uvicorn>=0.29" \
+    && python3 -c "import qwen_asr, soundfile, librosa, fastapi, uvicorn, multipart, websockets" \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 WORKDIR /app

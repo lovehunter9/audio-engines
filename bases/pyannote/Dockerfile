@@ -22,7 +22,7 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
 # Fail the BUILD, not a user's clone, if a dependency ever stops resolving.
 # `audio-python` is the single interpreter name every base image and every
 # chart's sentinel shell uses (some bases keep their deps in a venv).
-RUN python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile" \
+RUN python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart" \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 WORKDIR /app

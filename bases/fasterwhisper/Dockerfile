@@ -11,18 +11,28 @@ LABEL org.opencontainers.image.title="audio-fasterwhisper" \
       org.opencontainers.image.revision="${COMMIT}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
-# The base ships a CUDA-matched ctranslate2 + faster_whisper build that a
-# generic wheel must never replace, so only the web layer is added here.
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        python-multipart "fastapi>=0.110" "uvicorn>=0.29"
-
-# Fail the BUILD, not a user's clone, if the base ever stops shipping what the
-# wrapper needs (CT2 runtime, HF cache reader, ffmpeg for batch slicing).
-# `audio-python` is the single interpreter name every base image and every
-# chart's sentinel shell uses (some bases keep their deps in a venv).
-RUN python3 -c "import faster_whisper, huggingface_hub, torch" \
-    && command -v ffmpeg >/dev/null \
-    && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+# This image has several pythons, so pick the one that owns the engine and put
+# everything in THAT one. --ignore-installed because the venv is built with
+# --system-site-packages: pip sees fastapi in the system python, reports
+# "already satisfied", installs nothing, and the venv still cannot import it at
+# runtime. The base's CUDA-matched ctranslate2 + faster_whisper build must never
+# be replaced by a generic wheel, so only the web layer is added.
+#
+# The final import check covers the WEB deps too, so this fails the BUILD rather
+# than a user's clone — an earlier version only checked the engine deps and shipped
+# an image whose wrapper died on `import fastapi`.
+RUN set -eux; \
+    PY=; \
+    for cand in "$(command -v python3 || true)" /Whisper-WebUI/venv/bin/python3 /usr/bin/python3; do \
+        [ -n "$cand" ] && [ -x "$cand" ] || continue; \
+        if "$cand" -c "import faster_whisper" >/dev/null 2>&1; then PY="$cand"; break; fi; \
+    done; \
+    : "${PY:?no interpreter in this image can import faster_whisper}"; \
+    "$PY" -m pip install --no-cache-dir --root-user-action=ignore --ignore-installed \
+        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
+    "$PY" -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    command -v ffmpeg >/dev/null; \
+    ln -sf "$PY" /usr/local/bin/audio-python
 
 WORKDIR /app
 COPY wrapper /app/wrapper
