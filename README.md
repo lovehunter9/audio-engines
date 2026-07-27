@@ -24,7 +24,53 @@ Every image MUST expose, on the engine port (default `8000`):
 `llm-init` does the model **download** (into the shared HF cache) and writes a
 sentinel; the engine container waits for that sentinel, then serves **offline**
 from the cache. Nothing probes the engine via k8s — `llm-init` gates `/v1/*`
-until the engine's `/v1/models` is alive.
+until the engine's `/v1/models` is alive. Since no probe watches the engine, a
+load that hangs forever would go unnoticed, so `wrapper/watchdog.py` exits
+non-zero after `LOAD_TIMEOUT_S` (default 1800) if the model is neither ready nor
+failed, letting k8s rebuild the container. A load that failed *with a reason* is
+left alone: `/v1/models` reporting the reason beats a crash loop.
+
+## Tasks: any-length audio without a long-lived request
+
+Every hop in front of the engine gives up on a silent request long before a long
+clip is done (`llm-init` 60 s for the response header, the platform's Envoy 300 s
+for the whole stream), so any capability whose work can outlast that also accepts
+**`async=1`** as a form field:
+
+| Request | Answer |
+|---|---|
+| without `async` | exactly as before: the result, on the same request |
+| `async=1` | `202 {"task":{id, cap, model, status, poll, result_url}}` |
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/audio/tasks/{id}` | `status` (`queued`→`running`→`succeeded`\|`failed`\|`canceled`), `progress` (`ratio`, `stage`, `done`/`total`), and the JSON `result` once it succeeded |
+| `GET /v1/audio/tasks/{id}/result` | the result: audio bytes for enhance (with the same headers the sync path sends), otherwise the same JSON |
+| `DELETE /v1/audio/tasks/{id}` | cancel a running task at its next checkpoint, or drop a finished one's result |
+| `GET /v1/audio/tasks` | every live task, for a human debugging the instance |
+
+It is a form field and not a header on purpose: the gateway forwards audio bodies
+verbatim but not arbitrary headers, so a field is what actually survives the trip.
+
+Both paths run on **one worker thread** — one instance owns one model on one
+(time-sliced) GPU — so a sync request now queues behind whatever is running,
+exactly as it already did behind the per-cap inference lock. The event loop stays
+free either way, which is what keeps `/v1/models` and `/metrics` answering while
+a three-hour clip is being processed. `stt_stream` / `diar_stream` keep their
+WebSocket, which never had this problem; a base that only streams (nemo) mounts
+no task API at all.
+
+Batching is unrelated and unchanged: `segments`, pyannote's batch sizes and
+faster-whisper's `BatchedInferencePipeline` are throughput and quality levers,
+while `async=1` only decides who waits.
+
+What tasks deliberately do NOT do: survive a restart (they live in memory, and a
+poll after a pod restart is a `404` the caller should treat as "resubmit"),
+outlive `TASK_TTL_S` (default 1800 s, after which results are reclaimed), or
+queue without bound (`TASK_QUEUE_MAX`, default 32, then `503`). Results larger
+than a JSON blob go to a temp file rather than the heap, and because the charts
+mount `/tmp` from a host volume, the runner sweeps `upload-*` / `task-*` files a
+previous run stranded when it starts.
 
 ## Layout
 
@@ -32,6 +78,8 @@ until the engine's `/v1/models` is alive.
 wrapper/                 shared Python package (used by every base)
   gpu.py                 generic gpu_* /metrics
   contract.py            /v1/models + /health surface (load-gated)
+  tasks.py               the one worker, and the async=1 task API
+  watchdog.py            exit non-zero if the model never loads
   audioio.py             decoding shared by the torch caps
   app.py                 entrypoint: dispatch by AUDIO_BASE + MODEL_SUPPORTS
   caps/                  capability implementations
@@ -75,6 +123,15 @@ the first match and says so in the log.
 
 ### Per-base notes worth knowing before editing
 
+**`qwen`.** One vLLM load serves `stt` (task-based) and `stt_stream` (WebSocket),
+so the two are kept off each other with a plain `threading.Lock` the task worker
+also takes — an `asyncio` lock cannot span the worker thread. vLLM is asked to
+capture only a handful of CUDA graph shapes (`VLLM_CAPTURE_SIZES`, default
+`1,2,4,8`) because inference here is always batch 1 and capture is where startup
+has been seen to wedge holding the vGPU lock; the field name is probed off
+`CompilationConfig` rather than assumed, and `VLLM_ENFORCE_EAGER=1` skips graphs
+altogether if that ever needs to be ruled out.
+
 **`fasterwhisper`.** Three traps, all in the single `RUN`:
 
 - The image ships several pythons; only one owns `faster_whisper`, and the web
@@ -90,7 +147,9 @@ the first match and says so in the log.
   `faster_whisper` itself does not.
 
 The base's CUDA-matched `ctranslate2` + `faster_whisper` must never be replaced
-by a generic wheel, so nothing else is touched.
+by a generic wheel, so nothing else is touched. This is also the one base that
+raises `LOAD_TIMEOUT_S` (to 5400, in the Dockerfile): that one-time conversion is
+legitimate multi-GB work and must not look like a hung load to the watchdog.
 
 **`pyannote`.** Both diarization stages default to `batch_size=1`, and
 segmentation slides a 10 s window at a 1 s hop, so a 3 h clip becomes ~12 000

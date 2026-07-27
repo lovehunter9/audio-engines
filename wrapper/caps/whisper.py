@@ -1,6 +1,5 @@
 # Whisper-family STT on CTranslate2: the OpenAI pair, transcriptions + translations (-> English).
 import os
-import asyncio
 import logging
 import shutil
 import subprocess
@@ -11,6 +10,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import PlainTextResponse
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 
@@ -142,9 +143,22 @@ def _parse_temp(raw):
     return vals[0] if len(vals) == 1 else tuple(vals)
 
 
+def _realize(segments, info, ctx):
+    # Iterating the generator is what runs inference, so progress and cancel belong here.
+    dur = float(getattr(info, "duration", 0.0) or 0.0)
+    out = []
+    ctx.progress(ratio=0.0, stage="transcribe")
+    for s in segments:
+        out.append(s)
+        if dur > 0:
+            ctx.progress(ratio=min(1.0, float(s.end) / dur))
+        ctx.checkpoint()
+    return out
+
+
 def _run(task, data, filename, language, response_format, temperature, prompt,
-         vad_filter, word_ts):
-    # Blocking, so callers use to_thread; no lock, since CTranslate2 is thread-safe by design.
+         vad_filter, word_ts, ctx=tasks.NULL_CTX):
+    # Blocking, so callers hand it to the task runner; CTranslate2 needs no lock of its own.
     if not _state["ready"]:
         raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
     suffix = os.path.splitext(filename or "a.wav")[1] or ".wav"
@@ -170,20 +184,22 @@ def _run(task, data, filename, language, response_format, temperature, prompt,
             bkw["vad_filter"] = True
             try:
                 segments, info = pipe.transcribe(path, **bkw)
-                segs = list(segments)
+                segs = _realize(segments, info, ctx)
             except TypeError as te:
                 log.warning("batched rejected kwargs (%s); buffered fallback", te)
                 kw["temperature"] = temp
                 if vad_filter:
                     kw["vad_filter"] = True
                 segments, info = _state["model"].transcribe(path, **kw)
-                segs = list(segments)
+                segs = _realize(segments, info, ctx)
         else:
             kw["temperature"] = temp
             if vad_filter:
                 kw["vad_filter"] = True
             segments, info = _state["model"].transcribe(path, **kw)
-            segs = list(segments)  # realize the generator (runs inference)
+            segs = _realize(segments, info, ctx)
+    except tasks.Cancelled:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail="transcription failed: %s" % e)
     finally:
@@ -226,7 +242,7 @@ def _ffmpeg_slice_wav(src, start, dur):
     return r.stdout
 
 
-def _stt_batch(data, fn, segs, language, temperature, prompt):
+def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX):
     # One {text}|{error} per segment, so a single bad segment cannot fail the batch.
     suffix = os.path.splitext(fn or "a.wav")[1] or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as wf:
@@ -234,7 +250,9 @@ def _stt_batch(data, fn, segs, language, temperature, prompt):
         whole = wf.name
     out = []
     try:
-        for seg in segs:
+        ctx.progress(stage="transcribe", done=0, total=len(segs))
+        for i, seg in enumerate(segs, 1):
+            ctx.checkpoint()
             try:
                 a = float(seg.get("start") or 0)
                 b = float(seg.get("end") or 0)
@@ -245,8 +263,12 @@ def _stt_batch(data, fn, segs, language, temperature, prompt):
                 res = _run("transcribe", sb, "seg.wav", language, "json",
                            temperature, prompt, False, False)
                 out.append({"text": res.get("text", "") if isinstance(res, dict) else ""})
+            except tasks.Cancelled:
+                raise
             except Exception as e:
                 out.append({"error": "stt failed: %s" % e})
+            finally:
+                ctx.progress(done=i, total=len(segs))
     finally:
         try:
             os.unlink(whole)
@@ -261,13 +283,13 @@ def build_app(supports):
 
     endpoints = [
         {"method": "POST", "path": "/v1/audio/transcriptions",
-         "description": "Offline transcription (single / batch segments)"},
+         "description": "Offline transcription (single / batch segments; %s)" % tasks.ASYNC_HINT},
         {"method": "POST", "path": "/v1/audio/translations",
-         "description": "Speech -> English (Whisper translate task)"},
+         "description": "Speech -> English (Whisper translate task; %s)" % tasks.ASYNC_HINT},
     ]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=True)
 
     @app.post("/v1/audio/transcriptions")
     async def transcriptions(file: UploadFile = File(...), model: str = Form(default=None),
@@ -277,7 +299,8 @@ def build_app(supports):
                              prompt: str = Form(default=None),
                              vad_filter: str = Form(default=None),
                              word_timestamps: str = Form(default=None),
-                             segments: str = Form(default=None)):
+                             segments: str = Form(default=None),
+                             async_: str = Form(default=None, alias="async")):
         data = await file.read()
         fn = file.filename
         # BATCH mode (opt-in): `segments` = JSON [{start,end}] -> one {text}|{error} each.
@@ -285,35 +308,49 @@ def build_app(supports):
             import json as _json
 
             try:
-                _segs = _json.loads(segments)
+                segs = _json.loads(segments)
             except Exception as e:
                 raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-            if not isinstance(_segs, list):
+            if not isinstance(segs, list):
                 raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
-            results = await asyncio.to_thread(_stt_batch, data, fn, _segs, language,
-                                              temperature, prompt)
-            return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": results}
-        return await asyncio.to_thread(
-            _run, "transcribe", data, fn, language, response_format, temperature, prompt,
-            str(vad_filter).lower() in ("1", "true", "yes"),
-            str(word_timestamps).lower() in ("1", "true", "yes"))
+
+            def _work_batch(ctx):
+                results = _stt_batch(data, fn, segs, language, temperature, prompt, ctx)
+                return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": results}
+
+            return await tasks.dispatch(async_, "stt", MODEL_NAME, _work_batch,
+                                        fail="transcription failed")
+
+        def _work(ctx):
+            return _run("transcribe", data, fn, language, response_format, temperature, prompt,
+                        str(vad_filter).lower() in ("1", "true", "yes"),
+                        str(word_timestamps).lower() in ("1", "true", "yes"), ctx)
+
+        return await tasks.dispatch(async_, "stt", MODEL_NAME, _work,
+                                    fail="transcription failed")
 
     @app.post("/v1/audio/translations")
     async def translations(file: UploadFile = File(...), model: str = Form(default=None),
                            response_format: str = Form(default="json"),
                            temperature: str = Form(default=None),
-                           prompt: str = Form(default=None)):
+                           prompt: str = Form(default=None),
+                           async_: str = Form(default=None, alias="async")):
         # OpenAI semantics: translations = speech -> English (Whisper "translate" task).
         data = await file.read()
         fn = file.filename
-        return await asyncio.to_thread(
-            _run, "translate", data, fn, None, response_format, temperature, prompt,
-            False, False)
+
+        def _work(ctx):
+            return _run("translate", data, fn, None, response_format, temperature, prompt,
+                        False, False, ctx)
+
+        return await tasks.dispatch(async_, "stt", MODEL_NAME, _work,
+                                    fail="transcription failed")
 
     return app
 
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "faster-whisper")
     app = build_app(supports)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

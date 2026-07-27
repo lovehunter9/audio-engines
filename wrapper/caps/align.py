@@ -8,9 +8,11 @@ import asyncio
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import spill
+from ..audioio import spill, unlink
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -26,8 +28,6 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or None
 DEFAULT_LANGUAGE = "auto"
 
 _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
-# Serialised and off the event loop: 30~110s of blocking inference under a vGPU would freeze uvicorn.
-_align_lock = asyncio.Lock()
 
 
 def _load():
@@ -65,19 +65,35 @@ def _field(u, *names):
     return None
 
 
+def _units(res):
+    return [{"text": _field(u, "text", "word", "token"),
+             "start": _field(u, "start_time", "start"),
+             "end": _field(u, "end_time", "end")} for u in (res[0] if res else [])]
+
+
+def _align(path, text, language):
+    # Older builds of the aligner take positional arguments only.
+    try:
+        return _state["model"].align(audio=path, text=text, language=language)
+    except TypeError:
+        return _state["model"].align(path, text, language)
+
+
 def build_app(supports):
     app = FastAPI(title="audio-align (Qwen3-ForcedAligner)")
     mount_metrics(app)
 
     endpoints = [{"method": "POST", "path": "/v1/audio/align",
-                  "description": "Forced alignment (single / batch segments)"}]
+                  "description": "Forced alignment (single / batch segments; %s)"
+                                 % tasks.ASYNC_HINT}]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=True)
 
     @app.post("/v1/audio/align")
     async def align(file: UploadFile = File(...), text: str = Form(default=None),
-                    language: str = Form(default=None), segments: str = Form(default=None)):
+                    language: str = Form(default=None), segments: str = Form(default=None),
+                    async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         data = await file.read()
@@ -86,10 +102,10 @@ def build_app(supports):
             import json as _json
 
             try:
-                _segs = _json.loads(segments)
+                segs = _json.loads(segments)
             except Exception as e:
                 raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-            if not isinstance(_segs, list):
+            if not isinstance(segs, list):
                 raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
 
             def _decode_all():
@@ -100,92 +116,70 @@ def build_app(supports):
                 return a.mean(axis=1), int(sr)  # -> mono
 
             try:
-                _arr, _sr = await asyncio.to_thread(_decode_all)
+                arr, sr = await asyncio.to_thread(_decode_all)
             except Exception as e:
                 raise HTTPException(status_code=400, detail="could not decode audio: %s" % e)
-            _out = []
-            for _seg in _segs:
-                try:
-                    _st = (str(_seg.get("text") or "")).strip()
-                    if not _st:
-                        _out.append({"units": [], "language": None})
-                        continue
-                    _a = float(_seg.get("start") or 0)
-                    _b = float(_seg.get("end") or 0)
-                    _lo = max(0, int(_a * _sr))
-                    _hi = min(len(_arr), int(_b * _sr))
-                    if _hi <= _lo:
-                        _out.append({"error": "empty segment"})
-                        continue
-                    _lg = (str(_seg.get("language") or language or "")).strip() or DEFAULT_LANGUAGE
 
-                    # Slice write and align together, so neither touches the event loop.
-                    def _do_seg(_a=_lo, _b=_hi, _t=_st, _l=_lg):
+            def _work_batch(ctx):
+                out = []
+                ctx.progress(stage="align", done=0, total=len(segs))
+                for i, seg in enumerate(segs, 1):
+                    ctx.checkpoint()
+                    try:
+                        stext = (str(seg.get("text") or "")).strip()
+                        if not stext:
+                            out.append({"units": [], "language": None})
+                            continue
+                        lo = max(0, int(float(seg.get("start") or 0) * sr))
+                        hi = min(len(arr), int(float(seg.get("end") or 0) * sr))
+                        if hi <= lo:
+                            out.append({"error": "empty segment"})
+                            continue
+                        lang = ((str(seg.get("language") or language or "")).strip()
+                                or DEFAULT_LANGUAGE)
                         import soundfile as _sf
 
-                        _p = None
+                        p = None
                         try:
-                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
-                                _p = _f.name
-                            _sf.write(_p, _arr[_a:_b], _sr, format="WAV", subtype="PCM_16")
-                            try:
-                                return _state["model"].align(audio=_p, text=_t, language=_l)
-                            except TypeError:
-                                return _state["model"].align(_p, _t, _l)
+                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                                p = f.name
+                            _sf.write(p, arr[lo:hi], sr, format="WAV", subtype="PCM_16")
+                            res = _align(p, stext, lang)
                         finally:
-                            if _p:
-                                try:
-                                    os.unlink(_p)
-                                except Exception:
-                                    pass
+                            if p:
+                                unlink(p)
+                        out.append({"language": lang, "units": _units(res)})
+                    except tasks.Cancelled:
+                        raise
+                    except Exception as e:
+                        out.append({"error": "align failed: %s" % e})
+                    finally:
+                        ctx.progress(done=i, total=len(segs))
+                return {"model": MODEL_NAME, "mode": "align", "batch": True, "results": out}
 
-                    async with _align_lock:
-                        _res = await asyncio.to_thread(_do_seg)
-                    _ur = _res[0] if _res else []
-                    _out.append({"language": _lg, "units": [
-                        {"text": _field(u, "text", "word", "token"),
-                         "start": _field(u, "start_time", "start"),
-                         "end": _field(u, "end_time", "end")} for u in _ur]})
-                except Exception as e:
-                    _out.append({"error": "align failed: %s" % e})
-            return {"model": MODEL_NAME, "mode": "align", "batch": True, "results": _out}
+            return await tasks.dispatch(async_, "align", MODEL_NAME, _work_batch,
+                                        fail="alignment failed")
         # SINGLE mode.
         if not (text or "").strip():
             raise HTTPException(status_code=400, detail="`text` is required for forced alignment")
         path = await asyncio.to_thread(spill, data, file.filename)
-        try:
-            lang = (language or "").strip() or DEFAULT_LANGUAGE
+        lang = (language or "").strip() or DEFAULT_LANGUAGE
 
-            def _do_align():
-                try:
-                    return _state["model"].align(audio=path, text=text, language=lang)
-                except TypeError:
-                    return _state["model"].align(path, text, lang)
+        def _work(ctx):
+            ctx.progress(ratio=0.0, stage="align")
+            res = _align(path, text, lang)
+            ctx.progress(ratio=1.0, stage="done")
+            return {"model": MODEL_NAME, "mode": "align", "device": _state["device"],
+                    "language": lang, "units": _units(res)}
 
-            async with _align_lock:
-                results = await asyncio.to_thread(_do_align)
-            units_raw = results[0] if results else []
-            units = []
-            for u in units_raw:
-                units.append({
-                    "text": _field(u, "text", "word", "token"),
-                    "start": _field(u, "start_time", "start"),
-                    "end": _field(u, "end_time", "end"),
-                })
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="alignment failed: %s" % e)
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-        return {"model": MODEL_NAME, "mode": "align", "device": _state["device"],
-                "language": lang, "units": units}
+        return await tasks.dispatch(async_, "align", MODEL_NAME, _work,
+                                    cleanup=lambda: unlink(path), fail="alignment failed")
 
     return app
 
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "Qwen3-ForcedAligner")
     app = build_app(supports)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

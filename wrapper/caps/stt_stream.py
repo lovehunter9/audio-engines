@@ -3,11 +3,14 @@ import os
 import json
 import asyncio
 import logging
+import threading
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
 from fastapi.responses import Response
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 
@@ -33,10 +36,40 @@ ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
 _state = {"ready": False, "error": None, "asr": None}
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
+# The same engine is also driven by the task worker (offline stt), which lives on another thread.
+_gpu = threading.Lock()
+
+
+def _gated(fn, *a):
+    with _gpu:
+        return fn(*a)
 
 
 def _p(msg):
     print("[stream] " + msg, flush=True)
+
+
+def _capture_kw():
+    # Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
+    if tasks.truthy(os.environ.get("VLLM_ENFORCE_EAGER")):
+        _p("VLLM_ENFORCE_EAGER is set: skipping CUDA graphs entirely")
+        return {"enforce_eager": True}
+    raw = os.environ.get("VLLM_CAPTURE_SIZES", "1,2,4,8")
+    sizes = [int(s) for s in raw.replace(" ", "").split(",") if s]
+    if not sizes:
+        return {}
+    try:
+        from vllm.config import CompilationConfig
+
+        fields = set(getattr(CompilationConfig, "model_fields", None) or {})
+    except Exception as e:
+        _p("WARN cannot inspect vLLM CompilationConfig (%s); leaving capture sizes alone" % e)
+        return {}
+    for name in ("cudagraph_capture_sizes", "capture_sizes"):
+        if name in fields:
+            return {"compilation_config": {name: sizes}}
+    _p("WARN CompilationConfig has no capture-size field; leaving capture sizes alone")
+    return {}
 
 
 def _load_blocking():
@@ -57,13 +90,24 @@ def _load_blocking():
         _p("WARN could not patch MAX_ASR_INPUT_SECONDS (%s)" % e)
     _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
        % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
-    # These are vLLM kwargs qwen-asr forwards; retry without max_model_len if a build does not.
+    # These are vLLM kwargs qwen-asr forwards; a build that takes fewer of them gets less.
     _kw = dict(model=MODEL_REPO, gpu_memory_utilization=GPU_UTIL, max_new_tokens=MAX_NEW_TOKENS)
-    try:
-        asr = Qwen3ASRModel.LLM(max_model_len=MAX_MODEL_LEN, **_kw)
-    except TypeError as e:
-        _p("LLM() rejected max_model_len (%s); retrying without it" % e)
-        asr = Qwen3ASRModel.LLM(**_kw)
+    _cap = _capture_kw()
+    if _cap:
+        _p("graph capture tuning: %s" % _cap)
+    _attempts = [dict(_kw, max_model_len=MAX_MODEL_LEN, **_cap)] if _cap else []
+    _attempts += [dict(_kw, max_model_len=MAX_MODEL_LEN), dict(_kw)]
+    asr = None
+    for _i, _try in enumerate(_attempts, 1):
+        try:
+            asr = Qwen3ASRModel.LLM(**_try)
+            break
+        # ValueError = pydantic rejected a field; OOM is a RuntimeError and must NOT be retried.
+        except (TypeError, ValueError) as e:
+            if _i == len(_attempts):
+                raise
+            _p("LLM() rejected %s (%s); retrying with fewer kwargs"
+               % (sorted(set(_try) - set(_kw)), e))
     _state["asr"] = asr
     _state["ready"] = True
     _p("engine READY: %s (gpu_util=%.2f)" % (MODEL_REPO, GPU_UTIL))
@@ -88,24 +132,19 @@ def _decode_to_16k_mono(raw, filename):
     return y.astype("float32")
 
 
-async def _offline_transcribe(audio):
-    # Native offline transcription on the same load; max_tokens is raised then restored under lock.
+def _offline_transcribe(audio):
+    # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
     off_max = int(os.environ.get("OFFLINE_MAX_TOKENS", "4096") or 4096)
-
-    def _run():
-        sp = getattr(asr, "sampling_params", None)
-        old = getattr(sp, "max_tokens", None) if sp is not None else None
-        try:
-            if sp is not None:
-                sp.max_tokens = off_max
-            return asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
-        finally:
-            if sp is not None and old is not None:
-                sp.max_tokens = old
-
-    async with _infer_lock:
-        results = await asyncio.to_thread(_run)
+    sp = getattr(asr, "sampling_params", None)
+    old = getattr(sp, "max_tokens", None) if sp is not None else None
+    try:
+        if sp is not None:
+            sp.max_tokens = off_max
+        results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
+    finally:
+        if sp is not None and old is not None:
+            sp.max_tokens = old
     r = results[0] if results else None
     t = getattr(r, "text", None) if r is not None else None
     if t is None and isinstance(r, dict):
@@ -144,14 +183,15 @@ def build_app(supports):
     endpoints = []
     if has_stt:
         endpoints.append({"method": "POST", "path": "/v1/audio/transcriptions",
-                          "description": "Offline transcription (single / batch segments)"})
+                          "description": "Offline transcription (single / batch segments; %s)"
+                                         % tasks.ASYNC_HINT})
     if has_stream:
         endpoints.append({"method": "WS", "path": "/v1/audio/stream",
                           "description": "Streaming ASR (WebSocket)"})
 
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=has_stt)
 
     if has_stt:
         @app.post("/v1/audio/transcriptions")
@@ -159,7 +199,8 @@ def build_app(supports):
                                  model: str = Form(None),
                                  language: str = Form(None),
                                  response_format: str = Form("json"),
-                                 segments: str = Form(None)):
+                                 segments: str = Form(None),
+                                 async_: str = Form(None, alias="async")):
             if not _state["ready"]:
                 raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
             raw = await file.read()
@@ -169,31 +210,46 @@ def build_app(supports):
                 import json as _json
 
                 try:
-                    _segs = _json.loads(segments)
+                    segs = _json.loads(segments)
                 except Exception as e:
                     raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-                if not isinstance(_segs, list):
+                if not isinstance(segs, list):
                     raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
-                _out = []
-                for _seg in _segs:
-                    try:
-                        _a = float(_seg.get("start") or 0)
-                        _b = float(_seg.get("end") or 0)
-                        _lo = max(0, int(_a * 16000))
-                        _hi = min(len(audio), int(_b * 16000))
-                        if _hi <= _lo:
-                            _out.append({"text": ""})
-                            continue
-                        _t = await _offline_transcribe(audio[_lo:_hi])
-                        _out.append({"text": _t})
-                    except Exception as e:
-                        _out.append({"error": "stt failed: %s" % e})
-                return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": _out}
+
+                def _work_batch(ctx):
+                    out = []
+                    ctx.progress(stage="transcribe", done=0, total=len(segs))
+                    for i, seg in enumerate(segs, 1):
+                        ctx.checkpoint()
+                        try:
+                            lo = max(0, int(float(seg.get("start") or 0) * 16000))
+                            hi = min(len(audio), int(float(seg.get("end") or 0) * 16000))
+                            if hi <= lo:
+                                out.append({"text": ""})
+                            else:
+                                out.append({"text": _offline_transcribe(audio[lo:hi])})
+                        except tasks.Cancelled:
+                            raise
+                        except Exception as e:
+                            out.append({"error": "stt failed: %s" % e})
+                        finally:
+                            ctx.progress(done=i, total=len(segs))
+                    return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
+
+                return await tasks.dispatch(async_, "stt", MODEL_NAME, _work_batch,
+                                            fail="transcription failed", gate=_gpu)
+
             # SINGLE mode.
-            text = await _offline_transcribe(audio)
-            if response_format in ("text", "srt", "vtt"):
-                return Response(content=text, media_type="text/plain")
-            return {"text": text}
+            def _work(ctx):
+                ctx.progress(ratio=0.0, stage="transcribe")
+                text = _offline_transcribe(audio)
+                ctx.progress(ratio=1.0, stage="done")
+                if response_format in ("text", "srt", "vtt"):
+                    return Response(content=text, media_type="text/plain")
+                return {"text": text}
+
+            return await tasks.dispatch(async_, "stt", MODEL_NAME, _work,
+                                        fail="transcription failed", gate=_gpu)
 
     if has_stream:
         @app.websocket("/v1/audio/stream")
@@ -247,7 +303,7 @@ def build_app(supports):
             async def _roll():
                 # Fold the finalized text into prefix and start fresh, resetting encoder-cache use.
                 async with _infer_lock:
-                    await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
+                    await asyncio.to_thread(_gated, asr.finish_streaming_transcribe, S["st"])
                 S["prefix"] = _join(S["prefix"], getattr(S["st"], "text", "") or "")
                 S["st"] = _new_state()
                 S["samples"] = 0
@@ -256,14 +312,15 @@ def build_app(supports):
                 # Backstop: if the cache overflows despite the proactive roll, roll and retry once.
                 try:
                     async with _infer_lock:
-                        await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
+                        await asyncio.to_thread(_gated, asr.streaming_transcribe, cur, S["st"])
                 except Exception as e:
                     msg = str(e).lower()
                     if "encoder cache" in msg or "exceeds" in msg or "pre-allocated" in msg:
                         log.warning("encoder-cache overflow; rolling session and retrying: %s", e)
                         await _roll()
                         async with _infer_lock:
-                            await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
+                            await asyncio.to_thread(_gated, asr.streaming_transcribe,
+                                                    cur, S["st"])
                     else:
                         raise
                 S["samples"] += int(cur.shape[0])
@@ -306,7 +363,7 @@ def build_app(supports):
                 if pending.size:
                     await _feed(pending)
                 async with _infer_lock:
-                    await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
+                    await asyncio.to_thread(_gated, asr.finish_streaming_transcribe, S["st"])
                 await _emit("final")
                 await ws.close()
             except WebSocketDisconnect:
@@ -324,6 +381,8 @@ def build_app(supports):
 
 def run(supports):
     _p("stt_stream starting; model=%s port=%s supports=%s" % (MODEL_REPO, PORT, supports))
+    # Armed first: this load blocks the main thread, so only another thread can time it out.
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "qwen-asr vLLM")
     try:
         _load_blocking()
     except Exception as e:

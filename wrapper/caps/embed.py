@@ -4,12 +4,14 @@ import os
 import logging
 import threading
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import decode, spill
+from ..audioio import decode, spill, unlink
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -22,8 +24,6 @@ PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 _state = {"ready": False, "error": None, "inference": None, "device": "cpu", "dim": None}
-# Serialised and off the event loop: blocking inference here would stop /v1/models answering.
-_infer_lock = asyncio.Lock()
 
 
 def _load():
@@ -55,43 +55,41 @@ def build_app(supports):
     mount_metrics(app)
 
     endpoints = [{"method": "POST", "path": "/v1/audio/embeddings",
-                  "description": "Speaker embedding (one vector per clip)"}]
+                  "description": "Speaker embedding (one vector per clip; %s)"
+                                 % tasks.ASYNC_HINT}]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=True)
 
     @app.post("/v1/audio/embeddings")
-    async def embeddings(file: UploadFile = File(...)):
+    async def embeddings(file: UploadFile = File(...),
+                         async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         data = await file.read()
         path = await asyncio.to_thread(spill, data, file.filename)
 
-        def _work():
+        def _work(ctx):
             import numpy as np
 
+            ctx.progress(ratio=0.0, stage="decode")
             waveform, sr = decode(path)
+            ctx.progress(stage="inference")
             emb = _state["inference"]({"waveform": waveform, "sample_rate": sr})
-            return np.asarray(emb, dtype="float32").reshape(-1)
+            vec = np.asarray(emb, dtype="float32").reshape(-1)
+            _state["dim"] = int(vec.shape[0])
+            ctx.progress(ratio=1.0, stage="done")
+            return {"model": MODEL_NAME, "mode": "embed", "device": _state["device"],
+                    "dim": int(vec.shape[0]), "embedding": vec.tolist()}
 
-        try:
-            async with _infer_lock:
-                vec = await asyncio.to_thread(_work)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="embedding failed: %s" % e)
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-        _state["dim"] = int(vec.shape[0])
-        return {"model": MODEL_NAME, "mode": "embed", "device": _state["device"],
-                "dim": int(vec.shape[0]), "embedding": vec.tolist()}
+        return await tasks.dispatch(async_, "speaker_embed", MODEL_NAME, _work,
+                                    cleanup=lambda: unlink(path), fail="embedding failed")
 
     return app
 
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "pyannote embedding")
     app = build_app(supports)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

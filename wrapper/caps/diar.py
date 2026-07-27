@@ -8,9 +8,11 @@ import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import decode, spill
+from ..audioio import decode, spill, unlink
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -28,9 +30,6 @@ EMB_BATCH = os.environ.get("DIAR_EMB_BATCH", "auto")
 
 _state = {"ready": False, "error": None, "pipeline": None, "device": "cpu",
           "batch1": False}
-# Serialised and off the event loop: a 3h clip is ~10min of blocking work, which would
-# stop /v1/models answering and make llm-init report the whole instance as not ready.
-_infer_lock = asyncio.Lock()
 
 
 def _batch(raw, cuda, auto=32):
@@ -86,10 +85,28 @@ def _oom(e):
     return isinstance(e, (RuntimeError, MemoryError)) and "out of memory" in str(e).lower()
 
 
-def _infer(waveform, sr, kw):
+def _hook(ctx):
+    # pyannote reports (step, artifact, file=, total=, completed=) as each stage advances.
+    def hook(step, _artifact=None, file=None, total=None, completed=None):
+        ctx.checkpoint()
+        ctx.progress(stage=step, done=completed, total=total)
+
+    return hook
+
+
+def _call(pipe, waveform, sr, kw, hook):
+    # hook= is not in every pyannote build, and it is only a progress nicety.
+    try:
+        return pipe({"waveform": waveform, "sample_rate": sr}, hook=hook, **kw)
+    except TypeError as e:
+        log.warning("this pyannote build takes no hook= (%s); running without progress", e)
+        return pipe({"waveform": waveform, "sample_rate": sr}, **kw)
+
+
+def _infer(waveform, sr, kw, hook):
     pipe = _state["pipeline"]
     try:
-        return pipe({"waveform": waveform, "sample_rate": sr}, **kw)
+        return _call(pipe, waveform, sr, kw, hook)
     except Exception as e:
         # Slow beats a 500; remembered for the process so one oversized clip can't retry forever.
         if not _oom(e) or _state["batch1"]:
@@ -103,7 +120,7 @@ def _infer(waveform, sr, kw):
             pass
         _set_batches(pipe, lambda _raw: 1)
         _state["batch1"] = True
-        return pipe({"waveform": waveform, "sample_rate": sr}, **kw)
+        return _call(pipe, waveform, sr, kw, hook)
 
 
 def build_app(supports):
@@ -111,20 +128,22 @@ def build_app(supports):
     mount_metrics(app)
 
     endpoints = [{"method": "POST", "path": "/v1/audio/diarization",
-                  "description": "Speaker diarization (who spoke when)"}]
+                  "description": "Speaker diarization (who spoke when; %s)" % tasks.ASYNC_HINT}]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=True)
 
     @app.post("/v1/audio/diarization")
     async def diarize(file: UploadFile = File(...), num_speakers: str = Form(default=None),
                       min_speakers: str = Form(default=None),
-                      max_speakers: str = Form(default=None)):
+                      max_speakers: str = Form(default=None),
+                      async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "pipeline not ready")
         data = await file.read()
         path = await asyncio.to_thread(spill, data, file.filename)
-        try:
+
+        def _work(ctx):
             kw = {}
             if num_speakers:
                 kw["num_speakers"] = int(num_speakers)
@@ -132,37 +151,31 @@ def build_app(supports):
                 kw["min_speakers"] = int(min_speakers)
             if max_speakers:
                 kw["max_speakers"] = int(max_speakers)
-            def _work():
-                waveform, sr = decode(path)
-                dur = float(waveform.shape[-1]) / float(sr)
-                t0 = time.time()
-                res = _infer(waveform, sr, kw)
-                log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
-                return res
+            ctx.progress(ratio=0.0, stage="decode")
+            waveform, sr = decode(path)
+            dur = float(waveform.shape[-1]) / float(sr)
+            t0 = time.time()
+            out = _infer(waveform, sr, kw, _hook(ctx))
+            log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
+            # pyannote 4 wraps the Annotation in .speaker_diarization; v3 returned it directly.
+            ann = getattr(out, "speaker_diarization", out)
+            segs = [{"start": round(float(t.start), 3), "end": round(float(t.end), 3),
+                     "speaker": str(spk)}
+                    for t, _, spk in ann.itertracks(yield_label=True)]
+            speakers = sorted({s["speaker"] for s in segs})
+            ctx.progress(ratio=1.0, stage="done")
+            return {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
+                    "num_speakers": len(speakers), "speakers": speakers,
+                    "num_segments": len(segs), "segments": segs}
 
-            async with _infer_lock:
-                out = await asyncio.to_thread(_work)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="diarization failed: %s" % e)
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-        # pyannote 4 wraps the Annotation in .speaker_diarization; v3 returned it directly.
-        ann = getattr(out, "speaker_diarization", out)
-        segs = [{"start": round(float(t.start), 3), "end": round(float(t.end), 3),
-                 "speaker": str(spk)}
-                for t, _, spk in ann.itertracks(yield_label=True)]
-        speakers = sorted({s["speaker"] for s in segs})
-        return {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
-                "num_speakers": len(speakers), "speakers": speakers,
-                "num_segments": len(segs), "segments": segs}
+        return await tasks.dispatch(async_, "diar", MODEL_NAME, _work,
+                                    cleanup=lambda: unlink(path), fail="diarization failed")
 
     return app
 
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "pyannote pipeline")
     app = build_app(supports)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

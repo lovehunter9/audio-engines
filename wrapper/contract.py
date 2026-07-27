@@ -28,7 +28,8 @@ def models_payload(model_name, mode, supports, endpoints):
     }
 
 
-def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None):
+def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None,
+             task_api=False):
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
@@ -36,6 +37,12 @@ def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None
     advertised = [{"method": "GET", "path": "/v1/models",
                    "description": "Model self-report (id / mode / supports / endpoints)"}]
     advertised.extend(endpoints)
+    # Mounted and advertised together, so the task API can never be one without the other.
+    if task_api:
+        from . import tasks
+
+        tasks.mount(app)
+        advertised.extend(tasks.ENDPOINTS)
 
     def _err():
         try:

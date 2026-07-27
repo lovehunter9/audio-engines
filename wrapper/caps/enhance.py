@@ -9,12 +9,13 @@ import threading
 import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.responses import Response
 import uvicorn
 
+from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import decode_mono, spill
+from ..audioio import decode_mono, spill, unlink
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -42,9 +43,6 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
-# Serialised and off the event loop: decode + windowed inference + encode on a long clip
-# is minutes of blocking work, which would stop /v1/models answering.
-_infer_lock = asyncio.Lock()
 
 
 def _load():
@@ -139,14 +137,16 @@ def build_app(supports):
 
     endpoints = [{"method": "POST", "path": "/v1/audio/enhance",
                   "description": "Speech enhancement / denoise "
-                                 "(16k mono, format=wav|flac|ogg, default wav)"}]
+                                 "(16k mono, format=wav|flac|ogg, default wav; %s)"
+                                 % tasks.ASYNC_HINT}]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"])
+             error=lambda: _state["error"], task_api=True)
 
     @app.post("/v1/audio/enhance")
     async def enhance(file: UploadFile = File(...),
-                      fmt: str = Form(default="wav", alias="format")):
+                      fmt: str = Form(default="wav", alias="format"),
+                      async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         want = (fmt or "wav").strip().lower()
@@ -157,15 +157,18 @@ def build_app(supports):
         data = await file.read()
         path = await asyncio.to_thread(spill, data, file.filename)
 
-        def _work():
+        def _work(ctx):
             import numpy as np
 
+            ctx.progress(ratio=0.0, stage="decode")
             wav = decode_mono(path, SR)  # (1, time) @ 16k
             total = int(wav.shape[-1])
             chunk = int(CHUNK_S * SR)
             ov = int(OVERLAP_S * SR)
             if chunk <= 0 or total <= chunk:
+                ctx.progress(stage="inference", done=0, total=1)
                 out = _run(wav)      # short clip: single pass
+                ctx.progress(done=1, total=1)
             else:
                 # One window on the GPU at a time, so peak VRAM is flat in the clip's duration.
                 hop = max(1, chunk - ov)
@@ -175,12 +178,15 @@ def build_app(supports):
                 wsum = np.zeros(total, dtype="float32")
                 pos = 0
                 idx = 0
+                ctx.progress(stage="inference", done=0, total=nwin)
                 while pos < total:
+                    ctx.checkpoint()
                     end = min(total, pos + chunk)
                     n = end - pos
                     t0 = time.time()
                     enh = _run(wav[:, pos:end])
                     idx += 1
+                    ctx.progress(done=idx, total=nwin)
                     log.info("window %d/%d (%.0f-%.0fs) took %.1fs",
                              idx, nwin, pos / SR, end / SR, time.time() - t0)
                     if enh.shape[0] >= n:
@@ -204,26 +210,22 @@ def build_app(supports):
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:
                 out = out / peak  # guard against clipping
-            return _encode(out, want)
+            ctx.progress(stage="encode")
+            body, mime, codec = _encode(out, want)
+            ctx.progress(ratio=1.0, stage="done")
+            return tasks.Binary(body, mime, suffix="." + codec.split("/")[0],
+                                headers={"X-Audio-Model": MODEL_NAME,
+                                         "X-Audio-Mode": "enhance",
+                                         "X-Audio-Format": codec})
 
-        try:
-            async with _infer_lock:
-                body, mime, codec = await asyncio.to_thread(_work)
-        except Exception as e:
-            raise HTTPException(status_code=500, detail="enhance failed: %s" % e)
-        finally:
-            try:
-                os.unlink(path)
-            except Exception:
-                pass
-        return Response(content=body, media_type=mime,
-                        headers={"X-Audio-Model": MODEL_NAME, "X-Audio-Mode": "enhance",
-                                 "X-Audio-Format": codec})
+        return await tasks.dispatch(async_, "enhance", MODEL_NAME, _work,
+                                    cleanup=lambda: unlink(path), fail="enhance failed")
 
     return app
 
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "speechbrain enhancement")
     app = build_app(supports)
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)

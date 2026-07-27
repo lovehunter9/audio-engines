@@ -9,6 +9,7 @@ import threading
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 
@@ -493,6 +494,7 @@ def build_app(supports):
 
 def run(supports):
     threading.Thread(target=_load, daemon=True).start()
+    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "streaming sortformer")
     app = build_app(supports)
     _p("diar_stream starting; model=%s port=%s" % (MODEL_REPO, PORT))
     # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.

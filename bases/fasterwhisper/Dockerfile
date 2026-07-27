@@ -30,9 +30,11 @@ assert v >= (4, 56), t.__version__"; \
 
 WORKDIR /app
 COPY wrapper /app/wrapper
+# LOAD_TIMEOUT_S is generous here: first-use CT2 conversion is legitimate multi-GB work (README).
 ENV AUDIO_BASE=fasterwhisper \
     PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
+    LOAD_TIMEOUT_S=5400 \
     WRAPPER_PORT=8000
 
 # Serves directly here; the chart overrides command with its sentinel-wait shell, same module.
