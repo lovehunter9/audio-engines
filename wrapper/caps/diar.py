@@ -2,7 +2,6 @@
 import asyncio
 import os
 import logging
-import tempfile
 import threading
 import time
 
@@ -11,7 +10,7 @@ import uvicorn
 
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import decode
+from ..audioio import decode, spill
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -124,10 +123,7 @@ def build_app(supports):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "pipeline not ready")
         data = await file.read()
-        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            f.write(data)
-            path = f.name
+        path = await asyncio.to_thread(spill, data, file.filename)
         try:
             kw = {}
             if num_speakers:

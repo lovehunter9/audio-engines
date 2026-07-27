@@ -1,5 +1,15 @@
 # Decoding for the torch caps: soundfile first, since the pyannote image's torchcodec is broken.
 import io
+import os
+import tempfile
+
+
+def spill(data, filename=None, default_suffix=".wav"):
+    # Upload bytes -> a temp path the models can open. Blocking, so handlers thread it.
+    suffix = os.path.splitext(filename or "")[1] or default_suffix
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(data)
+        return f.name
 
 
 def decode(src):

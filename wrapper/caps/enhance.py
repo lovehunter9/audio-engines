@@ -14,7 +14,7 @@ import uvicorn
 
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import decode_mono
+from ..audioio import decode_mono, spill
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -155,10 +155,8 @@ def build_app(supports):
             raise HTTPException(status_code=400, detail="format must be one of %s"
                                                        % ", ".join(sorted(_FORMATS)))
         data = await file.read()
-        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            f.write(data)
-            path = f.name
+        path = await asyncio.to_thread(spill, data, file.filename)
+
         def _work():
             import numpy as np
 

@@ -10,6 +10,7 @@ import uvicorn
 
 from ..gpu import mount_metrics
 from ..contract import register
+from ..audioio import spill
 
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
@@ -83,8 +84,6 @@ def build_app(supports):
         # BATCH mode: `segments` JSON [{start,end,text,[language]}], times slice-relative.
         if segments:
             import json as _json
-            import io as _io
-            import soundfile as _sf
 
             try:
                 _segs = _json.loads(segments)
@@ -92,9 +91,16 @@ def build_app(supports):
                 raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
             if not isinstance(_segs, list):
                 raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+
+            def _decode_all():
+                import io as _io
+                import soundfile as _sf
+
+                a, sr = _sf.read(_io.BytesIO(data), dtype="float32", always_2d=True)
+                return a.mean(axis=1), int(sr)  # -> mono
+
             try:
-                _arr, _sr = _sf.read(_io.BytesIO(data), dtype="float32", always_2d=True)
-                _arr = _arr.mean(axis=1)  # -> mono
+                _arr, _sr = await asyncio.to_thread(_decode_all)
             except Exception as e:
                 raise HTTPException(status_code=400, detail="could not decode audio: %s" % e)
             _out = []
@@ -111,23 +117,30 @@ def build_app(supports):
                     if _hi <= _lo:
                         _out.append({"error": "empty segment"})
                         continue
-                    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
-                        _sf.write(_f.name, _arr[_lo:_hi], _sr, format="WAV", subtype="PCM_16")
-                        _sp = _f.name
                     _lg = (str(_seg.get("language") or language or "")).strip() or DEFAULT_LANGUAGE
 
-                    def _do_seg(_p=_sp, _t=_st, _l=_lg):
+                    # Slice write and align together, so neither touches the event loop.
+                    def _do_seg(_a=_lo, _b=_hi, _t=_st, _l=_lg):
+                        import soundfile as _sf
+
+                        _p = None
                         try:
-                            return _state["model"].align(audio=_p, text=_t, language=_l)
-                        except TypeError:
-                            return _state["model"].align(_p, _t, _l)
+                            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as _f:
+                                _p = _f.name
+                            _sf.write(_p, _arr[_a:_b], _sr, format="WAV", subtype="PCM_16")
+                            try:
+                                return _state["model"].align(audio=_p, text=_t, language=_l)
+                            except TypeError:
+                                return _state["model"].align(_p, _t, _l)
+                        finally:
+                            if _p:
+                                try:
+                                    os.unlink(_p)
+                                except Exception:
+                                    pass
 
                     async with _align_lock:
                         _res = await asyncio.to_thread(_do_seg)
-                    try:
-                        os.unlink(_sp)
-                    except Exception:
-                        pass
                     _ur = _res[0] if _res else []
                     _out.append({"language": _lg, "units": [
                         {"text": _field(u, "text", "word", "token"),
@@ -139,10 +152,7 @@ def build_app(supports):
         # SINGLE mode.
         if not (text or "").strip():
             raise HTTPException(status_code=400, detail="`text` is required for forced alignment")
-        suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-            f.write(data)
-            path = f.name
+        path = await asyncio.to_thread(spill, data, file.filename)
         try:
             lang = (language or "").strip() or DEFAULT_LANGUAGE
 
