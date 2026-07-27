@@ -1,4 +1,5 @@
 # Speaker diarization with pyannote.audio.
+import asyncio
 import os
 import logging
 import tempfile
@@ -28,6 +29,9 @@ EMB_BATCH = os.environ.get("DIAR_EMB_BATCH", "auto")
 
 _state = {"ready": False, "error": None, "pipeline": None, "device": "cpu",
           "batch1": False}
+# Serialised and off the event loop: a 3h clip is ~10min of blocking work, which would
+# stop /v1/models answering and make llm-init report the whole instance as not ready.
+_infer_lock = asyncio.Lock()
 
 
 def _batch(raw, cuda, auto=32):
@@ -132,11 +136,16 @@ def build_app(supports):
                 kw["min_speakers"] = int(min_speakers)
             if max_speakers:
                 kw["max_speakers"] = int(max_speakers)
-            waveform, sr = decode(path)
-            dur = float(waveform.shape[-1]) / float(sr)
-            t0 = time.time()
-            out = _infer(waveform, sr, kw)
-            log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
+            def _work():
+                waveform, sr = decode(path)
+                dur = float(waveform.shape[-1]) / float(sr)
+                t0 = time.time()
+                res = _infer(waveform, sr, kw)
+                log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
+                return res
+
+            async with _infer_lock:
+                out = await asyncio.to_thread(_work)
         except Exception as e:
             raise HTTPException(status_code=500, detail="diarization failed: %s" % e)
         finally:

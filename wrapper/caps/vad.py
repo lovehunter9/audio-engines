@@ -1,4 +1,5 @@
 # Voice activity detection with Silero VAD.
+import asyncio
 import os
 import logging
 import threading
@@ -34,6 +35,8 @@ VAD_MIN_SPEECH_MS = _envf("VAD_MIN_SPEECH_MS", 250)
 VAD_MAX_SPEECH_S = _envf("VAD_MAX_SPEECH_S", 30)
 
 _state = {"ready": False, "error": None, "model": None, "get_ts": None}
+# Serialised and off the event loop: blocking inference here would stop /v1/models answering.
+_infer_lock = asyncio.Lock()
 
 
 def _load():
@@ -71,8 +74,12 @@ def build_app(supports):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         data = await file.read()
+
+        def _decode():
+            return decode_mono(data, SR).squeeze(0).contiguous()
+
         try:
-            wav = decode_mono(data, SR).squeeze(0).contiguous()
+            wav = await asyncio.to_thread(_decode)
         except Exception as e:
             raise HTTPException(status_code=400, detail="audio decode failed: %s" % e)
 
@@ -97,9 +104,13 @@ def build_app(supports):
         if max_s and max_s > 0:
             kw["max_speech_duration_s"] = max_s
         log.info("vad params: %s", {k: v for k, v in kw.items() if k != "sampling_rate"})
-        try:
+        def _work():
             # silero get_speech_timestamps returns [{'start','end'}] in SAMPLES.
-            ts = _state["get_ts"](wav, _state["model"], **kw)
+            return _state["get_ts"](wav, _state["model"], **kw)
+
+        try:
+            async with _infer_lock:
+                ts = await asyncio.to_thread(_work)
         except Exception as e:
             raise HTTPException(status_code=500, detail="vad failed: %s" % e)
         segs = [{"start": round(t["start"] / SR, 3), "end": round(t["end"] / SR, 3)} for t in ts]

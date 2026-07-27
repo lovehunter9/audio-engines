@@ -1,4 +1,5 @@
 # Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
+import asyncio
 import contextlib
 import io
 import os
@@ -41,6 +42,9 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
+# Serialised and off the event loop: decode + windowed inference + encode on a long clip
+# is minutes of blocking work, which would stop /v1/models answering.
+_infer_lock = asyncio.Lock()
 
 
 def _load():
@@ -155,7 +159,7 @@ def build_app(supports):
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(data)
             path = f.name
-        try:
+        def _work():
             import numpy as np
 
             wav = decode_mono(path, SR)  # (1, time) @ 16k
@@ -202,7 +206,11 @@ def build_app(supports):
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:
                 out = out / peak  # guard against clipping
-            body, mime, codec = _encode(out, want)
+            return _encode(out, want)
+
+        try:
+            async with _infer_lock:
+                body, mime, codec = await asyncio.to_thread(_work)
         except Exception as e:
             raise HTTPException(status_code=500, detail="enhance failed: %s" % e)
         finally:

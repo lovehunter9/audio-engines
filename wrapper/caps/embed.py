@@ -1,4 +1,5 @@
 # Speaker embedding with pyannote.audio: one fixed-length vector for the whole clip.
+import asyncio
 import os
 import logging
 import tempfile
@@ -22,6 +23,8 @@ PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 _state = {"ready": False, "error": None, "inference": None, "device": "cpu", "dim": None}
+# Serialised and off the event loop: blocking inference here would stop /v1/models answering.
+_infer_lock = asyncio.Lock()
 
 
 def _load():
@@ -67,12 +70,16 @@ def build_app(supports):
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
             f.write(data)
             path = f.name
-        try:
+        def _work():
             import numpy as np
 
             waveform, sr = decode(path)
             emb = _state["inference"]({"waveform": waveform, "sample_rate": sr})
-            vec = np.asarray(emb, dtype="float32").reshape(-1)
+            return np.asarray(emb, dtype="float32").reshape(-1)
+
+        try:
+            async with _infer_lock:
+                vec = await asyncio.to_thread(_work)
         except Exception as e:
             raise HTTPException(status_code=500, detail="embedding failed: %s" % e)
         finally:
