@@ -1,33 +1,4 @@
-# Streaming / online speaker diarization via NVIDIA Streaming Sortformer on the
-# NeMo runtime. Ported from the tested diar_stream.py; deps baked at build time;
-# contract surface via wrapper.gpu + wrapper.contract.
-#
-# It is its own capability (NOT diar + a flag) because streaming diar must keep
-# speaker labels CONSISTENT across time at bounded latency, which Sortformer
-# solves end-to-end with an Arrival-Order Speaker Cache (AOSC) numbering
-# speakers by arrival time (deterministic on a given prefix, so spk_0/spk_1/..
-# are stable across steps).
-#
-# UNBOUNDED LENGTH via TWO PATHS:
-#   1. TRUE STREAMING (primary) keeps ONE streaming_state and feeds only
-#      NEWLY-arrived chunk-aligned audio through the incremental API
-#      (init_streaming_state + streaming_feat_loader + forward_streaming_step);
-#      total_preds accumulates per-80ms-frame activity for the WHOLE session,
-#      compute is O(1)/chunk, AOSC keeps column k == one speaker so there is no
-#      window/overlap/relabel and memory stays bounded.
-#   2. BOUNDED WINDOW (_run_window fallback) re-runs .diarize() over the last
-#      WINDOW_SEC, COMMITs older turns, and carries an OVERLAP_SEC tail so the
-#      next window's labels are remapped by time overlap — slower (O(n)/step)
-#      but correct, so diar_stream never regresses to "no output".
-# The path is chosen ONCE per connection BEFORE any client audio (the self-test
-# runs on silence). Both use ONLY public NeMo API on SortformerEncLabelModel +
-# sortformer_modules (no monkey-patching).
-#
-# Wire protocol on WS /v1/audio/diarize/stream: client sends optional
-# {"type":"start","sample_rate":16000}, then BINARY PCM16LE mono chunks, then
-# {"type":"stop"} (or close); server sends {"type":"ready"},
-# {"type":"partial"|"final","segments":[{"start","end","speaker"}],"speakers":[...]},
-# {"type":"error"}. Fusing these turns with ASR text is the CONSUMER's job.
+# Streaming speaker diarization on NVIDIA Streaming Sortformer; wire protocol in the README.
 import os
 import json
 import glob
@@ -51,37 +22,20 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (
     _src or "nvidia/diar_streaming_sortformer_4spk-v2.1")
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 
-# Streaming knobs (frames = 80ms). Defaults follow the card's HIGH-LATENCY preset
-# (~10s input latency, RTF~0.005). Rationale: transcription (a separate stt_stream
-# engine) stays real-time; for SPEAKERS accuracy matters more than immediacy, and a
-# bigger chunk lets the model attend over a whole ~10s span at once -> it resolves
-# RAPID adjacent turns (e.g. male->female->male) far better than the 480ms
-# low-latency chunk, which commits each fragment with too little context and smears
-# them onto the dominant speaker. NVIDIA's own DER table shows this preset is better
-# for conversational/meeting audio (CALLHOME 4spk 12.44 -> 11.72) AND ~18x cheaper.
-# Override per host via DIAR_* env:
-#   low latency (1.04s, live-first):  chunk_len=6   rc=7  fifo=188 update=144 cache=188
-#   high latency (10s, accuracy):     chunk_len=124 rc=1  fifo=124 update=124 cache=188
-#   very high latency (30.4s):        chunk_len=340 rc=40 fifo=40  update=300 cache=188
+# Streaming knobs in 80ms frames, defaulting to the card's high-latency preset (README has the set).
 CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "124") or 124)
 RIGHT_CONTEXT = int(os.environ.get("DIAR_RIGHT_CONTEXT", "1") or 1)
 FIFO_LEN = int(os.environ.get("DIAR_FIFO_LEN", "124") or 124)
 UPDATE_PERIOD = int(os.environ.get("DIAR_UPDATE_PERIOD", "124") or 124)
 SPKCACHE_LEN = int(os.environ.get("DIAR_SPKCACHE_LEN", "188") or 188)
-# Emit cadence: send a partial update every this many seconds of NEW audio (both paths).
-STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)
-# (Fallback-only) need a little audio before the first .diarize() pass is meaningful.
-MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)
-# (Fallback-only) UNBOUNDED-LENGTH ROLLING WINDOW: re-running .diarize() on the WHOLE
-# session buffer is O(n) per step -> O(n^2) over a session, and buffer + GPU work grow
-# without limit. So only ever diarize the last WINDOW_SEC (bounded compute AND memory),
-# COMMIT the older turns, and carry an OVERLAP_SEC tail across each roll so the NEW
-# window's labels can be remapped onto the previous window's by time-overlap.
+STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)   # partial every N s of audio
+MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)     # fallback: minimum to work on
+# Fallback only: diarize just the last WINDOW_SEC, or a session would cost O(n^2) and grow forever.
 WINDOW_SEC = float(os.environ.get("DIAR_STREAM_WINDOW_SEC", "60") or 60)
 OVERLAP_SEC = float(os.environ.get("DIAR_STREAM_OVERLAP_SEC", "12") or 12)
 
 _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
-# Sortformer's diarize() is blocking and not concurrency-safe; serialize inference.
+# Sortformer's diarize() is blocking and not concurrency-safe, so inference is serialized.
 _infer_lock = asyncio.Lock()
 
 
@@ -117,7 +71,6 @@ def _load():
             _p("no cached .nemo found; from_pretrained(%s) (needs network/token)" % MODEL_REPO)
             model = SortformerEncLabelModel.from_pretrained(MODEL_REPO, map_location=dev)
         model.eval()
-        # Configure the streaming behaviour (card: "Setting up Streaming Configuration").
         sm = model.sortformer_modules
         sm.chunk_len = CHUNK_LEN
         sm.chunk_right_context = RIGHT_CONTEXT
@@ -128,10 +81,7 @@ def _load():
             sm._check_streaming_parameters()
         except Exception as e:
             log.warning("streaming-parameter check skipped: %s", e)
-        # Probe the TRUE incremental-streaming API: if present we feed only NEW audio
-        # per step (O(1)/chunk, real-time); if ANY piece is missing we fall back to the
-        # bounded-window .diarize() path. n_spk / subsampling_factor drive
-        # preds->timestamps (each output frame = subsampling_factor * 10ms hop = 80ms).
+        # Probe the incremental API; if any piece is missing, the window .diarize() path takes over.
         _state["n_spk"] = int(getattr(sm, "n_spk", 4) or 4)
         _state["subsampling"] = int(getattr(sm, "subsampling_factor", 8) or 8)
         _state["streaming_ok"] = bool(
@@ -158,9 +108,7 @@ def _spk_name(spk):
 
 
 def _parse_segments(raw):
-    # The card's diarize() yields items like "start end speaker" (str) across
-    # versions; tolerate tuples/objects too so a NeMo minor bump can't break the
-    # wire format.
+    # diarize() yields "start end speaker"; tolerate tuples/objects so a NeMo bump can't break us.
     out = []
     for seg in (raw or []):
         s = e = spk = None
@@ -185,8 +133,7 @@ def _parse_segments(raw):
 
 
 def _merge_segments(segs, gap=0.8):
-    # Collapse adjacent same-speaker turns (short gaps bridged) so the committed
-    # timeline and the seam between committed+live stay clean.
+    # Collapse adjacent same-speaker turns, bridging short gaps, to keep the timeline clean.
     s2 = sorted(segs, key=lambda x: (x["start"], x["end"]))
     out = []
     for s in s2:
@@ -199,10 +146,7 @@ def _merge_segments(segs, gap=0.8):
 
 
 def _preds_to_segments(preds, frame_sec, thr=0.5):
-    # preds: numpy [T, n_spk] per-frame speaker-activity probabilities (each frame
-    # spans frame_sec = 80ms) from the streaming model; threshold each speaker column
-    # and collapse contiguous active frames into ABS [start,end] turns (AOSC keeps
-    # column k == one speaker so labels are globally stable, NO remap).
+    # preds [T, n_spk] of activity per 80ms frame; AOSC pins column k to one speaker, so no remap.
     out = []
     if preds is None or getattr(preds, "size", 0) == 0:
         return out
@@ -227,11 +171,7 @@ def _preds_to_segments(preds, frame_sec, thr=0.5):
 
 
 def _diarize(buf):
-    # FALLBACK path only (used when the streaming API is absent): buf = float32 mono
-    # @16k; returns parsed segments over the buffer (times RELATIVE to buf[0]);
-    # callers keep buf bounded to WINDOW_SEC. This is the OLD per-step re-diarize
-    # (O(n)/call), kept solely as a safety net if a NeMo version lacks
-    # forward_streaming_step.
+    # Fallback path: float32 mono @16k in, segments relative to buf[0] out, O(n) per call.
     model = _state["model"]
     res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
     return _parse_segments(res[0] if res else [])
@@ -260,25 +200,12 @@ def _resample_linear(seg, src_sr):
 
 
 class _FallbackToWindow(Exception):
-    # Raised by the streaming path's pre-flight self-test if the incremental API is
-    # not usable on this NeMo build, so the handler switches to the window path
-    # BEFORE any real audio is consumed (no data lost).
+    # Raised by the pre-flight self-test, so the switch happens before any client audio arrives.
     pass
 
 
 async def _run_streaming(ws):
-    # TRUE incremental streaming, done the way the model was validated: the key to
-    # QUALITY is matching NeMo's reference path — extract log-mel over a CONTIGUOUS
-    # span (consistent per-feature normalization) and let streaming_feat_loader hand
-    # each chunk its left/right neighbour context (per-tiny-block extraction
-    # re-normalizes every ~2s and drops seam context, so the SAME speaker splits and
-    # DIFFERENT speakers merge). So we keep a rolling WINDOW of recent audio,
-    # re-extract features over the WHOLE window each step, run the loader over it, and
-    # only feed forward_streaming_step for chunks that are NEW (not yet committed) and
-    # already have full right-context in the window (committed chunks are SKIPPED but
-    # still give new chunks left context + shared normalization). total_preds
-    # accumulates per-80ms-frame activity for the whole session. Model compute stays
-    # O(1)/chunk, feature extraction O(window)/step (cheap log-mel), memory bounded.
+    # Features must span a CONTIGUOUS window: per-block normalization splits one speaker into two.
     import numpy as np
     import torch
 
@@ -294,9 +221,7 @@ async def _run_streaming(ws):
     chunk_audio = CS * hop                       # samples committed per chunk
     rc_frames = CRs
     step_samples = max(8000, int(STEP_SEC * 16000))          # process/emit cadence
-    # Rolling window kept for extraction: long enough for stable normalization + left
-    # context, chunk-aligned, re-extracted each step and trimmed to keep_chunks from
-    # the committed frontier.
+    # Chunk-aligned window: enough for stable normalization plus left context, trimmed each step.
     keep_chunks = max(8, int(WINDOW_SEC * 16000) // chunk_audio)
     sample_rate = 16000
     buf = np.zeros((0,), dtype="float32")
@@ -310,9 +235,7 @@ async def _run_streaming(ws):
         st["committed"] = 0
 
     def _process(final=False):
-        # Feed every NEW chunk in the current window that has full right context (or
-        # all remaining chunks when final); feat_seq_offset is ALWAYS 0 (state carries
-        # history).
+        # Feed each new chunk that has full right context; offset stays 0 since state carries history.
         nonlocal buf
         if buf.size < hop:
             return
@@ -336,8 +259,7 @@ async def _run_streaming(ws):
                     streaming_state=ss["state"], total_preds=ss["preds"],
                     left_offset=lo, right_offset=ro)
                 st["committed"] += 1
-        # Trim the window to keep_chunks behind the committed frontier (keeps left
-        # context + a normalization window; chunk-aligned so the grid never shifts).
+        # Trim behind the committed frontier, chunk-aligned so the feature grid never shifts.
         max_base = st["committed"] - keep_chunks
         if max_base > st["base_chunks"]:
             drop = max_base - st["base_chunks"]
@@ -345,8 +267,7 @@ async def _run_streaming(ws):
             st["base_chunks"] = max_base
 
     def _selftest():
-        # Exercise the whole pipeline on ~2 chunks of silence then RESET so the probe
-        # doesn't shift the real session; any error here => fall back to window mode.
+        # Run the pipeline on silence, then reset, so the probe cannot shift the real session.
         nonlocal buf
         _init_stream()
         buf = np.zeros((CS * 3 * hop,), dtype="float32")
@@ -409,7 +330,7 @@ async def _run_streaming(ws):
             if total_new - last_emit >= step_samples:
                 last_emit = total_new
                 await _send("partial")
-    # Final: feed all remaining chunks (accept rc=0 on the trailing chunk), emit final.
+    # Feed the remaining chunks, accepting rc=0 on the trailing one.
     async with _infer_lock:
         await asyncio.to_thread(_process, True)
     await _send("final")
@@ -417,14 +338,11 @@ async def _run_streaming(ws):
 
 
 async def _run_window(ws):
-    # FALLBACK path: the ORIGINAL bounded-window per-step .diarize() implementation,
-    # used only if the streaming self-test fails — slower (re-diarizes the active
-    # window each step) but correct so diar_stream never regresses to "no output".
+    # Fallback: re-diarize the active window each step — slower, but never "no output".
     import numpy as np
 
     sample_rate = 16000
-    # Rolling window: `buf` holds only the ACTIVE window ([base_offset, now]).
-    buf = np.zeros((0,), dtype="float32")
+    buf = np.zeros((0,), dtype="float32")   # only the active window, [base_offset, now]
     since = 0                                # samples fed since last diarize
     step_samples = max(16000, int(STEP_SEC * 16000))
     min_samples = max(8000, int(MIN_SEC * 16000))
@@ -437,11 +355,7 @@ async def _run_window(ws):
     canon = {"n": 0}         # next canonical speaker index
 
     def _relabel(local_abs):
-        # Map this window's LOCAL speaker labels (already in ABS time) to stable
-        # SESSION-canonical labels: within a window Sortformer's arrival-order (AOSC)
-        # labels are stable so win_map is sticky; after a roll, anchor the new window's
-        # labels to the previous window's via max overlap with overlap_ref (the carried
-        # tail), unmatched speakers get a fresh id.
+        # Window labels are AOSC-stable, so after a roll anchor them by max overlap with the tail.
         order, by_spk = [], {}
         for s in local_abs:
             if s["speaker"] not in by_spk:
@@ -473,7 +387,7 @@ async def _run_window(ws):
                 for s in local_abs]
 
     async def _current():
-        # Diarize ONLY the active window; return canonical ABS segments for it.
+        # Diarize only the active window, returning canonical absolute-time segments.
         if buf.shape[0] < min_samples:
             return []
         async with _infer_lock:
@@ -483,9 +397,7 @@ async def _run_window(ws):
         return _relabel(local_abs)
 
     def _roll(cur):
-        # Once the window is full, freeze turns before the roll boundary into
-        # `committed`, keep only the last OVERLAP_SEC of audio, and stash the tail's
-        # canonical segments as the remap reference for the next window.
+        # Freeze turns before the boundary, keep the last OVERLAP_SEC, stash its labels to remap by.
         nonlocal buf, base_offset, overlap_ref, win_map, committed
         if buf.shape[0] < window_samples or overlap_samples <= 0:
             return
@@ -583,7 +495,6 @@ def run(supports):
     threading.Thread(target=_load, daemon=True).start()
     app = build_app(supports)
     _p("diar_stream starting; model=%s port=%s" % (MODEL_REPO, PORT))
-    # Bursty offloaded inference + a client-paced feed, so disable server-initiated
-    # WS keepalive to avoid dropping a healthy session on 1011.
+    # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
                 ws_ping_interval=None, ws_ping_timeout=None)

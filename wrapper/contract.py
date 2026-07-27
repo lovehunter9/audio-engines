@@ -1,18 +1,9 @@
-# llm-init engine contract surface shared by every audio-engine wrapper.
-#
-# Registers the endpoints llm-init actually consumes, with llama-server
-# semantics so llm-init's uniform proxy probes work unchanged:
-#   GET /v1/models  -> 200 + {data:[{id,mode,supports,endpoints}]} ONLY when the
-#                      model is loaded; 503 while loading. llm-init WaitAlive
-#                      polls this until 200 (== ready) and Ready matches id.
-#   GET /health|/healthz|/readyz -> 200 when ready, else 503 (engine's own).
-# GET /metrics (gpu_*) is mounted separately via gpu.mount_metrics.
+# The llm-init contract (see README): /v1/models 503s until loaded, plus /health; /metrics is in gpu.py.
 import os
 
 
 def parse_supports():
-    # MODEL_SUPPORTS is the clone-time capability CSV, passed through by llm-init
-    # verbatim; the engine self-reports it (no llm-init interpretation).
+    # The clone-time capability CSV, relayed verbatim by llm-init for the engine to self-report.
     raw = os.environ.get("MODEL_SUPPORTS", "") or ""
     out = []
     for tok in raw.split(","):
@@ -41,8 +32,7 @@ def register(app, *, model_name, mode, supports, endpoints, is_ready, error=None
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
-    # The self-report lists itself: a caller reading /v1/models should see every
-    # path the engine serves, and each cap only knows its own.
+    # The self-report lists itself, since a caller should see every path the engine serves.
     advertised = [{"method": "GET", "path": "/v1/models",
                    "description": "Model self-report (id / mode / supports / endpoints)"}]
     advertised.extend(endpoints)

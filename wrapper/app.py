@@ -1,18 +1,10 @@
-# Entrypoint shared by every audio base image: pick the capability module from
-# MODEL_SUPPORTS and run it. ONE instance loads exactly ONE model, so when the
-# requested capabilities span several modules only the first is served — the
-# others belong to their own clones.
-#
-# AUDIO_BASE (baked into each image) selects the routing table: the same cap
-# name maps to different engines per base (`stt` is qwen-asr on the qwen base
-# and CTranslate2 on the fasterwhisper one).
+# Entrypoint for every base image: run the one wrapper.caps module that serves this clone's caps.
 import os
 import sys
 
 from .contract import parse_supports
 
-# base -> ordered [(capability set served together, module in wrapper.caps)].
-# Order is the tie-break when a clone asks for caps from several modules.
+# base -> ordered [(caps served together, module)]; first match wins, since one instance = one model.
 ROUTES = {
     "qwen": [
         (("stt", "stt_stream"), "stt_stream"),

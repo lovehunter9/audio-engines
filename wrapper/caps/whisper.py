@@ -1,8 +1,4 @@
-# Whisper-family offline STT on CTranslate2 (faster-whisper). Ported from the
-# tested stt_fw.py; deps baked at build time; contract surface via wrapper.gpu +
-# wrapper.contract. Serves the OpenAI STT pair: transcriptions (same-language)
-# and translations (speech -> English, Whisper's native "translate" task).
-# Preferred over vLLM-Whisper on a time-sliced vGPU, where it is ~10x faster.
+# Whisper-family STT on CTranslate2: the OpenAI pair, transcriptions + translations (-> English).
 import os
 import asyncio
 import logging
@@ -29,14 +25,12 @@ PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 COMPUTE_TYPE = os.environ.get("FW_COMPUTE_TYPE", "float16")
 DEVICE = os.environ.get("FW_DEVICE", "auto")
 BEAM_SIZE = int(os.environ.get("FW_BEAM_SIZE", "5") or 5)
-# The speedup: WhisperX-style BatchedInferencePipeline (VAD-cut + parallel
-# batched decode), far faster than sequential and friendlier to a sliced vGPU.
+# WhisperX-style VAD-cut + parallel batched decode; the speedup on a sliced vGPU.
 BATCHED = os.environ.get("FW_BATCHED", "1").lower() in ("1", "true", "yes")
 BATCH_SIZE = int(os.environ.get("FW_BATCH_SIZE", "16") or 16)
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-# Common full-name -> ISO 639-1 so callers can send "English"/"Chinese" and not
-# just "en"/"zh"; unknown values pass through lower-cased.
+# So callers can send "English" as well as "en"; anything unknown passes through lower-cased.
 _LANG = {"english": "en", "chinese": "zh", "mandarin": "zh", "japanese": "ja",
          "korean": "ko", "french": "fr", "german": "de", "spanish": "es",
          "russian": "ru", "italian": "it", "portuguese": "pt", "arabic": "ar"}
@@ -58,18 +52,14 @@ def _is_ct2(d):
     return os.path.isfile(os.path.join(d, "model.bin"))
 
 
-# Files faster-whisper reads next to the weights. Without them it would reach
-# out to the Hub for the tokenizer, which fails in the engine's offline runtime.
+# Files faster-whisper reads beside the weights; without them it hits the Hub, which is offline here.
 _CT2_COPY = ("tokenizer.json", "preprocessor_config.json", "tokenizer_config.json",
              "special_tokens_map.json", "added_tokens.json", "normalizer.json",
              "vocab.json", "merges.txt")
 
 
 def _ensure_ct2(src, quantization):
-    # A Whisper checkpoint in transformers format (openai/whisper-large-v3 and
-    # every fine-tune of it) cannot be loaded by CTranslate2 as-is, and users
-    # legitimately want those model ids. Convert once into the shared HF cache
-    # volume so restarts and sibling instances reuse it.
+    # CT2 cannot load transformers format (openai/whisper-large-v3), so convert once into the cache.
     if _is_ct2(src):
         return src
 
@@ -83,8 +73,7 @@ def _ensure_ct2(src, quantization):
     from ctranslate2.converters import TransformersConverter
 
     log.info("%s is not CTranslate2; converting (this runs once, minutes)", MODEL_REPO)
-    # Per-pid staging dir: two instances of the same model may load at once and
-    # must not delete each other's half-written conversion.
+    # Per-pid staging: two instances of one model can load at once and must not collide.
     tmp = "%s.converting.%d" % (out, os.getpid())
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(root, exist_ok=True)
@@ -94,8 +83,7 @@ def _ensure_ct2(src, quantization):
                               load_as_float16=quantization.startswith("float16")).convert(
             tmp, quantization=quantization, force=True)
     except BaseException:
-        # A half-written conversion is multiple GB on a shared cache volume and
-        # nothing would ever reclaim it, since the next attempt stages elsewhere.
+        # Multiple GB on a shared volume that nothing would reclaim: the next try stages elsewhere.
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     shutil.rmtree(out, ignore_errors=True)
@@ -156,9 +144,7 @@ def _parse_temp(raw):
 
 def _run(task, data, filename, language, response_format, temperature, prompt,
          vad_filter, word_ts):
-    # Blocking; callers hand it to asyncio.to_thread so the event loop stays free
-    # for the concurrent STT fan-out. No lock: CTranslate2 is thread-safe and
-    # parallel decode is the whole point.
+    # Blocking, so callers use to_thread; no lock, since CTranslate2 is thread-safe by design.
     if not _state["ready"]:
         raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
     suffix = os.path.splitext(filename or "a.wav")[1] or ".wav"
@@ -177,9 +163,7 @@ def _run(task, data, filename, language, response_format, temperature, prompt,
         temp = _parse_temp(temperature)
         pipe = _state.get("pipeline")
         if pipe is not None:
-            # Batched fast path (VAD-cut + parallel decode): owns its VAD and
-            # needs a scalar temperature; falls back to buffered if this
-            # faster_whisper build rejects a kwarg.
+            # The batched path owns its VAD and needs a scalar temperature.
             bkw = dict(kw)
             bkw["temperature"] = temp[0] if isinstance(temp, tuple) else temp
             bkw["batch_size"] = BATCH_SIZE
@@ -232,8 +216,7 @@ def _run(task, data, filename, language, response_format, temperature, prompt,
 
 
 def _ffmpeg_slice_wav(src, start, dur):
-    # Cut [start, start+dur] out of `src` to 16k mono WAV bytes via ffmpeg stdout
-    # (no soundfile in this image).
+    # To 16k mono WAV bytes on ffmpeg's stdout, since this image has no soundfile.
     r = subprocess.run(
         ["ffmpeg", "-y", "-nostdin", "-ss", "%.3f" % start, "-i", src,
          "-t", "%.3f" % dur, "-ac", "1", "-ar", "16000", "-f", "wav", "pipe:1"],
@@ -244,9 +227,7 @@ def _ffmpeg_slice_wav(src, start, dur):
 
 
 def _stt_batch(data, fn, segs, language, temperature, prompt):
-    # Write the clip once, ffmpeg-slice each segment, transcribe each via _run
-    # (one {text}|{error} per segment, per-item try/except so one bad segment
-    # can't fail the batch).
+    # One {text}|{error} per segment, so a single bad segment cannot fail the batch.
     suffix = os.path.splitext(fn or "a.wav")[1] or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as wf:
         wf.write(data)

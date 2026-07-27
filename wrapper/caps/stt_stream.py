@@ -1,8 +1,4 @@
-# Qwen3-ASR served via qwen-asr's in-process vLLM engine (Qwen3ASRModel.LLM),
-# loaded ONCE. Serves offline stt (asr.transcribe — genuine offline API, NOT a
-# streaming fake) and streaming stt_stream (asr.streaming_transcribe over a
-# WebSocket) off the SAME load. Ported from the tested stream.py; deps baked at
-# build time (no runtime pip); contract surface via wrapper.gpu + wrapper.contract.
+# Qwen3-ASR on one in-process vLLM load, serving BOTH offline stt and WebSocket stt_stream.
 import os
 import json
 import asyncio
@@ -25,20 +21,17 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
 MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
-# max_model_len holds ONE unit of work (offline chunk <=540s+4096 out, or a
-# ~240s rolled streaming window), DERIVED from the GPU quota by the chart.
+# Holds ONE unit of work (a <=540s offline chunk or a ~240s streaming window); chart-derived.
 MAX_MODEL_LEN = int(os.environ.get("STREAM_MAX_LEN", "16384") or 16384)
 UNFIXED_CHUNK_NUM = int(os.environ.get("STREAM_UNFIXED_CHUNK_NUM", "2") or 2)
 UNFIXED_TOKEN_NUM = int(os.environ.get("STREAM_UNFIXED_TOKEN_NUM", "5") or 5)
 CHUNK_SIZE_SEC = float(os.environ.get("STREAM_CHUNK_SIZE_SEC", "2.0") or 2.0)
 DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
-# Roll (finalize + re-init) every ROLL_SEC so a long session never overflows
-# vLLM's ~8192-token audio encoder cache; keeps memory bounded, transcript monotonic.
+# Finalize + re-init this often, so a long session never overflows vLLM's ~8192-token encoder cache.
 ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
 
 _state = {"ready": False, "error": None, "asr": None}
-# vLLM's offline generate is blocking + not concurrency-safe; serialize all
-# inference across connections behind one lock.
+# vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
 
 
@@ -47,15 +40,11 @@ def _p(msg):
 
 
 def _load_blocking():
-    # Construct the qwen-asr vLLM engine on the MAIN process/thread BEFORE uvicorn
-    # (vLLM installs signal handlers + spawns workers at construction, so a daemon
-    # thread fails); health comes up only after.
+    # On the MAIN thread before uvicorn: vLLM installs signal handlers, so a daemon thread fails.
     _p("importing qwen_asr ...")
     from qwen_asr import Qwen3ASRModel
 
-    # Offline long-audio: qwen-asr silence-splits at MAX_ASR_INPUT_SECONDS and
-    # seamlessly join-merges, but the ~8192-token encoder cache (~600s) is the real
-    # ceiling; lower the window to 540s so asr.transcribe(whole) fits in one call.
+    # qwen-asr silence-splits at this window; 540s keeps one call inside the ~600s encoder cache.
     try:
         import qwen_asr.inference.qwen3_asr as _qasr_mod
         import qwen_asr.inference.utils as _qasr_utils
@@ -68,8 +57,7 @@ def _load_blocking():
         _p("WARN could not patch MAX_ASR_INPUT_SECONDS (%s)" % e)
     _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
        % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
-    # gpu_memory_utilization + max_model_len are vLLM LLM kwargs qwen-asr forwards;
-    # retry without max_model_len if a build doesn't forward it.
+    # These are vLLM kwargs qwen-asr forwards; retry without max_model_len if a build does not.
     _kw = dict(model=MODEL_REPO, gpu_memory_utilization=GPU_UTIL, max_new_tokens=MAX_NEW_TOKENS)
     try:
         asr = Qwen3ASRModel.LLM(max_model_len=MAX_MODEL_LEN, **_kw)
@@ -101,9 +89,7 @@ def _decode_to_16k_mono(raw, filename):
 
 
 async def _offline_transcribe(audio):
-    # Native offline transcription on the SAME loaded model: whole clip to
-    # asr.transcribe() (qwen-asr internally splits at 540s + seamlessly merges).
-    # max_tokens temporarily raised for offline chunks then restored (serialised).
+    # Native offline transcription on the same load; max_tokens is raised then restored under lock.
     asr = _state["asr"]
     off_max = int(os.environ.get("OFFLINE_MAX_TOKENS", "4096") or 4096)
 
@@ -232,8 +218,7 @@ def build_app(supports):
                     chunk_size_sec=CHUNK_SIZE_SEC,
                 )
 
-            # prefix = text finalized by previous rolls; samples = audio fed to
-            # the current state (drives the proactive roll).
+            # prefix = text finalized by earlier rolls; samples = audio fed to the current state.
             S = {"st": _new_state(), "prefix": "", "samples": 0}
             roll_samples = max(16000, int(ROLL_SEC * 16000))
             pending = np.zeros((0,), dtype="float32")
@@ -260,8 +245,7 @@ def build_app(supports):
                 }))
 
             async def _roll():
-                # Finalize current segment, fold text into prefix, start a fresh
-                # state so encoder-cache usage resets to ~zero.
+                # Fold the finalized text into prefix and start fresh, resetting encoder-cache use.
                 async with _infer_lock:
                     await asyncio.to_thread(asr.finish_streaming_transcribe, S["st"])
                 S["prefix"] = _join(S["prefix"], getattr(S["st"], "text", "") or "")
@@ -269,8 +253,7 @@ def build_app(supports):
                 S["samples"] = 0
 
             async def _feed(cur):
-                # Backstop: if the encoder cache overflows despite the proactive
-                # roll, roll and retry the chunk once.
+                # Backstop: if the cache overflows despite the proactive roll, roll and retry once.
                 try:
                     async with _infer_lock:
                         await asyncio.to_thread(asr.streaming_transcribe, cur, S["st"])
@@ -349,7 +332,6 @@ def run(supports):
         log.exception("engine load failed: %s", e)
     app = build_app(supports)
     _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
-    # Disable server-initiated WS keepalive: bursty offloaded inference can lag on
-    # Pong past the 20s ping timeout and drop a healthy session with 1011.
+    # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
                 ws_ping_interval=None, ws_ping_timeout=None)

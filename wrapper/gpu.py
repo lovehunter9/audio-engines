@@ -1,7 +1,4 @@
-# Generic GPU /metrics for every audio-engine wrapper. Emits the exact gauge
-# names llm-init's proxyMetricsStats relays (gpu_present / gpu_mem_used_bytes /
-# gpu_mem_total_bytes / gpu_util_ratio) — NOT the old audio_gpu_* names.
-# import + mount_metrics(app).
+# GET /metrics for every wrapper, using the exact gauge names llm-init relays (NOT audio_gpu_*).
 
 
 def gpu_metrics_text():

@@ -1,8 +1,4 @@
-# Audio decoding shared by the torch-based caps (vad / diar / embed / enhance).
-# Everything goes through soundfile first and falls back to torchaudio, then to
-# the stdlib wave reader: the pyannote image ships a broken torchcodec
-# AudioDecoder that torchaudio.load reaches for on some inputs, and feeding
-# pyannote an in-memory waveform sidesteps it entirely.
+# Decoding for the torch caps: soundfile first, since the pyannote image's torchcodec is broken.
 import io
 
 

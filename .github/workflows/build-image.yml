@@ -1,9 +1,4 @@
-# Shared build for every base image, called by the per-base <base>-ci.yml (which
-# owns the triggers and path filters). Mirrors llm-gateway backend-ci's
-# docker-build job: push to main / v* tag / workflow_dispatch publishes to Docker
-# Hub; PRs build only (forks have no secrets). Local dev builds the SAME
-# Dockerfile by hand and pushes to a personal registry (see Makefile) — no
-# separate dev build path.
+# Shared build called by each <base>-ci.yml: main / v* tag / dispatch publishes, PRs build only.
 name: build-image
 
 on:
@@ -53,9 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A base too big to unpack on a runner ships an append.env instead of a
-      # Dockerfile and is published through the registry by crane — see
-      # scripts/append-image.sh.
+      # A base too big to unpack ships append.env instead, and goes through crane (README).
       - name: pick build method
         id: method
         run: |
@@ -65,11 +58,7 @@ jobs:
             echo "kind=docker" >> "$GITHUB_OUTPUT"
           fi
 
-      # The CUDA bases are tens of GB unpacked and the runner has ONE ~72 GB
-      # filesystem — /mnt is a directory on it, not a second disk, so relocating
-      # Docker there frees nothing. The only real room comes from deleting the
-      # preinstalled toolchains and the runner's cached images. Must run BEFORE
-      # buildx starts, since the builder stores everything in /var/lib/docker.
+      # The runner has ONE ~72 GB filesystem (/mnt is a directory on it), so the toolchains must go.
       - name: make room for the image
         if: steps.method.outputs.kind == 'docker'
         run: |
@@ -82,9 +71,7 @@ jobs:
           docker image prune -af
           df -h /
 
-      # The namespace is the publishing DESTINATION and is NOT derived from
-      # DOCKERHUB_USERNAME, which is the LOGIN identity (a personal account with
-      # push permission to the org).
+      # namespace is the DESTINATION; DOCKERHUB_USERNAME is only the login identity, not derived from.
       - name: compute image metadata
         id: meta
         env:
@@ -145,8 +132,7 @@ jobs:
             fi
           } >> "$GITHUB_OUTPUT"
 
-      # Before setup-buildx, which pulls moby/buildkit: an anonymous pull of it
-      # times out when several bases build at once, an authenticated one doesn't.
+      # Before setup-buildx: its anonymous moby/buildkit pull times out when bases build in parallel.
       - name: log in to Docker Hub
         if: steps.meta.outputs.push == 'true'
         uses: docker/login-action@v3
@@ -157,8 +143,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: steps.method.outputs.kind == 'docker'
 
-      # No type=gha cache: these layers dwarf the 10 GB per-repo cache limit, so
-      # caching only thrashes it, and pulling the base on a runner is fast.
+      # No type=gha cache: these layers dwarf the 10 GB per-repo limit, so it would only thrash.
       - name: docker build (push on main / tag)
         if: steps.method.outputs.kind == 'docker'
         uses: docker/build-push-action@v6
@@ -185,9 +170,7 @@ jobs:
             | sudo tar -xz -C /usr/local/bin crane
           crane version
 
-      # Nothing to push to on a PR (no secrets, no login), and crane cannot
-      # produce the image without a registry to mount the base's blobs into, so a
-      # PR check on this base is limited to the lint job above.
+      # No registry to mount the base's blobs into on a PR, so such a base is lint-only there.
       - name: crane append (push on main / tag)
         if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
         env:

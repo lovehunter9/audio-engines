@@ -1,7 +1,4 @@
-# Forced alignment (audio+text -> word/char timestamps) via Qwen3-ForcedAligner
-# (a SEPARATE model from the ASR engine; align is always its own instance).
-# Ported from the tested align.py; deps baked at build time; contract surface
-# via wrapper.gpu + wrapper.contract.
+# Forced alignment via Qwen3-ForcedAligner, a separate model from ASR, hence always its own instance.
 import os
 import tempfile
 import threading
@@ -24,14 +21,11 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-# Qwen3ForcedAligner.align() takes `language` as a REQUIRED argument, but tolerates
-# an unknown value (verified: "auto"/"xx" align byte-identically to "en"/"zh"), so
-# callers may omit it and still get correct timestamps.
+# align() REQUIRES language but tolerates an unknown one: "auto" aligns byte-identically to "en".
 DEFAULT_LANGUAGE = "auto"
 
 _state = {"ready": False, "error": None, "model": None, "device": "cpu"}
-# Serialise .align() across connections AND run it off the event loop: its
-# blocking inference (30~110s under vGPU) otherwise freezes uvicorn.
+# Serialised and off the event loop: 30~110s of blocking inference under a vGPU would freeze uvicorn.
 _align_lock = asyncio.Lock()
 
 
@@ -86,8 +80,7 @@ def build_app(supports):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
         data = await file.read()
-        # BATCH mode (opt-in): `segments` JSON [{start,end,text,[language]}] — decode
-        # once, align each slice against its own text (slice-relative times).
+        # BATCH mode: `segments` JSON [{start,end,text,[language]}], times slice-relative.
         if segments:
             import json as _json
             import io as _io

@@ -1,6 +1,4 @@
-# Speaker/audio embedding with pyannote.audio (one whole-file vector). Ported
-# from the tested embed.py; deps baked at build time; contract surface via
-# wrapper.gpu + wrapper.contract.
+# Speaker embedding with pyannote.audio: one fixed-length vector for the whole clip.
 import os
 import logging
 import tempfile

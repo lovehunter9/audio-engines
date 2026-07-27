@@ -47,14 +47,23 @@ the interpreter that owns the deps (NeMo, for one, keeps them in a venv), so
 `wrapper/app.py` can route the same cap name to the right engine and every
 chart's sentinel shell can run the identical `exec audio-python -m wrapper.app`.
 
+When those deps live in a **venv**, `audio-python` must be a wrapper script
+(`#!/bin/sh` + `exec <venv>/bin/python "$@"`), never a symlink: CPython decides
+it is inside a venv by looking for `pyvenv.cfg` **next to the executable**, and a
+symlink in `/usr/local/bin` has none, so it starts against the system prefix,
+the venv's `site-packages` never enter `sys.path`, and the wrapper dies on
+`import fastapi` — while a build check run against the interpreter's real path
+passes. For the same reason the build's final import check must go **through**
+`audio-python`: verify the exact command the chart executes.
+
 ## Bases
 
 | Base | Image | Capabilities | Engine / runtime | Status |
 |---|---|---|---|---|
 | `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr in-process vLLM (`Qwen3ASRModel.LLM`) | validated |
-| `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` | faster-whisper (CTranslate2) | built, not yet validated |
-| `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | built, not yet validated |
-| `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | built, not yet validated |
+| `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
+| `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
+| `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -63,6 +72,62 @@ pair; each of the four pyannote caps) are separate clones — the wrapper serves
 the first match and says so in the log.
 
 > Keep this table in sync whenever a base is added or its capabilities change.
+
+### Per-base notes worth knowing before editing
+
+**`fasterwhisper`.** Three traps, all in the single `RUN`:
+
+- The image ships several pythons; only one owns `faster_whisper`, and the web
+  layer must be installed into **that** one.
+- That install needs `--ignore-installed`, because the venv is built with
+  `--system-site-packages`: pip sees `fastapi` in the system python, says
+  "already satisfied", installs nothing, and the venv still cannot import it.
+- `transformers>=4.56` is a floor, not a preference: the image's `ctranslate2`
+  calls `from_pretrained(dtype=...)`, and older `transformers` forwards that
+  unknown kwarg into the model constructor and dies. Only the CT2 **converter**
+  path uses it (`openai/whisper-large-v3` and other transformers-format
+  checkpoints, converted once into the shared cache on first load);
+  `faster_whisper` itself does not.
+
+The base's CUDA-matched `ctranslate2` + `faster_whisper` must never be replaced
+by a generic wheel, so nothing else is touched.
+
+**`pyannote`.** Both diarization stages default to `batch_size=1`, and
+segmentation slides a 10 s window at a 1 s hop, so a 3 h clip becomes ~12 000
+tiny forward passes with the GPU idle in between — hence `DIAR_SEG_BATCH` /
+`DIAR_EMB_BATCH` (chart-derived from the GPU quota, `auto` = 1 on CPU) and the
+one-way fallback to 1 on CUDA OOM. `enhance` windows long clips
+(`ENHANCE_CHUNK_S`) with an overlap-add crossfade and can answer
+`format=wav|flac|ogg`, degrading to FLAC then WAV if libsndfile lacks the codec.
+
+**`nemo` (`diar_stream`).** Its own capability rather than `diar` plus a flag,
+because streaming diarization has to keep speaker labels consistent over time at
+bounded latency; Sortformer does that with an Arrival-Order Speaker Cache, so
+`spk_0`/`spk_1`/… stay stable across steps. Two paths, chosen once per
+connection by a self-test on silence, before any client audio: the incremental
+API (`init_streaming_state` + `streaming_feat_loader` + `forward_streaming_step`,
+O(1) per chunk) and, if any piece of it is missing on this NeMo build, a bounded
+`WINDOW_SEC` re-`diarize()` that commits older turns and remaps labels across an
+`OVERLAP_SEC` tail — slower, but never "no output". Only public NeMo API, no
+monkey-patching.
+
+Wire protocol on `WS /v1/audio/diarize/stream`: the client sends an optional
+`{"type":"start","sample_rate":16000}`, then **binary PCM16LE mono** chunks, then
+`{"type":"stop"}` (or just closes). The server sends `{"type":"ready"}`, then
+`{"type":"partial"|"final","segments":[{start,end,speaker}],"speakers":[…]}`, or
+`{"type":"error"}`. Fusing these turns with ASR text is the consumer's job.
+
+Latency presets, in 80 ms frames, via `DIAR_*` env — the default is **high
+latency**, because transcription streams from a separate `stt_stream` engine and
+speaker accuracy matters more than immediacy here; a ~10 s chunk also resolves
+rapid adjacent turns far better than a 480 ms one and is ~18x cheaper (NVIDIA's
+own CALLHOME 4spk DER: 12.44 -> 11.72):
+
+| Preset | `CHUNK_LEN` | `RIGHT_CONTEXT` | `FIFO_LEN` | `UPDATE_PERIOD` | `SPKCACHE_LEN` |
+|---|---|---|---|---|---|
+| low (1.04 s, live-first) | 6 | 7 | 188 | 144 | 188 |
+| **high (10 s, accuracy)** | **124** | **1** | **124** | **124** | **188** |
+| very high (30.4 s) | 340 | 40 | 40 | 300 | 188 |
 
 ## Build
 

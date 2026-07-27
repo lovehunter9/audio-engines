@@ -1,20 +1,8 @@
-# Local hand-build for the test/dev phase. Reuses the EXACT same Dockerfile the
-# CI docker-build job uses (bases/<BASE>/Dockerfile) — only the registry/tag
-# differ. CI publishes beclab/audio-<BASE>; this pushes wherever you point it.
-#
-#   make build-push REGISTRY=docker.io/<ns> BASE=qwen TAG=dev1
-#
-# A base whose upstream image is too big to unpack on a build host has an
-# append.env instead of a Dockerfile; build-push then publishes it through the
-# registry with crane, exactly as CI does. See scripts/append-image.sh.
-#
-# REGISTRY is deliberately unset: dev images belong in your own namespace, so
-# name it per invocation or export it from your shell.
+# make build-push REGISTRY=docker.io/<ns> BASE=qwen TAG=dev1 — CI's Dockerfile, your own namespace.
 REGISTRY ?=
 BASE ?= qwen
 TAG ?= dev
-# Local-only escape hatch, e.g. behind a proxy:
-#   EXTRA="--build-arg HTTP_PROXY=http://... --build-arg HTTPS_PROXY=http://..."
+# Local escape hatch, e.g. EXTRA="--build-arg HTTPS_PROXY=http://..." behind a proxy.
 EXTRA ?=
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)

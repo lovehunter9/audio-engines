@@ -1,5 +1,4 @@
-# Voice activity detection with Silero VAD. Ported from the tested vad.py; deps
-# baked at build time; contract surface via wrapper.gpu + wrapper.contract.
+# Voice activity detection with Silero VAD.
 import os
 import logging
 import threading
