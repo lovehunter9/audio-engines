@@ -1,9 +1,9 @@
-# Speaker diarization with pyannote.audio. Ported from the tested diar.py; deps
-# baked at build time; contract surface via wrapper.gpu + wrapper.contract.
+# Speaker diarization with pyannote.audio.
 import os
 import logging
 import tempfile
 import threading
+import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uvicorn
@@ -22,7 +22,40 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-_state = {"ready": False, "error": None, "pipeline": None, "device": "cpu"}
+# Both pyannote stages default to batch_size=1, i.e. ~12 000 launches of 10 s of audio for a 3 h clip.
+SEG_BATCH = os.environ.get("DIAR_SEG_BATCH", "auto")   # "auto" = GPU-sized batch on CUDA, 1 on CPU
+EMB_BATCH = os.environ.get("DIAR_EMB_BATCH", "auto")
+
+_state = {"ready": False, "error": None, "pipeline": None, "device": "cpu",
+          "batch1": False}
+
+
+def _batch(raw, cuda, auto=32):
+    raw = (raw or "auto").strip().lower()
+    if raw in ("", "auto"):
+        return auto if cuda else 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        log.warning("ignoring unparsable batch size %r", raw)
+        return 1
+
+
+def _set_batches(pipe, resolve):
+    # Probe rather than assume: these properties have been renamed across pyannote versions.
+    for attr, raw in (("segmentation_batch_size", SEG_BATCH),
+                      ("embedding_batch_size", EMB_BATCH)):
+        if not hasattr(pipe, attr):
+            log.warning("%s absent on %s — leaving pyannote's default",
+                        attr, type(pipe).__name__)
+            continue
+        want = resolve(raw)
+        try:
+            setattr(pipe, attr, want)
+        except Exception as e:
+            log.warning("could not set %s=%s: %s", attr, want, e)
+            continue
+        log.info("%s = %s", attr, getattr(pipe, attr, "?"))
 
 
 def _load():
@@ -35,13 +68,39 @@ def _load():
             pipe = Pipeline.from_pretrained(MODEL_REPO, token=HF_TOKEN)
         except TypeError:
             pipe = Pipeline.from_pretrained(MODEL_REPO, use_auth_token=HF_TOKEN)
-        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        cuda = torch.cuda.is_available()
+        dev = "cuda" if cuda else "cpu"
         pipe.to(torch.device(dev))
+        _set_batches(pipe, lambda raw: _batch(raw, cuda))
         _state["pipeline"], _state["device"], _state["ready"] = pipe, dev, True
         log.info("pyannote pipeline %s loaded on %s", MODEL_REPO, dev)
     except Exception as e:
         _state["error"] = str(e)
         log.exception("pipeline load failed: %s", e)
+
+
+def _oom(e):
+    return isinstance(e, (RuntimeError, MemoryError)) and "out of memory" in str(e).lower()
+
+
+def _infer(waveform, sr, kw):
+    pipe = _state["pipeline"]
+    try:
+        return pipe({"waveform": waveform, "sample_rate": sr}, **kw)
+    except Exception as e:
+        # Slow beats a 500; remembered for the process so one oversized clip can't retry forever.
+        if not _oom(e) or _state["batch1"]:
+            raise
+        log.warning("out of memory at the configured batch size, dropping to 1: %s", e)
+        try:
+            import torch
+
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        _set_batches(pipe, lambda _raw: 1)
+        _state["batch1"] = True
+        return pipe({"waveform": waveform, "sample_rate": sr}, **kw)
 
 
 def build_app(supports):
@@ -74,7 +133,10 @@ def build_app(supports):
             if max_speakers:
                 kw["max_speakers"] = int(max_speakers)
             waveform, sr = decode(path)
-            out = _state["pipeline"]({"waveform": waveform, "sample_rate": sr}, **kw)
+            dur = float(waveform.shape[-1]) / float(sr)
+            t0 = time.time()
+            out = _infer(waveform, sr, kw)
+            log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
         except Exception as e:
             raise HTTPException(status_code=500, detail="diarization failed: %s" % e)
         finally:
@@ -82,8 +144,7 @@ def build_app(supports):
                 os.unlink(path)
             except Exception:
                 pass
-        # pyannote 4 returns an object whose .speaker_diarization is the Annotation
-        # (v3 returned it directly); unwrap to a common itertracks() form.
+        # pyannote 4 wraps the Annotation in .speaker_diarization; v3 returned it directly.
         ann = getattr(out, "speaker_diarization", out)
         segs = [{"start": round(float(t.start), 3), "end": round(float(t.end), 3),
                  "speaker": str(spk)}

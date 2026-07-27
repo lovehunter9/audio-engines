@@ -1,13 +1,13 @@
-# Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono WAV out).
-# Ported from the tested enhance.py; deps baked at build time; contract surface
-# via wrapper.gpu + wrapper.contract.
+# Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
+import contextlib
 import io
 import os
 import logging
 import tempfile
 import threading
+import time
 
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response
 import uvicorn
 
@@ -26,11 +26,19 @@ PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 SR = 16000  # SpeechBrain enhancement models operate at 16 kHz mono.
 
-# Long audio handled SERVER-SIDE: past CHUNK_S, slide a fixed window over the
-# clip and overlap-add with a linear crossfade (inaudible seams) so peak VRAM is
-# bounded by ONE window and the client can always send the whole clip.
+# Long clips are windowed with an overlap-add crossfade so peak VRAM is bounded by ONE window.
 CHUNK_S = float(os.environ.get("ENHANCE_CHUNK_S", "120") or 120)   # window length (s)
 OVERLAP_S = float(os.environ.get("ENHANCE_OVERLAP_S", "1") or 1)   # crossfade overlap (s)
+# A window is one big forward pass, so fp16 is the only speed lever — and it can underflow a mask.
+AMP = (os.environ.get("ENHANCE_AMP", "").strip().lower() in ("1", "true", "yes", "on"))
+
+# Default stays WAV, but 16k PCM16 is ~2 MB/min and the gateway buffers whole bodies in memory.
+_FORMATS = {
+    "wav": ("WAV", ("PCM_16",), "audio/wav"),
+    "flac": ("FLAC", ("PCM_16",), "audio/flac"),
+    "ogg": ("OGG", ("OPUS", "VORBIS"), "audio/ogg"),   # Opus needs libsndfile >= 1.2
+}
+_FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
 
@@ -44,9 +52,7 @@ def _load():
                                 cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
         # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
         dev = "cuda:0" if torch.cuda.is_available() else "cpu"
-        # Different enhancement repos need different inference classes; auto-detect
-        # by trying from_hparams in order, handling the speechbrain 1.x vs 0.5.x
-        # module path move.
+        # Repos need different inference classes; try each in turn (1.x moved the module path).
         try:
             from speechbrain.inference.enhancement import (
                 WaveformEnhancement, SpectralMaskEnhancement)
@@ -79,13 +85,17 @@ def _run(noisy):
     import torch
 
     model = _state["model"]
-    if _state["kind"] == "sepformer":
-        est = model.separate_batch(noisy)        # (batch, time, n_src)
-        enhanced = est[..., 0]
-    else:
-        lengths = torch.ones(noisy.shape[0])
-        enhanced = model.enhance_batch(noisy, lengths=lengths)
-    arr = enhanced.detach().cpu().numpy().reshape(-1)
+    # SpeechBrain's enhance_batch has no no-grad of its own, and that dead graph dominates VRAM.
+    amp = AMP and _state["device"].startswith("cuda")
+    with torch.no_grad(), (torch.autocast("cuda", dtype=torch.float16) if amp
+                           else contextlib.nullcontext()):
+        if _state["kind"] == "sepformer":
+            est = model.separate_batch(noisy)    # (batch, time, n_src)
+            enhanced = est[..., 0]
+        else:
+            lengths = torch.ones(noisy.shape[0])
+            enhanced = model.enhance_batch(noisy, lengths=lengths)
+        arr = enhanced.float().detach().cpu().numpy().reshape(-1)
     try:
         torch.cuda.empty_cache()
     except Exception:
@@ -93,20 +103,53 @@ def _run(noisy):
     return arr
 
 
+def _encode(out, want):
+    # Requested container, else lossless FLAC, else WAV; returns the codec that actually ran.
+    import soundfile as sf
+
+    order = [want] + [f for f in ("flac", "wav") if f != want]
+    errs = []
+    for fmt in order:
+        container, subtypes, mime = _FORMATS[fmt]
+        for sub in subtypes:
+            try:
+                if not sf.check_format(container, sub):
+                    continue
+            except Exception:
+                pass  # older soundfile without check_format: just try the write
+            try:
+                buf = io.BytesIO()
+                sf.write(buf, out, SR, format=container, subtype=sub)
+                if fmt != want:
+                    log.warning("%s unavailable in this libsndfile, encoded %s/%s",
+                                want, container, sub)
+                return buf.getvalue(), mime, "%s/%s" % (fmt, sub.lower())
+            except Exception as e:
+                errs.append("%s/%s: %s" % (container, sub, e))
+    raise RuntimeError("no usable encoder (%s)" % "; ".join(errs))
+
+
 def build_app(supports):
     app = FastAPI(title="audio-enhance (speechbrain)")
     mount_metrics(app)
 
     endpoints = [{"method": "POST", "path": "/v1/audio/enhance",
-                  "description": "Speech enhancement / denoise (returns 16k mono WAV)"}]
+                  "description": "Speech enhancement / denoise "
+                                 "(16k mono, format=wav|flac|ogg, default wav)"}]
     register(app, model_name=MODEL_NAME, mode="audio", supports=supports,
              endpoints=endpoints, is_ready=lambda: _state["ready"],
              error=lambda: _state["error"])
 
     @app.post("/v1/audio/enhance")
-    async def enhance(file: UploadFile = File(...)):
+    async def enhance(file: UploadFile = File(...),
+                      fmt: str = Form(default="wav", alias="format")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        want = (fmt or "wav").strip().lower()
+        want = _FORMAT_ALIAS.get(want, want)
+        if want not in _FORMATS:
+            raise HTTPException(status_code=400, detail="format must be one of %s"
+                                                       % ", ".join(sorted(_FORMATS)))
         data = await file.read()
         suffix = os.path.splitext(file.filename or "a.wav")[1] or ".wav"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
@@ -114,26 +157,30 @@ def build_app(supports):
             path = f.name
         try:
             import numpy as np
-            import soundfile as sf
 
             wav = decode_mono(path, SR)  # (1, time) @ 16k
             total = int(wav.shape[-1])
             chunk = int(CHUNK_S * SR)
             ov = int(OVERLAP_S * SR)
             if chunk <= 0 or total <= chunk:
-                # Short clip: single pass (identical to the pre-chunking behaviour).
-                out = _run(wav)
+                out = _run(wav)      # short clip: single pass
             else:
-                # Long clip: sliding window + overlap-add crossfade, one window on
-                # the GPU at a time so peak VRAM is bounded regardless of duration.
+                # One window on the GPU at a time, so peak VRAM is flat in the clip's duration.
                 hop = max(1, chunk - ov)
+                nwin = -(-max(1, total - chunk) // hop) + 1
+                log.info("enhancing %.1fs in %d windows of %.0fs", total / SR, nwin, CHUNK_S)
                 out = np.zeros(total, dtype="float32")
                 wsum = np.zeros(total, dtype="float32")
                 pos = 0
+                idx = 0
                 while pos < total:
                     end = min(total, pos + chunk)
                     n = end - pos
+                    t0 = time.time()
                     enh = _run(wav[:, pos:end])
+                    idx += 1
+                    log.info("window %d/%d (%.0f-%.0fs) took %.1fs",
+                             idx, nwin, pos / SR, end / SR, time.time() - t0)
                     if enh.shape[0] >= n:
                         enh = enh[:n]
                     else:
@@ -155,9 +202,7 @@ def build_app(supports):
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:
                 out = out / peak  # guard against clipping
-            buf = io.BytesIO()
-            sf.write(buf, out, SR, format="WAV", subtype="PCM_16")
-            body = buf.getvalue()
+            body, mime, codec = _encode(out, want)
         except Exception as e:
             raise HTTPException(status_code=500, detail="enhance failed: %s" % e)
         finally:
@@ -165,8 +210,9 @@ def build_app(supports):
                 os.unlink(path)
             except Exception:
                 pass
-        return Response(content=body, media_type="audio/wav",
-                        headers={"X-Audio-Model": MODEL_NAME, "X-Audio-Mode": "enhance"})
+        return Response(content=body, media_type=mime,
+                        headers={"X-Audio-Model": MODEL_NAME, "X-Audio-Mode": "enhance",
+                                 "X-Audio-Format": codec})
 
     return app
 
