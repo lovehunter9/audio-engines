@@ -48,7 +48,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # A base too big to unpack ships append.env instead, and goes through crane (README).
+      # Every base ships append.env: the wrapper is appended registry-side (README). A base added
+      # later may still be a plain Dockerfile, which is what the docker path is kept for.
       - name: pick build method
         id: method
         run: |
@@ -57,19 +58,6 @@ jobs:
           else
             echo "kind=docker" >> "$GITHUB_OUTPUT"
           fi
-
-      # The runner has ONE ~72 GB filesystem (/mnt is a directory on it), so the toolchains must go.
-      - name: make room for the image
-        if: steps.method.outputs.kind == 'docker'
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
-                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
-                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
-                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google
-          sudo apt-get clean
-          docker image prune -af
-          df -h /
 
       # namespace is the DESTINATION; DOCKERHUB_USERNAME is only the login identity, not derived from.
       - name: compute image metadata
@@ -92,6 +80,7 @@ jobs:
               echo "build_date=${BUILD_DATE}"
               echo "push=true"
               echo "version=${DEV_TAG}"
+              echo "image=${IMAGE}"
               echo "tags=${IMAGE}:${DEV_TAG}"
             } >> "$GITHUB_OUTPUT"
             exit 0
@@ -108,6 +97,7 @@ jobs:
           {
             echo "build_date=${BUILD_DATE}"
             echo "push=${SHOULD_PUSH}"
+            echo "image=${IMAGE}"
             if [ "$SHOULD_PUSH" = "true" ]; then
               if [ -z "${DH_USER:-}" ]; then
                 echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
@@ -140,8 +130,62 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASS }}
 
+      - name: install crane
+        if: steps.method.outputs.kind == 'append'
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      # The deps tag is the hash of deps.Dockerfile, so "missing" means "the recipe changed".
+      - name: does this base's deps image exist
+        id: deps
+        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -f "bases/${{ inputs.base }}/deps.Dockerfile" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"; exit 0      # nemo: nothing installed on top
+          fi
+          IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "${{ steps.meta.outputs.image }}")
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          if crane manifest "$IMG" >/dev/null 2>&1; then
+            echo "$IMG is already published; appending the wrapper onto it"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$IMG is missing, so deps.Dockerfile changed: building it once"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The runner has ONE ~72 GB filesystem (/mnt is a directory on it), so the toolchains must go.
+      - name: make room for the image
+        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
+                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google
+          sudo apt-get clean
+          docker image prune -af
+          df -h /
+
       - uses: docker/setup-buildx-action@v3
-        if: steps.method.outputs.kind == 'docker'
+        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+
+      # Rare and slow by design; every later wrapper change reuses these layers untouched.
+      - name: build the deps image (only when its recipe changed)
+        if: steps.deps.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/deps.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.deps.outputs.image }}
+          provenance: false
 
       # No type=gha cache: these layers dwarf the 10 GB per-repo limit, so it would only thrash.
       - name: docker build (push on main / tag)
@@ -159,16 +203,6 @@ jobs:
             BUILD_DATE=${{ steps.meta.outputs.build_date }}
           # Plain image, no attestation index — same shape as the local build.
           provenance: false
-
-      - name: install crane
-        if: steps.method.outputs.kind == 'append'
-        env:
-          CRANE_VERSION: v0.20.3
-        run: |
-          set -euo pipefail
-          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin crane
-          crane version
 
       # No registry to mount the base's blobs into on a PR, so such a base is lint-only there.
       - name: crane append (push on main / tag)

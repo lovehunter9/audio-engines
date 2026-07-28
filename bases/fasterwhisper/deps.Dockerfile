@@ -1,13 +1,6 @@
-# audio-fasterwhisper: Whisper family on CTranslate2. Build context is the repo ROOT.
+# audio-fasterwhisper deps: everything but the wrapper, so a wrapper change costs one small layer.
+# Rebuilt only when THIS file changes: its content hash is the tag the append step looks for.
 FROM docker.io/beclab/harveyff-whisper-webui:v1.0.7
-
-ARG VERSION=dev
-ARG COMMIT=unknown
-ARG BUILD_DATE=unknown
-LABEL org.opencontainers.image.title="audio-fasterwhisper" \
-      org.opencontainers.image.version="${VERSION}" \
-      org.opencontainers.image.revision="${COMMIT}" \
-      org.opencontainers.image.created="${BUILD_DATE}"
 
 # Everything goes into the one python that owns faster_whisper; this block's three traps are in README.
 RUN set -eux; \
@@ -28,14 +21,4 @@ import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]);
 assert v >= (4, 56), t.__version__"; \
     command -v ffmpeg >/dev/null
 
-WORKDIR /app
-COPY wrapper /app/wrapper
-# LOAD_TIMEOUT_S is generous here: first-use CT2 conversion is legitimate multi-GB work (README).
-ENV AUDIO_BASE=fasterwhisper \
-    PYTHONPATH=/app \
-    PYTHONUNBUFFERED=1 \
-    LOAD_TIMEOUT_S=5400 \
-    WRAPPER_PORT=8000
-
-# Serves directly here; the chart overrides command with its sentinel-wait shell, same module.
-CMD ["audio-python", "-m", "wrapper.app"]
+LABEL org.opencontainers.image.title="audio-fasterwhisper-deps"

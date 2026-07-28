@@ -83,9 +83,11 @@ wrapper/                 shared Python package (used by every base)
   audioio.py             decoding shared by the torch caps
   app.py                 entrypoint: dispatch by AUDIO_BASE + MODEL_SUPPORTS
   caps/                  capability implementations
-bases/<base>/Dockerfile  FROM the engine base image + build-time deps + wrapper
-bases/<base>/append.env  instead of a Dockerfile, for a base too big to unpack
-scripts/append-image.sh  registry-level build for those (crane, no unpack)
+tests/                   GPU-free checks: every engine stubbed, wiring asserted
+bases/<base>/deps.Dockerfile  FROM the engine image + the deps; rebuilt rarely
+bases/<base>/append.env  how to append the wrapper onto that deps image
+scripts/deps-image.sh    the deps ref: <same repo>:deps-<hash of the recipe>
+scripts/append-image.sh  the actual build: deps image + one wrapper layer
 .github/workflows/       build-image.yml (shared) + one <base>-ci.yml per base
 Makefile                 local hand-build to a personal registry (dev phase)
 ```
@@ -132,7 +134,7 @@ has been seen to wedge holding the vGPU lock; the field name is probed off
 `CompilationConfig` rather than assumed, and `VLLM_ENFORCE_EAGER=1` skips graphs
 altogether if that ever needs to be ruled out.
 
-**`fasterwhisper`.** Three traps, all in the single `RUN`:
+**`fasterwhisper`.** Three traps, all in the single `RUN` of its deps recipe:
 
 - The image ships several pythons; only one owns `faster_whisper`, and the web
   layer must be installed into **that** one.
@@ -148,7 +150,7 @@ altogether if that ever needs to be ruled out.
 
 The base's CUDA-matched `ctranslate2` + `faster_whisper` must never be replaced
 by a generic wheel, so nothing else is touched. This is also the one base that
-raises `LOAD_TIMEOUT_S` (to 5400, in the Dockerfile): that one-time conversion is
+raises `LOAD_TIMEOUT_S` (to 5400, via its `append.env`): that conversion is
 legitimate multi-GB work and must not look like a hung load to the watchdog.
 
 **`pyannote`.** Both diarization stages default to `batch_size=1`, and
@@ -197,14 +199,35 @@ own CALLHOME 4spk DER: 12.44 -> 11.72):
 `DOCKERHUB_PASS` repo secrets (login identity with push access to the `beclab`
 org; the namespace is hardcoded, not derived from the username).
 
-**Bases too big to unpack.** `docker build` unpacks the whole base image to run
-even a single `COPY`, and `nemo`'s upstream (25.7 GB compressed, ~55 GB unpacked)
-exceeds a runner's entire disk. Such a base declares `bases/<base>/append.env`
-instead of a Dockerfile; CI and `make build-push` then both call
-`scripts/append-image.sh`, which uses crane to push the wrapper as one small
-layer and cross-repo-mount the rest inside the registry — seconds, no unpack, no
-disk. The cost is that nothing can be installed or checked at build time, so the
-upstream image must already carry every import.
+### Deps once, wrapper in seconds
+
+Every base is split in two, because the wrapper changes daily and the deps
+almost never do:
+
+- `bases/<base>/deps.Dockerfile` — `FROM` the upstream engine image, install the
+  deps, and **assert the imports** so a broken base fails the build. Published as
+  `<same repo>:deps-<hash of that file>`. The tag being the recipe's content hash
+  is what makes a stale deps image impossible: edit the recipe and the tag the
+  build asks for simply does not exist yet, so CI builds it, once.
+- `scripts/append-image.sh` — puts the wrapper on top of that deps image with
+  crane: one small layer plus a config edit, pushed **inside the registry**.
+  Nothing is pulled, unpacked or run, so it takes seconds and no disk.
+
+That matters beyond CI time. Olares nodes pull through a mirror that syncs from
+Docker Hub, and a full rebuild used to publish gigabytes of new layer digests
+(pip is not reproducible) which the mirror then had to copy before an install
+could even start — hours. Appending changes ~100 KB, so a new tag is usable
+almost immediately.
+
+`nemo` is the same shape with one difference: its upstream (25.7 GB compressed,
+~55 GB unpacked, more than a runner's whole disk) needs nothing installed on top,
+so its `append.env` names that image directly and no `deps.Dockerfile` exists.
+
+The tradeoff is real but narrow: the import assertions now run when the deps
+recipe changes, not on every wrapper change. `tests/` covers the wrapper half of
+that (it imports every capability module against stubbed engines), and a missing
+*engine* dep can only appear when the recipe changes, which is exactly when the
+assertions run again.
 
 **Dev.** Same recipe, different destination — no separate dev build path.
 Either dispatch the workflow with `namespace` + `image_tag` to publish
@@ -220,12 +243,12 @@ builder; see the `EXTRA` hook in the `Makefile`.
 
 ## Adding a new engine base
 
-1. `bases/<base>/Dockerfile` — `FROM` the engine's base image, `pip install` all
-   deps at **build time** (no runtime pip), assert the imports so a broken base
-   fails the build, `COPY wrapper /app/wrapper`, set `ENV AUDIO_BASE=<base>`,
-   symlink `audio-python`, default `CMD ["audio-python", "-m", "wrapper.app"]`.
-   If the upstream image is too big to unpack, write `append.env` instead (see
-   `bases/nemo/append.env`) — but only then, since it gives up build-time deps.
+1. `bases/<base>/deps.Dockerfile` — `FROM` the engine's base image, `pip install`
+   all deps at **build time** (no runtime pip), assert the imports so a broken
+   base fails the build, and leave `/usr/local/bin/audio-python` pointing at the
+   interpreter that owns them. Plus `bases/<base>/append.env` for the platform and
+   any extra `ENV` (`AUDIO_BASE`, `PYTHONPATH`, `WRAPPER_PORT` and the `CMD` are
+   set for you). Nothing else: no `COPY wrapper`, no `LABEL`.
 2. `wrapper/caps/<cap>.py` — implement the capabilities as `build_app(supports)`
    + `run(supports)`; expose `/v1/audio/*` and wire `wrapper.gpu.mount_metrics` +
    `wrapper.contract.register` so the contract above is satisfied.
