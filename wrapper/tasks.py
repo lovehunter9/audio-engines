@@ -66,6 +66,10 @@ class _Ctx:
             return
         p = dict(t.progress)
         if stage is not None:
+            # Each stage counts its own units, so carrying the last one's over reads as "8 of 6".
+            if p.get("stage") != str(stage):
+                p.pop("done", None)
+                p.pop("total", None)
             p["stage"] = str(stage)
         if done is not None:
             p["done"] = int(done)
