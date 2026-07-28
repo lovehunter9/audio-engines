@@ -1,0 +1,46 @@
+# qwen CI: triggers and path filters only; the build is the shared build-image.yml.
+name: qwen-ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'wrapper/**'
+      - 'bases/qwen/**'
+      - '.github/workflows/qwen-ci.yml'
+      - '.github/workflows/build-image.yml'
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'bases/qwen/**'
+      - '.github/workflows/qwen-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch with namespace + image_tag to publish <ns>/<repo>:<tag>; empty = main rules.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: qwen
+      repo: audio-qwen
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
