@@ -72,4 +72,18 @@ crane mutate "$IMAGE" -t "$IMAGE" \
   --label "org.opencontainers.image.created=$BUILD_DATE" \
   --label "audio.deps=$BASE_IMAGE@$(crane digest "$BASE_IMAGE")"
 
+# The config is edited by hand here instead of declared in a Dockerfile, so read it back: a typo
+# would otherwise surface as a pod that starts with no AUDIO_BASE and serves the wrong routes.
+crane config "$IMAGE" | python3 -c '
+import json, sys
+want_base = sys.argv[1]
+cfg = json.load(sys.stdin)["config"]
+env = dict(e.split("=", 1) for e in cfg.get("Env", []))
+assert env.get("AUDIO_BASE") == want_base, env.get("AUDIO_BASE")
+assert env.get("PYTHONPATH") == "/app", env.get("PYTHONPATH")
+assert env.get("WRAPPER_PORT") == "8000", env.get("WRAPPER_PORT")
+assert cfg.get("WorkingDir") == "/app", cfg.get("WorkingDir")
+assert cfg.get("Cmd") == ["audio-python", "-m", "wrapper.app"], cfg.get("Cmd")
+' "$BASE"
+
 echo "pushed $IMAGE ($(crane digest "$IMAGE"))"
