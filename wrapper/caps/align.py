@@ -1,4 +1,4 @@
-# Forced alignment via Qwen3-ForcedAligner, a separate model from ASR, hence always its own instance.
+# Forced alignment via Qwen3-ForcedAligner: a model of its own, hence always its own instance.
 import os
 import tempfile
 import threading

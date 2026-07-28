@@ -12,8 +12,7 @@ IMAGE := $(REGISTRY)/audio-$(BASE):$(TAG)
 require-registry:
 	@test -n "$(REGISTRY)" || { echo "REGISTRY is required, e.g. REGISTRY=docker.io/<ns>"; exit 1; }
 
-# Publish the deps image if its recipe changed; the tag IS the recipe's hash, so this is a no-op
-# until you edit deps.Dockerfile, and the slow build happens exactly once per edit.
+# Publish the deps image if its recipe changed; the tag IS its hash, so this is a no-op until then.
 deps: require-registry
 	@test -f bases/$(BASE)/deps.Dockerfile || exit 0; \
 	IMG=$$(./scripts/deps-image.sh $(BASE) $(REGISTRY)/audio-$(BASE)); \

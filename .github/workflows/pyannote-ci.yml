@@ -1,4 +1,4 @@
-# pyannote base CI: triggers and path filters only; the build is the shared build-image workflow.
+# pyannote CI: triggers and path filters only; the build is the shared build-image.yml.
 name: pyannote-ci
 
 on:
@@ -16,7 +16,7 @@ on:
       - 'bases/pyannote/**'
       - '.github/workflows/pyannote-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch with namespace + image_tag to publish <ns>/audio-pyannote:<tag>; empty tag = main rules.
+  # Dev: dispatch with namespace + image_tag to publish <ns>/<repo>:<tag>; empty = main rules.
   workflow_dispatch:
     inputs:
       namespace:

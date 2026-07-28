@@ -1,4 +1,4 @@
-# nemo base CI: triggers and path filters only; the build is the shared build-image workflow.
+# nemo CI: triggers and path filters only; the build is the shared build-image.yml.
 name: nemo-ci
 
 on:
@@ -16,7 +16,7 @@ on:
       - 'bases/nemo/**'
       - '.github/workflows/nemo-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch with namespace + image_tag to publish <ns>/audio-nemo:<tag>; empty tag = main rules.
+  # Dev: dispatch with namespace + image_tag to publish <ns>/<repo>:<tag>; empty = main rules.
   workflow_dispatch:
     inputs:
       namespace:

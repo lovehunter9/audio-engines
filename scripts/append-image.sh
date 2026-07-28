@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# Publish an engine image as its deps image plus ONE small wrapper layer, entirely registry-side:
-# nothing is pulled, unpacked or run, so a wrapper change is seconds to build and a tiny delta for
-# any mirror to copy (README: why every base is built this way).
-#
-#   BASE=pyannote IMAGE=docker.io/<ns>/audio-pyannote:<tag> scripts/append-image.sh
+# BASE=<base> IMAGE=<ref>: publish the deps image plus ONE wrapper layer, registry-side (README).
 set -euo pipefail
 
 BASE="${BASE:?BASE is required, e.g. BASE=nemo}"
@@ -21,8 +17,7 @@ PLATFORM="${PLATFORM:-linux/amd64}"
 
 command -v crane >/dev/null || { echo "crane not found (brew install crane)" >&2; exit 1; }
 
-# A base whose deps are ours starts from the deps image; nemo's starts from an upstream image
-# directly, since it needs nothing installed on top.
+# Ours to build means start from the deps image; nemo names its upstream image in append.env.
 if [ -z "${BASE_IMAGE:-}" ]; then
     BASE_IMAGE="$("$repo_root/scripts/deps-image.sh" "$BASE" "$IMAGE")"
     if ! crane manifest "$BASE_IMAGE" >/dev/null 2>&1; then
@@ -72,8 +67,7 @@ crane mutate "$IMAGE" -t "$IMAGE" \
   --label "org.opencontainers.image.created=$BUILD_DATE" \
   --label "audio.deps=$BASE_IMAGE@$(crane digest "$BASE_IMAGE")"
 
-# The config is edited by hand here instead of declared in a Dockerfile, so read it back: a typo
-# would otherwise surface as a pod that starts with no AUDIO_BASE and serves the wrong routes.
+# No Dockerfile declares this config, so read it back: a typo would only surface as a wrong pod.
 crane config "$IMAGE" | python3 -c '
 import json, sys
 want_base = sys.argv[1]

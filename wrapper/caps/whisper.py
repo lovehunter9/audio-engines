@@ -53,7 +53,7 @@ def _is_ct2(d):
     return os.path.isfile(os.path.join(d, "model.bin"))
 
 
-# Files faster-whisper reads beside the weights; without them it hits the Hub, which is offline here.
+# Files faster-whisper reads beside the weights; without them it hits the Hub, offline here.
 _CT2_COPY = ("tokenizer.json", "preprocessor_config.json", "tokenizer_config.json",
              "special_tokens_map.json", "added_tokens.json", "normalizer.json",
              "vocab.json", "merges.txt")

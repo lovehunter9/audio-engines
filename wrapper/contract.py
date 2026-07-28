@@ -1,4 +1,4 @@
-# The llm-init contract (see README): /v1/models 503s until loaded, plus /health; /metrics is in gpu.py.
+# The llm-init contract (README): /v1/models 503s until loaded, plus /health; /metrics is gpu.py.
 import os
 
 

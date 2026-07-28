@@ -24,7 +24,7 @@ MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
 PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-# Both pyannote stages default to batch_size=1, i.e. ~12 000 launches of 10 s of audio for a 3 h clip.
+# Both pyannote stages default to batch_size=1: ~12 000 launches of 10 s of audio for a 3 h clip.
 SEG_BATCH = os.environ.get("DIAR_SEG_BATCH", "auto")   # "auto" = GPU-sized batch on CUDA, 1 on CPU
 EMB_BATCH = os.environ.get("DIAR_EMB_BATCH", "auto")
 

@@ -48,8 +48,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Every base ships append.env: the wrapper is appended registry-side (README). A base added
-      # later may still be a plain Dockerfile, which is what the docker path is kept for.
+      # Every base today ships append.env; the docker path is kept for a plain-Dockerfile base.
       - name: pick build method
         id: method
         run: |

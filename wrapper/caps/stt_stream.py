@@ -274,8 +274,8 @@ def build_app(supports):
                     chunk_size_sec=CHUNK_SIZE_SEC,
                 )
 
-            # prefix = text finalized by earlier rolls; samples = audio fed to the current state.
-            S = {"st": _new_state(), "prefix": "", "samples": 0}
+            # prefix = text finalized by earlier rolls; samples resets on a roll, total never does.
+            S = {"st": _new_state(), "prefix": "", "samples": 0, "total": 0}
             roll_samples = max(16000, int(ROLL_SEC * 16000))
             pending = np.zeros((0,), dtype="float32")
             await ws.send_text(json.dumps({"type": "ready"}))
@@ -324,6 +324,7 @@ def build_app(supports):
                     else:
                         raise
                 S["samples"] += int(cur.shape[0])
+                S["total"] += int(cur.shape[0])
 
             try:
                 while True:
@@ -365,6 +366,11 @@ def build_app(supports):
                 async with _infer_lock:
                     await asyncio.to_thread(_gated, asr.finish_streaming_transcribe, S["st"])
                 await _emit("final")
+                # We consumed the audio, so the closing frame — not the caller — reports its length.
+                await ws.send_text(json.dumps({
+                    "type": "closed",
+                    "audio_seconds": round(S["total"] / 16000.0, 3),
+                }))
                 await ws.close()
             except WebSocketDisconnect:
                 pass

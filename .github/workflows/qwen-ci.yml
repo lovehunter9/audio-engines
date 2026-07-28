@@ -1,4 +1,4 @@
-# qwen base CI: triggers and path filters only; the build is the shared build-image workflow.
+# qwen CI: triggers and path filters only; the build is the shared build-image.yml.
 name: qwen-ci
 
 on:
@@ -16,7 +16,7 @@ on:
       - 'bases/qwen/**'
       - '.github/workflows/qwen-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch with namespace + image_tag to publish <ns>/audio-qwen:<tag>; empty tag = main rules.
+  # Dev: dispatch with namespace + image_tag to publish <ns>/<repo>:<tag>; empty = main rules.
   workflow_dispatch:
     inputs:
       namespace:

@@ -4,7 +4,7 @@ import sys
 
 from .contract import parse_supports
 
-# base -> ordered [(caps served together, module)]; first match wins, since one instance = one model.
+# base -> ordered [(caps served together, module)]; first match wins, one instance = one model.
 ROUTES = {
     "qwen": [
         (("stt", "stt_stream"), "stt_stream"),

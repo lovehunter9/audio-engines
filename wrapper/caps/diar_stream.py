@@ -205,6 +205,14 @@ class _FallbackToWindow(Exception):
     pass
 
 
+async def _send_closed(ws, total_samples):
+    # We consumed the audio, so the closing frame — not the caller — reports its length.
+    await ws.send_text(json.dumps({
+        "type": "closed",
+        "audio_seconds": round(total_samples / 16000.0, 3),
+    }))
+
+
 async def _run_streaming(ws):
     # Features must span a CONTIGUOUS window: per-block normalization splits one speaker into two.
     import numpy as np
@@ -335,6 +343,7 @@ async def _run_streaming(ws):
     async with _infer_lock:
         await asyncio.to_thread(_process, True)
     await _send("final")
+    await _send_closed(ws, total_new)
     await ws.close()
 
 
@@ -345,6 +354,7 @@ async def _run_window(ws):
     sample_rate = 16000
     buf = np.zeros((0,), dtype="float32")   # only the active window, [base_offset, now]
     since = 0                                # samples fed since last diarize
+    total = 0                                # whole session, for the closing report
     step_samples = max(16000, int(STEP_SEC * 16000))
     min_samples = max(8000, int(MIN_SEC * 16000))
     window_samples = max(step_samples * 2, int(WINDOW_SEC * 16000))
@@ -443,12 +453,14 @@ async def _run_window(ws):
         seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
         buf = np.concatenate([buf, seg]) if buf.size else seg
         since += int(seg.shape[0])
+        total += int(seg.shape[0])
         if since >= step_samples:
             since = 0
             cur = await _current()
             await _send("partial", cur)
             _roll(cur)   # roll AFTER emitting, reusing the just-computed segments
     await _send("final", await _current())
+    await _send_closed(ws, total)
     await ws.close()
 
 
