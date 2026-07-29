@@ -203,10 +203,11 @@ own CALLHOME 4spk DER: 12.44 -> 11.72):
 
 **CI (release).** Each `bases/<base>/**` change (or a `v*` tag, or a manual
 `workflow_dispatch`) runs `.github/workflows/<base>-ci.yml`, which builds
-`linux/amd64` and pushes `beclab/audio-<base>` (`:latest` + `:sha-<short>`, or
-`:<tag>` on a release tag). PRs build only. Uses the `DOCKERHUB_USERNAME` /
-`DOCKERHUB_PASS` repo secrets (login identity with push access to the `beclab`
-org; the namespace is hardcoded, not derived from the username).
+`linux/amd64` **and** `linux/arm64` (native runners: `ubuntu-latest` +
+`ubuntu-24.04-arm`), merges them into one multi-arch tag on `beclab/audio-<base>`
+(`:latest` + `:sha-<short>`, or `:<tag>` on a release tag). PRs lint only. Uses
+the `DOCKERHUB_USERNAME` / `DOCKERHUB_PASS` repo secrets (login identity with push
+access to the destination namespace; the namespace is an input, default `beclab`).
 
 ### Deps once, wrapper in seconds
 

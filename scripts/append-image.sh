@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # BASE=<base> IMAGE=<ref>: publish the deps image plus ONE wrapper layer, registry-side (README).
+#
+# PLATFORM (default linux/amd64) selects which arch of BASE_IMAGE to append onto.
+# For a multi-arch final tag, CI builds IMAGE-<arch> per runner then runs merge-index.sh;
+# or set PLATFORMS=linux/amd64,linux/arm64 to do both in one shot (writes IMAGE-<arch> + index).
 set -euo pipefail
 
 BASE="${BASE:?BASE is required, e.g. BASE=nemo}"
@@ -11,9 +15,27 @@ BUILD_DATE="${BUILD_DATE:-unknown}"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 conf="$repo_root/bases/$BASE/append.env"
 [ -f "$conf" ] || { echo "no $conf — this base is built from a Dockerfile" >&2; exit 1; }
+
+# Caller (CI/Makefile) wins over append.env for platform / base image selection.
+_REQUESTED_PLATFORMS="${PLATFORMS-}"
+_REQUESTED_PLATFORM="${PLATFORM-}"
+_REQUESTED_BASE_IMAGE="${BASE_IMAGE-}"
+
 # shellcheck disable=SC1090
 . "$conf"
-PLATFORM="${PLATFORM:-linux/amd64}"
+
+if [ -n "${_REQUESTED_PLATFORMS}" ]; then
+    PLATFORMS="${_REQUESTED_PLATFORMS}"
+elif [ -n "${_REQUESTED_PLATFORM}" ]; then
+    PLATFORMS="${_REQUESTED_PLATFORM}"
+elif [ -n "${PLATFORM:-}" ]; then
+    PLATFORMS="${PLATFORM}"
+else
+    PLATFORMS="linux/amd64"
+fi
+if [ -n "${_REQUESTED_BASE_IMAGE}" ]; then
+    BASE_IMAGE="${_REQUESTED_BASE_IMAGE}"
+fi
 
 command -v crane >/dev/null || { echo "crane not found (brew install crane)" >&2; exit 1; }
 
@@ -50,34 +72,73 @@ layer="$stage/layer.tar"
 # shellcheck disable=SC2086
 tar -C "$stage" -cf "$layer" $paths
 
-echo "appending $(du -sh "$layer" | cut -f1) layer to $BASE_IMAGE -> $IMAGE"
-crane append --platform "$PLATFORM" -b "$BASE_IMAGE" -f "$layer" -t "$IMAGE"
+IFS=',' read -r -a platform_list <<< "$PLATFORMS"
+manifest_args=()
+single_only=false
+if [ "${#platform_list[@]}" -eq 1 ]; then
+    single_only=true
+fi
 
-env_args=(--env "AUDIO_BASE=$BASE" --env PYTHONPATH=/app --env PYTHONUNBUFFERED=1
-          --env WRAPPER_PORT=8000)
-for kv in ${EXTRA_ENV:-}; do env_args+=(--env "$kv"); done
+append_one() {
+    local platform="$1"
+    local dest="$2"
+    local deps_digest
 
-crane mutate "$IMAGE" -t "$IMAGE" \
-  --workdir /app \
-  "${env_args[@]}" \
-  --cmd="audio-python,-m,wrapper.app" \
-  --label "org.opencontainers.image.title=audio-$BASE" \
-  --label "org.opencontainers.image.version=$VERSION" \
-  --label "org.opencontainers.image.revision=$COMMIT" \
-  --label "org.opencontainers.image.created=$BUILD_DATE" \
-  --label "audio.deps=$BASE_IMAGE@$(crane digest "$BASE_IMAGE")"
+    echo "appending $(du -sh "$layer" | cut -f1) layer to $BASE_IMAGE ($platform) -> $dest"
+    crane append --platform "$platform" -b "$BASE_IMAGE" -f "$layer" -t "$dest"
 
-# No Dockerfile declares this config, so read it back: a typo would only surface as a wrong pod.
-crane config "$IMAGE" | python3 -c '
+    deps_digest="$(crane digest --platform "$platform" "$BASE_IMAGE")"
+
+    local env_args=(--env "AUDIO_BASE=$BASE" --env PYTHONPATH=/app --env PYTHONUNBUFFERED=1
+              --env WRAPPER_PORT=8000)
+    local kv
+    for kv in ${EXTRA_ENV:-}; do env_args+=(--env "$kv"); done
+
+    # Do NOT --set-platform here: that would let an amd64 base be mislabeled as arm64.
+    # architecture must come from the selected BASE_IMAGE platform slice.
+    crane mutate --platform "$platform" "$dest" -t "$dest" \
+      --workdir /app \
+      "${env_args[@]}" \
+      --cmd="audio-python,-m,wrapper.app" \
+      --label "org.opencontainers.image.title=audio-$BASE" \
+      --label "org.opencontainers.image.version=$VERSION" \
+      --label "org.opencontainers.image.revision=$COMMIT" \
+      --label "org.opencontainers.image.created=$BUILD_DATE" \
+      --label "audio.deps=$BASE_IMAGE@$deps_digest"
+
+    # No Dockerfile declares this config, so read it back: a typo would only surface as a wrong pod.
+    crane config --platform "$platform" "$dest" | python3 -c '
 import json, sys
-want_base = sys.argv[1]
-cfg = json.load(sys.stdin)["config"]
+want_base, want_arch = sys.argv[1], sys.argv[2]
+doc = json.load(sys.stdin)
+cfg = doc["config"]
 env = dict(e.split("=", 1) for e in cfg.get("Env", []))
 assert env.get("AUDIO_BASE") == want_base, env.get("AUDIO_BASE")
 assert env.get("PYTHONPATH") == "/app", env.get("PYTHONPATH")
 assert env.get("WRAPPER_PORT") == "8000", env.get("WRAPPER_PORT")
 assert cfg.get("WorkingDir") == "/app", cfg.get("WorkingDir")
 assert cfg.get("Cmd") == ["audio-python", "-m", "wrapper.app"], cfg.get("Cmd")
-' "$BASE"
+assert doc.get("architecture") == want_arch, (doc.get("architecture"), want_arch)
+' "$BASE" "$arch"
 
-echo "pushed $IMAGE ($(crane digest "$IMAGE"))"
+    echo "pushed $dest ($(crane digest --platform "$platform" "$dest"))"
+}
+
+for platform in "${platform_list[@]}"; do
+    platform="$(echo "$platform" | tr -d '[:space:]')"
+    [ -n "$platform" ] || continue
+    arch="${platform#*/}"
+    if [ "$single_only" = true ]; then
+        dest="$IMAGE"
+    else
+        dest="${IMAGE}-${arch}"
+    fi
+    append_one "$platform" "$dest"
+    manifest_args+=(-m "$dest")
+done
+
+if [ "$single_only" = false ]; then
+    echo "indexing ${manifest_args[*]} -> $IMAGE"
+    crane index append "${manifest_args[@]}" -t "$IMAGE"
+    echo "pushed multi-arch $IMAGE ($(crane digest "$IMAGE"))"
+fi
