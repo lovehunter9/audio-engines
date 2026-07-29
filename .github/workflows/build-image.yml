@@ -1,0 +1,219 @@
+# Shared build called by each <base>-ci.yml: main / v* tag / dispatch publishes, PRs build only.
+name: build-image
+
+on:
+  workflow_call:
+    inputs:
+      base:
+        description: 'Base directory under bases/'
+        required: true
+        type: string
+      repo:
+        description: 'Docker Hub repository name (without namespace)'
+        required: true
+        type: string
+      namespace:
+        description: 'Docker Hub namespace to publish to'
+        required: false
+        default: beclab
+        type: string
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: byte-compile wrapper
+        run: python -m compileall -q wrapper
+      - name: ruff (non-blocking style)
+        run: |
+          python -m pip install -q ruff
+          ruff check wrapper || true
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every base today ships append.env; the docker path is kept for a plain-Dockerfile base.
+      - name: pick build method
+        id: method
+        run: |
+          if [ -f "bases/${{ inputs.base }}/append.env" ]; then
+            echo "kind=append" >> "$GITHUB_OUTPUT"
+          else
+            echo "kind=docker" >> "$GITHUB_OUTPUT"
+          fi
+
+      # namespace is the DESTINATION; DOCKERHUB_USERNAME is only the login identity, not derived from.
+      - name: compute image metadata
+        id: meta
+        env:
+          DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          DEV_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          SHORT_SHA=${GITHUB_SHA::7}
+          IMAGE="${DH_NAMESPACE}/${DH_REPO}"
+          if [ -n "${DEV_TAG:-}" ]; then
+            if [ -z "${DH_USER:-}" ]; then
+              echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
+            fi
+            {
+              echo "build_date=${BUILD_DATE}"
+              echo "push=true"
+              echo "version=${DEV_TAG}"
+              echo "image=${IMAGE}"
+              echo "tags=${IMAGE}:${DEV_TAG}"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IS_MAIN=false; IS_TAG=false; TAG_NAME=""
+          if [ "${{ github.event_name }}" = "push" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            case "${{ github.ref }}" in
+              refs/heads/main) IS_MAIN=true ;;
+              refs/tags/v*) IS_TAG=true; TAG_NAME="${GITHUB_REF#refs/tags/}" ;;
+            esac
+          fi
+          SHOULD_PUSH=false
+          if [ "$IS_MAIN" = "true" ] || [ "$IS_TAG" = "true" ]; then SHOULD_PUSH=true; fi
+          {
+            echo "build_date=${BUILD_DATE}"
+            echo "push=${SHOULD_PUSH}"
+            echo "image=${IMAGE}"
+            if [ "$SHOULD_PUSH" = "true" ]; then
+              if [ -z "${DH_USER:-}" ]; then
+                echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
+              fi
+              if [ "$IS_TAG" = "true" ]; then
+                echo "version=${TAG_NAME}"
+                echo "tags<<EOF"
+                case "$TAG_NAME" in *-*) : ;; *) echo "${IMAGE}:latest" ;; esac
+                echo "${IMAGE}:${TAG_NAME}"
+                echo "${IMAGE}:sha-${SHORT_SHA}"
+                echo "EOF"
+              else
+                echo "version=sha-${SHORT_SHA}"
+                echo "tags<<EOF"
+                echo "${IMAGE}:latest"
+                echo "${IMAGE}:sha-${SHORT_SHA}"
+                echo "EOF"
+              fi
+            else
+              echo "version=ci-${SHORT_SHA}"
+              echo "tags=${DH_REPO}:ci-${SHORT_SHA}"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      # Before setup-buildx: its anonymous moby/buildkit pull times out when bases build in parallel.
+      - name: log in to Docker Hub
+        if: steps.meta.outputs.push == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: install crane
+        if: steps.method.outputs.kind == 'append'
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      # The deps tag is the hash of deps.Dockerfile, so "missing" means "the recipe changed".
+      - name: does this base's deps image exist
+        id: deps
+        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
+        run: |
+          set -euo pipefail
+          if [ ! -f "bases/${{ inputs.base }}/deps.Dockerfile" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"; exit 0      # nemo: nothing installed on top
+          fi
+          IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "${{ steps.meta.outputs.image }}")
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          if crane manifest "$IMG" >/dev/null 2>&1; then
+            echo "$IMG is already published; appending the wrapper onto it"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$IMG is missing, so deps.Dockerfile changed: building it once"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The runner has ONE ~72 GB filesystem (/mnt is a directory on it), so the toolchains must go.
+      - name: make room for the image
+        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
+                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google
+          sudo apt-get clean
+          docker image prune -af
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+
+      # Rare and slow by design; every later wrapper change reuses these layers untouched.
+      - name: build the deps image (only when its recipe changed)
+        if: steps.deps.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/deps.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.deps.outputs.image }}
+          provenance: false
+
+      # No type=gha cache: these layers dwarf the 10 GB per-repo limit, so it would only thrash.
+      - name: docker build (push on main / tag)
+        if: steps.method.outputs.kind == 'docker'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/Dockerfile
+          platforms: linux/amd64
+          push: ${{ steps.meta.outputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ steps.meta.outputs.build_date }}
+          # Plain image, no attestation index — same shape as the local build.
+          provenance: false
+
+      # No registry to mount the base's blobs into on a PR, so such a base is lint-only there.
+      - name: crane append (push on main / tag)
+        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
+        env:
+          BASE: ${{ inputs.base }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ steps.meta.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
+            [ -n "$tag" ] || continue
+            IMAGE="$tag" ./scripts/append-image.sh
+          done
