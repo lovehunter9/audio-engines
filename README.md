@@ -141,34 +141,42 @@ capture only a handful of CUDA graph shapes (`VLLM_CAPTURE_SIZES`, default
 `1,2,4,8`) because inference here is always batch 1 and capture is where startup
 has been seen to wedge holding the vGPU lock; the field name is probed off
 `CompilationConfig` rather than assumed, and `VLLM_ENFORCE_EAGER=1` skips graphs
-altogether if that ever needs to be ruled out.
+altogether if that ever needs to be ruled out. Deps `FROM` is arch-selected:
+amd64 keeps the validated cu129 / v0.23 image; arm64 uses the general aarch64
+CUDA track (`vllm …:v0.16.0-cu130`) plus an **arm64-only** post-install patch that
+moves `qwen-asr`'s `_get_data_parser` onto `ProcessingInfo.get_data_parser` /
+`build_data_parser` (v0.15.1 lacks `configs.qwen3_asr` and cannot load ASR).
+Wrapper code is identical across arches.
 
-**`fasterwhisper`.** Three traps, all in the single `RUN` of its deps recipe:
+**`fasterwhisper`.** Arch-selected deps (`base-amd64` / `base-arm64`):
 
-- The image ships several pythons; only one owns `faster_whisper`, and the web
-  layer must be installed into **that** one.
-- That install needs `--ignore-installed`, because the venv is built with
-  `--system-site-packages`: pip sees `fastapi` in the system python, says
-  "already satisfied", installs nothing, and the venv still cannot import it.
-- `transformers>=4.56` is a floor, not a preference: the image's `ctranslate2`
-  calls `from_pretrained(dtype=...)`, and older `transformers` forwards that
-  unknown kwarg into the model constructor and dies. Only the CT2 **converter**
-  path uses it (`openai/whisper-large-v3` and other transformers-format
-  checkpoints, converted once into the shared cache on first load);
-  `faster_whisper` itself does not.
+- **amd64** keeps `harveyff-whisper-webui` and its three traps in that stage's
+  single `RUN`: pick the python that owns `faster_whisper`; pip
+  `--ignore-installed` for the web layer (venv `--system-site-packages`);
+  `transformers>=4.56` floor for the CT2 converter's `from_pretrained(dtype=...)`.
+  The base's CUDA-matched `ctranslate2` must never be replaced by a generic wheel.
+- **arm64**: PyPI `ctranslate2` aarch64 wheels are CPU-only. Build CT2 from source
+  (`WITH_CUDA`/`WITH_CUDNN`) on `nvidia/cuda:*-cudnn-devel` (cu130 track), keep the
+  wheel, install CUDA torch (wrapper `device=auto` keys off `torch.cuda`), then
+  `faster-whisper`, then force-reinstall the CUDA CT2 wheel. Build asserts
+  `get_supported_compute_types("cuda")` is non-empty.
 
-The base's CUDA-matched `ctranslate2` + `faster_whisper` must never be replaced
-by a generic wheel, so nothing else is touched. This is also the one base that
-raises `LOAD_TIMEOUT_S` (to 5400, via its `append.env`): that conversion is
-legitimate multi-GB work and must not look like a hung load to the watchdog.
+This is also the one base that raises `LOAD_TIMEOUT_S` (to 5400, via its
+`append.env`): CT2 conversion is legitimate multi-GB work and must not look like
+a hung load to the watchdog.
 
-**`pyannote`.** Both diarization stages default to `batch_size=1`, and
-segmentation slides a 10 s window at a 1 s hop, so a 3 h clip becomes ~12 000
-tiny forward passes with the GPU idle in between — hence `DIAR_SEG_BATCH` /
-`DIAR_EMB_BATCH` (chart-derived from the GPU quota, `auto` = 1 on CPU) and the
-one-way fallback to 1 on CUDA OOM. `enhance` windows long clips
-(`ENHANCE_CHUNK_S`) with an overlap-add crossfade and can answer
-`format=wav|flac|ogg`, degrading to FLAC then WAV if libsndfile lacks the codec.
+**`pyannote`.** amd64 keeps the maximsachs CUDA image; arm64 builds CUDA
+torch/torchaudio from the PyTorch `cu130` index (same general aarch64 CUDA track
+as `qwen`) and re-asserts `torch.version.cuda` after pip. Wrapper behavior is
+unchanged from the amd64-tested tree: Silero `vad` stays on Silero's CPU JIT
+path; `diar` / `speaker_embed` / `enhance` select `cuda` when visible. Both
+diarization stages default to `batch_size=1`, and segmentation slides a 10 s
+window at a 1 s hop, so a 3 h clip becomes ~12 000 tiny forward passes with the
+GPU idle in between — hence `DIAR_SEG_BATCH` / `DIAR_EMB_BATCH` (chart-derived
+from the GPU quota, `auto` = 1 on CPU) and the one-way fallback to 1 on CUDA
+OOM. `enhance` windows long clips (`ENHANCE_CHUNK_S`) with an overlap-add
+crossfade and can answer `format=wav|flac|ogg`, degrading to FLAC then WAV if
+libsndfile lacks the codec.
 
 **`nemo` (`diar_stream`).** Its own capability rather than `diar` plus a flag,
 because streaming diarization has to keep speaker labels consistent over time at
@@ -203,10 +211,11 @@ own CALLHOME 4spk DER: 12.44 -> 11.72):
 
 **CI (release).** Each `bases/<base>/**` change (or a `v*` tag, or a manual
 `workflow_dispatch`) runs `.github/workflows/<base>-ci.yml`, which builds
-`linux/amd64` and pushes `beclab/audio-<base>` (`:latest` + `:sha-<short>`, or
-`:<tag>` on a release tag). PRs build only. Uses the `DOCKERHUB_USERNAME` /
-`DOCKERHUB_PASS` repo secrets (login identity with push access to the `beclab`
-org; the namespace is hardcoded, not derived from the username).
+`linux/amd64` **and** `linux/arm64` (native runners: `ubuntu-latest` +
+`ubuntu-24.04-arm`), merges them into one multi-arch tag on `beclab/audio-<base>`
+(`:latest` + `:sha-<short>`, or `:<tag>` on a release tag). PRs lint only. Uses
+the `DOCKERHUB_USERNAME` / `DOCKERHUB_PASS` repo secrets (login identity with push
+access to the destination namespace; the namespace is an input, default `beclab`).
 
 ### Deps once, wrapper in seconds
 
