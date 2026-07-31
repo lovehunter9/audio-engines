@@ -1,4 +1,4 @@
-# Shared build called by each <base>-ci.yml: main / v* tag / dispatch publishes, PRs build only.
+# Shared multi-arch build (amd64+arm64). Never put "<namespace>/..." in job outputs — Actions secret-scan drops them when namespace==DOCKERHUB_USERNAME.
 name: build-image
 
 on:
@@ -42,13 +42,18 @@ jobs:
           python -m pip install -q ruff
           ruff check wrapper || true
 
-  docker-build:
-    name: docker-build
+  meta:
+    name: meta
     runs-on: ubuntu-latest
+    outputs:
+      build_date: ${{ steps.meta.outputs.build_date }}
+      push: ${{ steps.meta.outputs.push }}
+      version: ${{ steps.meta.outputs.version }}
+      # Tag NAMES only (no namespace/repo) — safe for job outputs.
+      tag_names: ${{ steps.meta.outputs.tag_names }}
+      kind: ${{ steps.method.outputs.kind }}
     steps:
       - uses: actions/checkout@v4
-
-      # Every base today ships append.env; the docker path is kept for a plain-Dockerfile base.
       - name: pick build method
         id: method
         run: |
@@ -57,20 +62,15 @@ jobs:
           else
             echo "kind=docker" >> "$GITHUB_OUTPUT"
           fi
-
-      # namespace is the DESTINATION; DOCKERHUB_USERNAME is only the login identity, not derived from.
       - name: compute image metadata
         id: meta
         env:
           DH_USER: ${{ secrets.DOCKERHUB_USERNAME }}
-          DH_NAMESPACE: ${{ inputs.namespace }}
-          DH_REPO: ${{ inputs.repo }}
           DEV_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           SHORT_SHA=${GITHUB_SHA::7}
-          IMAGE="${DH_NAMESPACE}/${DH_REPO}"
           if [ -n "${DEV_TAG:-}" ]; then
             if [ -z "${DH_USER:-}" ]; then
               echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
@@ -79,8 +79,7 @@ jobs:
               echo "build_date=${BUILD_DATE}"
               echo "push=true"
               echo "version=${DEV_TAG}"
-              echo "image=${IMAGE}"
-              echo "tags=${IMAGE}:${DEV_TAG}"
+              echo "tag_names=${DEV_TAG}"
             } >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -96,41 +95,199 @@ jobs:
           {
             echo "build_date=${BUILD_DATE}"
             echo "push=${SHOULD_PUSH}"
-            echo "image=${IMAGE}"
             if [ "$SHOULD_PUSH" = "true" ]; then
               if [ -z "${DH_USER:-}" ]; then
                 echo "::error::DOCKERHUB_USERNAME secret is empty; cannot log in to Docker Hub"; exit 1
               fi
               if [ "$IS_TAG" = "true" ]; then
                 echo "version=${TAG_NAME}"
-                echo "tags<<EOF"
-                case "$TAG_NAME" in *-*) : ;; *) echo "${IMAGE}:latest" ;; esac
-                echo "${IMAGE}:${TAG_NAME}"
-                echo "${IMAGE}:sha-${SHORT_SHA}"
+                echo "tag_names<<EOF"
+                case "$TAG_NAME" in *-*) : ;; *) echo "latest" ;; esac
+                echo "${TAG_NAME}"
+                echo "sha-${SHORT_SHA}"
                 echo "EOF"
               else
                 echo "version=sha-${SHORT_SHA}"
-                echo "tags<<EOF"
-                echo "${IMAGE}:latest"
-                echo "${IMAGE}:sha-${SHORT_SHA}"
+                echo "tag_names<<EOF"
+                echo "latest"
+                echo "sha-${SHORT_SHA}"
                 echo "EOF"
               fi
             else
               echo "version=ci-${SHORT_SHA}"
-              echo "tags=${DH_REPO}:ci-${SHORT_SHA}"
+              echo "tag_names=ci-${SHORT_SHA}"
             fi
           } >> "$GITHUB_OUTPUT"
 
-      # Before setup-buildx: its anonymous moby/buildkit pull times out when bases build in parallel.
+  docker-build:
+    name: docker-build (${{ matrix.arch }})
+    needs: [lint, meta]
+    if: needs.meta.outputs.push == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
       - name: log in to Docker Hub
-        if: steps.meta.outputs.push == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASS }}
 
       - name: install crane
-        if: steps.method.outputs.kind == 'append'
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64|amd64) CRANE_ARCH=x86_64 ;;
+            aarch64|arm64) CRANE_ARCH=arm64 ;;
+            *) echo "unsupported arch $(uname -m)"; exit 1 ;;
+          esac
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+          crane version
+
+      - name: does this base's deps image exist for this arch
+        id: deps
+        if: needs.meta.outputs.kind == 'append'
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          WANT_PLATFORM: ${{ matrix.platform }}
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # crane digest --platform linux/arm64 on a single-arch amd64 image still returns a digest — always verify config.architecture matches WANT_ARCH.
+          arch_matches() {
+            local ref="$1"
+            local got
+            got="$(crane config --platform "$WANT_PLATFORM" "$ref" 2>/dev/null \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin).get("architecture",""))' \
+              || true)"
+            [ "$got" = "$WANT_ARCH" ]
+          }
+          if [ ! -f "bases/${{ inputs.base }}/deps.Dockerfile" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "base_image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RUNTIME_REPO="${DH_NAMESPACE}/${DH_REPO}"
+          IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "$RUNTIME_REPO")
+          ARCH_IMG="${IMG}-${WANT_ARCH}"
+          # Keep full refs in STEP outputs only (same job). Job outputs must not embed the namespace.
+          echo "base_image=${ARCH_IMG}" >> "$GITHUB_OUTPUT"
+          echo "merged_deps=${IMG}" >> "$GITHUB_OUTPUT"
+          if crane manifest "$ARCH_IMG" >/dev/null 2>&1 && arch_matches "$ARCH_IMG"; then
+            echo "$ARCH_IMG is already published (${WANT_ARCH}); appending the wrapper onto it"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          elif crane digest --platform "$WANT_PLATFORM" "$IMG" >/dev/null 2>&1 && arch_matches "$IMG"; then
+            echo "$IMG already has real ${WANT_PLATFORM}; reusing it as the base"
+            echo "base_image=${IMG}" >> "$GITHUB_OUTPUT"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$ARCH_IMG missing or wrong arch: building deps for ${WANT_PLATFORM}"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: make room for the image
+        if: needs.meta.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
+                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google || true
+          sudo apt-get clean || true
+          docker image prune -af || true
+          df -h /
+
+      - uses: docker/setup-buildx-action@v3
+        if: needs.meta.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
+
+      - name: build the deps image for this arch
+        if: steps.deps.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/deps.Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.deps.outputs.base_image }}
+          provenance: false
+
+      - name: docker build (single-arch slice)
+        if: needs.meta.outputs.kind == 'docker'
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform "${{ matrix.platform }}" \
+            -f "bases/${{ inputs.base }}/Dockerfile" \
+            -t "${DH_NAMESPACE}/${DH_REPO}:${VERSION}-${{ matrix.arch }}" \
+            --build-arg "VERSION=${VERSION}" \
+            --build-arg "COMMIT=${{ github.sha }}" \
+            --build-arg "BUILD_DATE=${{ needs.meta.outputs.build_date }}" \
+            --provenance=false \
+            --push .
+
+      - name: crane append (single-arch slice)
+        if: needs.meta.outputs.kind == 'append'
+        env:
+          BASE: ${{ inputs.base }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          COMMIT: ${{ github.sha }}
+          BUILD_DATE: ${{ needs.meta.outputs.build_date }}
+          PLATFORM: ${{ matrix.platform }}
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          TAG_NAMES: ${{ needs.meta.outputs.tag_names }}
+          DEPS_BASE: ${{ steps.deps.outputs.base_image }}
+        run: |
+          set -euo pipefail
+          if [ -n "${DEPS_BASE:-}" ]; then
+            export BASE_IMAGE="$DEPS_BASE"
+          fi
+          count=0
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            IMAGE="${DH_NAMESPACE}/${DH_REPO}:${name}-${{ matrix.arch }}"
+            echo "appending wrapper -> $IMAGE (platform=$PLATFORM)"
+            IMAGE="$IMAGE" PLATFORM="$PLATFORM" ./scripts/append-image.sh
+            count=$((count + 1))
+          done <<< "$TAG_NAMES"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no tag names to append (meta.tag_names empty?)"
+            exit 1
+          fi
+
+  merge-manifests:
+    name: merge-manifests
+    needs: [meta, docker-build]
+    if: needs.meta.outputs.push == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+
+      - name: install crane
         env:
           CRANE_VERSION: v0.20.3
         run: |
@@ -139,81 +296,41 @@ jobs:
             | sudo tar -xz -C /usr/local/bin crane
           crane version
 
-      # The deps tag is the hash of deps.Dockerfile, so "missing" means "the recipe changed".
-      - name: does this base's deps image exist
-        id: deps
-        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
+      - name: merge runtime tags into multi-arch indexes
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          TAG_NAMES: ${{ needs.meta.outputs.tag_names }}
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            tag="${DH_NAMESPACE}/${DH_REPO}:${name}"
+            echo "merging $tag-amd64 + $tag-arm64 -> $tag"
+            ./scripts/merge-index.sh "$tag" amd64 arm64
+            count=$((count + 1))
+          done <<< "$TAG_NAMES"
+          if [ "$count" -eq 0 ]; then
+            echo "::error::no tag names to merge (meta.tag_names empty?)"
+            exit 1
+          fi
+
+      - name: merge deps tags into multi-arch index
+        if: needs.meta.outputs.kind == 'append'
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
         run: |
           set -euo pipefail
           if [ ! -f "bases/${{ inputs.base }}/deps.Dockerfile" ]; then
-            echo "needed=false" >> "$GITHUB_OUTPUT"; exit 0      # nemo: nothing installed on top
+            echo "no deps.Dockerfile; skip"
+            exit 0
           fi
-          IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "${{ steps.meta.outputs.image }}")
-          echo "image=$IMG" >> "$GITHUB_OUTPUT"
-          if crane manifest "$IMG" >/dev/null 2>&1; then
-            echo "$IMG is already published; appending the wrapper onto it"
-            echo "needed=false" >> "$GITHUB_OUTPUT"
+          RUNTIME_REPO="${DH_NAMESPACE}/${DH_REPO}"
+          IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "$RUNTIME_REPO")
+          if crane manifest "${IMG}-amd64" >/dev/null 2>&1 && crane manifest "${IMG}-arm64" >/dev/null 2>&1; then
+            ./scripts/merge-index.sh "$IMG" amd64 arm64
           else
-            echo "$IMG is missing, so deps.Dockerfile changed: building it once"
-            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "per-arch deps not both present (may have reused a prior multi-arch $IMG); ok"
           fi
-
-      # The runner has ONE ~72 GB filesystem (/mnt is a directory on it), so the toolchains must go.
-      - name: make room for the image
-        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
-        run: |
-          df -h /
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
-                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
-                      /usr/share/miniconda /usr/lib/jvm /usr/local/lib/node_modules \
-                      /usr/local/share/vcpkg /usr/local/graalvm /opt/az /opt/google
-          sudo apt-get clean
-          docker image prune -af
-          df -h /
-
-      - uses: docker/setup-buildx-action@v3
-        if: steps.method.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
-
-      # Rare and slow by design; every later wrapper change reuses these layers untouched.
-      - name: build the deps image (only when its recipe changed)
-        if: steps.deps.outputs.needed == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bases/${{ inputs.base }}/deps.Dockerfile
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.deps.outputs.image }}
-          provenance: false
-
-      # No type=gha cache: these layers dwarf the 10 GB per-repo limit, so it would only thrash.
-      - name: docker build (push on main / tag)
-        if: steps.method.outputs.kind == 'docker'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bases/${{ inputs.base }}/Dockerfile
-          platforms: linux/amd64
-          push: ${{ steps.meta.outputs.push }}
-          tags: ${{ steps.meta.outputs.tags }}
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ steps.meta.outputs.build_date }}
-          # Plain image, no attestation index — same shape as the local build.
-          provenance: false
-
-      # No registry to mount the base's blobs into on a PR, so such a base is lint-only there.
-      - name: crane append (push on main / tag)
-        if: steps.method.outputs.kind == 'append' && steps.meta.outputs.push == 'true'
-        env:
-          BASE: ${{ inputs.base }}
-          VERSION: ${{ steps.meta.outputs.version }}
-          COMMIT: ${{ github.sha }}
-          BUILD_DATE: ${{ steps.meta.outputs.build_date }}
-        run: |
-          set -euo pipefail
-          echo "${{ steps.meta.outputs.tags }}" | while read -r tag; do
-            [ -n "$tag" ] || continue
-            IMAGE="$tag" ./scripts/append-image.sh
-          done
