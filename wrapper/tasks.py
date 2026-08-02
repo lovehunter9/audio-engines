@@ -16,22 +16,40 @@ TTL_S = float(os.environ.get("TASK_TTL_S", "1800") or 1800)
 QUEUE_MAX = int(os.environ.get("TASK_QUEUE_MAX", "32") or 32)
 _GC_EVERY_S = 30.0
 
-# Advertised by /v1/models next to the capability's own endpoints.
+# The cross-engine query surface (llm-init docs/engine-task-api.md): ocr and image answer these too.
+TASKS_PATH = "/v1/tasks"
+# What this engine shipped before the contract existed. Same runner, same tasks, kept for old clients.
+LEGACY_PATH = "/v1/audio/tasks"
+
+# What this image's tasks report as the contract's `kind`; ocr and image say so from their own.
+KIND = "audio"
+
+_ROUTES = [
+    ("GET", "", "List tasks (oldest first) with queue capacity; ?status= and ?limit="),
+    ("GET", "/{id}", "Task status / progress / JSON result"),
+    ("GET", "/{id}/result", "Task result (audio for enhance, else JSON)"),
+    ("DELETE", "/{id}", "Cancel a running task, or drop a finished one's result"),
+]
+
+# Advertised by /api/engine-spec next to the capability's own endpoints.
 ENDPOINTS = [
-    {"method": "GET", "path": "/v1/audio/tasks",
-     "description": "List tasks (oldest first)"},
-    {"method": "GET", "path": "/v1/audio/tasks/{id}",
-     "description": "Task status / progress / JSON result"},
-    {"method": "GET", "path": "/v1/audio/tasks/{id}/result",
-     "description": "Task result (audio for enhance, else JSON)"},
-    {"method": "DELETE", "path": "/v1/audio/tasks/{id}",
-     "description": "Cancel a running task, or drop a finished one's result"},
+    {"method": method, "path": TASKS_PATH + tail, "description": desc}
+    for method, tail, desc in _ROUTES
+] + [
+    {"method": method, "path": LEGACY_PATH + tail, "deprecated": True,
+     "description": "%s; alias of %s" % (desc, TASKS_PATH + tail)}
+    for method, tail, desc in _ROUTES
 ]
 
 # Appended to a capability's own description so callers can discover the async mode.
 ASYNC_HINT = "async=1 -> 202 + task"
 
 _TERMINAL = ("succeeded", "failed", "canceled")
+_STATUSES = ("queued", "running") + _TERMINAL
+
+# GET /v1/tasks bounds, per the contract: without them a list is "every task still inside the TTL".
+LIST_LIMIT_DEFAULT = 100
+LIST_LIMIT_MAX = 1000
 
 
 class Cancelled(Exception):
@@ -139,8 +157,9 @@ class Task:
             except Exception:
                 pass
 
-    def doc(self, urls=True):
-        d = {"id": self.id, "cap": self.cap, "model": self.model, "status": self.status,
+    def doc(self):
+        d = {"object": "task", "id": self.id, "kind": KIND,
+             "cap": self.cap, "model": self.model, "status": self.status,
              "created": round(self.created, 3),
              "started": round(self.started, 3) if self.started else None,
              "finished": round(self.finished, 3) if self.finished else None,
@@ -151,9 +170,9 @@ class Task:
         if self.result_kind == "binary":
             d["content_type"] = self.content_type
             d["result_bytes"] = self.result_bytes
-        if urls:
-            d["poll"] = "/v1/audio/tasks/%s" % self.id
-            d["result_url"] = "/v1/audio/tasks/%s/result" % self.id
+        # Always the contract path, even when the caller arrived on the legacy alias.
+        d["poll"] = "%s/%s" % (TASKS_PATH, self.id)
+        d["result_url"] = "%s/%s/result" % (TASKS_PATH, self.id)
         return d
 
 
@@ -209,6 +228,12 @@ class _Runner:
 
     def all(self):
         return [t for t in list(self._tasks.values()) if t.keep]
+
+    def capacity(self):
+        # Counts sync tasks too: they hold a queue slot and are what submit() checks against.
+        queued = sum(1 for t in list(self._tasks.values()) if t.status == "queued")
+        return {"queued": queued, "running": 1 if self.running_id else 0,
+                "limit": QUEUE_MAX, "accepting": queued < QUEUE_MAX}
 
     def queue_position(self, task):
         if task.status != "queued":
@@ -353,9 +378,7 @@ async def dispatch(async_flag, cap, model, work, *, cleanup=None, fail="job fail
         raise HTTPException(status_code=503,
                             detail="engine is busy: %d jobs already queued" % QUEUE_MAX)
     if want:
-        doc = task.doc()
-        doc["queue_position"] = _runner.queue_position(task)
-        return JSONResponse(status_code=202, content={"task": doc})
+        return JSONResponse(status_code=202, content={"task": _doc(task)})
     try:
         payload = await asyncio.wrap_future(task.future)
     except HTTPException:
@@ -365,6 +388,51 @@ async def dispatch(async_flag, cap, model, work, *, cleanup=None, fail="job fail
     except Exception as e:
         raise HTTPException(status_code=500, detail="%s: %s" % (fail, e))
     return to_response(payload)
+
+
+def _doc(t):
+    """The task doc as every route answers it: `queue_position` only while it means something."""
+    d = t.doc()
+    pos = _runner.queue_position(t)
+    if pos is not None:
+        d["queue_position"] = pos
+    return d
+
+
+def _list_params(status, limit):
+    """The contract's two list parameters, or a 400 naming the one that is wrong."""
+    from fastapi import HTTPException
+
+    if status in (None, ""):
+        status = None
+    elif status not in _STATUSES:
+        raise HTTPException(status_code=400, detail="unknown status %r: expected %s" % (
+            status, "|".join(_STATUSES)))
+    if limit in (None, ""):
+        return status, LIST_LIMIT_DEFAULT
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        n = 0
+    if not 1 <= n <= LIST_LIMIT_MAX:
+        raise HTTPException(status_code=400, detail="invalid limit %r: expected an integer in 1..%d"
+                            % (limit, LIST_LIMIT_MAX))
+    return status, n
+
+
+def _select(tasks, status, limit):
+    """Filter, then spend `limit` on finished tasks only, newest kept.
+
+    Queued and running always survive: their count is already bounded by the queue, and a client
+    reading its own `queue_position` must not lose the row to jobs that finished while it waited.
+    Returns the rows oldest first, plus whether the limit dropped any (the list's `truncated`).
+    """
+    rows = [t for t in tasks if status is None or t.status == status]
+    live = [t for t in rows if t.status not in _TERMINAL]
+    done = [t for t in rows if t.status in _TERMINAL]
+    room = max(limit - len(live), 0)
+    kept = live + done[max(len(done) - room, 0):]
+    return sorted(kept, key=lambda t: t.created), len(done) > room
 
 
 def mount(app):
@@ -380,23 +448,21 @@ def mount(app):
             raise HTTPException(status_code=404, detail="no such task: %s" % tid)
         return t
 
-    def _doc(t):
-        d = t.doc()
-        pos = _runner.queue_position(t)
-        if pos is not None:
-            d["queue_position"] = pos
-        return d
+    async def list_tasks(status: str = None, limit: str = None):
+        # Both parameters arrive as strings so a bad one answers 400 (the contract's code) rather
+        # than FastAPI's own 422 for a failed int coercion.
+        want, cap = _list_params(status, limit)
+        rows, truncated = _select(_runner.all(), want, cap)
+        out = {"object": "list", "running": _runner.running_id,
+               "capacity": _runner.capacity(),
+               "data": [_doc(t) for t in rows]}
+        if truncated:
+            out["truncated"] = True
+        return out
 
-    @app.get("/v1/audio/tasks")
-    async def list_tasks():
-        return {"object": "list", "running": _runner.running_id,
-                "data": [_doc(t) for t in _runner.all()]}
-
-    @app.get("/v1/audio/tasks/{tid}")
     async def get_task(tid: str):
         return _doc(_need(tid))
 
-    @app.get("/v1/audio/tasks/{tid}/result")
     async def get_result(tid: str):
         t = _need(tid)
         if t.status != "succeeded":
@@ -408,13 +474,26 @@ def mount(app):
             raise HTTPException(status_code=410, detail="the result was already dropped")
         return FileResponse(t.result_path, media_type=t.content_type, headers=t.headers or None)
 
-    @app.delete("/v1/audio/tasks/{tid}")
+    def _dropped(t):
+        _runner.forget(t)
+        return {"id": t.id, "status": t.status, "dropped": True}
+
     async def del_task(tid: str):
         t = _need(tid)
         if t.status in _TERMINAL:
-            _runner.forget(t)
-            return {"id": tid, "status": t.status, "dropped": True}
-        _runner.cancel(t)
+            return _dropped(t)
+        # cancel() says False when the worker settled the task between the check above and the
+        # call. It is the terminal case after all: reporting `canceling` would promise a stop
+        # that already cannot happen, and would leave the result for the GC to collect.
+        if not _runner.cancel(t):
+            return _dropped(t)
         return {"id": tid, "status": t.status, "canceling": True}
+
+    # One handler per route, reachable under both bases, so the alias can never drift.
+    for base in (TASKS_PATH, LEGACY_PATH):
+        app.get(base)(list_tasks)
+        app.get(base + "/{tid}")(get_task)
+        app.get(base + "/{tid}/result")(get_result)
+        app.delete(base + "/{tid}")(del_task)
 
     return app
