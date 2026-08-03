@@ -48,17 +48,26 @@ for the whole stream), so any capability whose work can outlast that also accept
 | Request | Answer |
 |---|---|
 | without `async` | exactly as before: the result, on the same request |
-| `async=1` | `202 {"task":{id, cap, model, status, poll, result_url}}` |
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /v1/audio/tasks/{id}` | `status` (`queued`→`running`→`succeeded`\|`failed`\|`canceled`), `progress` (`ratio`, `stage`, `done`/`total`), and the JSON `result` once it succeeded |
-| `GET /v1/audio/tasks/{id}/result` | the result: audio bytes for enhance (with the same headers the sync path sends), otherwise the same JSON |
-| `DELETE /v1/audio/tasks/{id}` | cancel a running task at its next checkpoint, or drop a finished one's result |
-| `GET /v1/audio/tasks` | every live task, for a human debugging the instance |
+| `async=1` | `202 {"task":{id, kind, cap, model, status, poll, result_url}}` |
 
 It is a form field and not a header on purpose: the gateway forwards audio bodies
 verbatim but not arbitrary headers, so a field is what actually survives the trip.
+
+The four query endpoints — `GET /v1/tasks`, `GET /v1/tasks/{id}`,
+`GET /v1/tasks/{id}/result`, `DELETE /v1/tasks/{id}` — and the task document they
+answer with are **not audio's own**: they are the cross-engine async task contract
+that OCR and, later, image implement identically. It is specified in llm-init's
+[`docs/engine-task-api.md`](https://github.com/beclab/llm-init/blob/main/docs/engine-task-api.md);
+`wrapper/tasks.py` is this engine's implementation of it, with `kind: "audio"`.
+
+The paths this engine shipped first, `/v1/audio/tasks*`, stay mounted as aliases of
+the same runner and are advertised as `deprecated` in `/api/engine-spec`.
+
+`GET /v1/tasks` takes the contract's `?status=` and `?limit=` (default 100, finished
+tasks are the only ones a limit drops, `truncated: true` when it did).
+
+What is audio-specific is what a result looks like: enhance answers audio bytes
+with the same headers the sync path sends, everything else answers JSON.
 
 Both paths run on **one worker thread** — one instance owns one model on one
 (time-sliced) GPU — so a sync request now queues behind whatever is running,

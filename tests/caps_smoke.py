@@ -52,14 +52,46 @@ class Seg:
         self.start, self.end = a, b
 
 
+TASKS = "/v1/tasks"           # the cross-engine contract (llm-init docs/engine-task-api.md)
+LEGACY = "/v1/audio/tasks"    # what this engine shipped first; same runner
+
+
 def poll(c, tid, timeout=20):
     t0 = time.time()
     while time.time() - t0 < timeout:
-        d = c.get("/v1/audio/tasks/" + tid).json()
+        d = c.get("%s/%s" % (TASKS, tid)).json()
         if d["status"] in ("succeeded", "failed", "canceled"):
             return d
         time.sleep(0.02)
     return {"status": "timeout"}
+
+
+def contract(c, doc, label):
+    """What every engine behind llm-init must answer, not just this one."""
+    check("%s doc is object=task kind=audio" % label,
+          doc.get("object") == "task" and doc.get("kind") == "audio",
+          (doc.get("object"), doc.get("kind")))
+    check("%s poll/result_url point at the contract path" % label,
+          doc.get("poll") == "%s/%s" % (TASKS, doc["id"])
+          and doc.get("result_url") == "%s/%s/result" % (TASKS, doc["id"]),
+          (doc.get("poll"), doc.get("result_url")))
+    alias = c.get("%s/%s" % (LEGACY, doc["id"])).json()
+    check("%s the legacy alias answers the same task" % label, alias == doc, alias.get("id"))
+    cap = (c.get(TASKS).json() or {}).get("capacity") or {}
+    check("%s the list reports queue capacity" % label,
+          set(cap) == {"queued", "running", "limit", "accepting"} and cap["limit"] > 0, cap)
+    check("%s the legacy list alias agrees" % label,
+          c.get(LEGACY).json() == c.get(TASKS).json())
+    got = c.get(TASKS, params={"status": "succeeded"}).json()["data"]
+    check("%s ?status= filters" % label,
+          got and all(d["status"] == "succeeded" for d in got),
+          [d["status"] for d in got])
+    one = c.get(TASKS, params={"limit": "1"}).json()
+    finished = [d for d in one["data"] if d["status"] in ("succeeded", "failed", "canceled")]
+    check("%s ?limit= caps the finished tasks" % label, len(finished) <= 1, len(finished))
+    check("%s a rejected parameter is a 400" % label,
+          c.get(TASKS, params={"status": "done"}).status_code == 400
+          and c.get(TASKS, params={"limit": "0"}).status_code == 400)
 
 
 def both_ways(c, path, files, data, label, json_result=True):
@@ -76,12 +108,13 @@ def both_ways(c, path, files, data, label, json_result=True):
           (doc.get("status"), (doc.get("error") or {}).get("message")))
     if not ok1 or doc["status"] != "succeeded":
         return doc
+    contract(c, doc, label)
     if json_result:
         check("%s async result == sync result" % label, doc["result"] == r1.json())
-        rr = c.get("/v1/audio/tasks/%s/result" % doc["id"])
+        rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
         check("%s .../result agrees too" % label, rr.json() == r1.json(), rr.status_code)
     else:
-        rr = c.get("/v1/audio/tasks/%s/result" % doc["id"])
+        rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
         check("%s async bytes == sync bytes" % label, rr.content == r1.content,
               (len(rr.content), len(r1.content)))
         check("%s content-type survives" % label,
@@ -97,8 +130,14 @@ def mounted(c):
 
 def advertises_tasks(c, label):
     paths = mounted(c)
-    check("%s advertises the task API" % label, ("GET", "/v1/audio/tasks/{id}") in paths,
+    check("%s advertises the task API" % label,
+          ("GET", TASKS + "/{id}") in paths and ("GET", LEGACY + "/{id}") in paths,
           sorted(p[1] for p in paths))
+    deprecated = {e["path"] for e in c.get("/api/engine-spec").json()["endpoints"]
+                  if e.get("deprecated")}
+    check("%s marks the legacy paths deprecated" % label,
+          deprecated == {LEGACY, LEGACY + "/{id}", LEGACY + "/{id}/result"},
+          sorted(deprecated))
 
 
 WAV = {"file": ("a.wav", b"RIFF0000WAVEfake", "audio/wav")}
@@ -154,7 +193,7 @@ def t_diar():
         r = c.post("/v1/audio/diarization", files=WAV, data={"async": "1"})
         mid = {}
         for _ in range(40):
-            mid = c.get("/v1/audio/tasks/" + r.json()["task"]["id"]).json()
+            mid = c.get("%s/%s" % (TASKS, r.json()["task"]["id"])).json()
             if (mid.get("progress") or {}).get("stage") == "segmentation":
                 break
             time.sleep(0.01)
@@ -197,7 +236,7 @@ def t_enhance():
         r = c.post("/v1/audio/enhance", files=WAV, data={"async": "1"})
         mid = {}
         for _ in range(60):
-            mid = c.get("/v1/audio/tasks/" + r.json()["task"]["id"]).json()
+            mid = c.get("%s/%s" % (TASKS, r.json()["task"]["id"])).json()
             if (mid.get("progress") or {}).get("total"):
                 break
             time.sleep(0.01)
@@ -256,7 +295,7 @@ def t_whisper():
         r2 = c.post("/v1/audio/transcriptions", files=WAV,
                     data={"response_format": "text", "async": "1"})
         doc = poll(c, r2.json()["task"]["id"])
-        rr = c.get("/v1/audio/tasks/%s/result" % doc["id"])
+        rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
         check("and as a task it is served from .../result as text",
               rr.status_code == 200 and rr.content == r.content
               and rr.headers["content-type"].startswith("text/plain"),
