@@ -52,7 +52,7 @@ class Seg:
         self.start, self.end = a, b
 
 
-TASKS = "/v1/tasks"           # the cross-engine contract (llm-init docs/engine-task-api.md)
+TASKS = "/v1/tasks"           # llm-init docs/api/openapi.yaml async-tasks contract
 LEGACY = "/v1/audio/tasks"    # what this engine shipped first; same runner
 
 

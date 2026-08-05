@@ -1,4 +1,4 @@
-# Decoding for the torch caps: soundfile first, since the pyannote image's torchcodec is broken.
+# Shared audio conversion and decoding; optional numeric dependencies are imported on demand.
 import io
 import os
 import tempfile
@@ -19,6 +19,28 @@ def unlink(path):
         os.unlink(path)
     except Exception:
         pass
+
+
+def pcm16_to_float32(data):
+    import numpy as np
+
+    if not data:
+        return np.zeros((0,), dtype="float32")
+    return np.frombuffer(data, dtype="<i2").astype("float32") / 32768.0
+
+
+def resample_linear(samples, source_rate, target_rate=16000):
+    import numpy as np
+
+    if source_rate == target_rate or samples.shape[0] == 0:
+        return samples.astype("float32", copy=False)
+    duration = samples.shape[0] / float(source_rate)
+    target_length = round(duration * target_rate)
+    if target_length <= 0:
+        return np.zeros((0,), dtype="float32")
+    source_points = np.linspace(0.0, duration, num=samples.shape[0], endpoint=False)
+    target_points = np.linspace(0.0, duration, num=target_length, endpoint=False)
+    return np.interp(target_points, source_points, samples).astype("float32")
 
 
 def decode(src):

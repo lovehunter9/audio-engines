@@ -4,24 +4,25 @@ import json
 import glob
 import asyncio
 import logging
-import threading
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-import uvicorn
 
-from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
+from ..audioio import pcm16_to_float32, resample_linear
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-diar-stream")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "diar-streaming-sortformer")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (
-    _src or "nvidia/diar_streaming_sortformer_4spk-v2.1")
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime(
+    "diar-streaming-sortformer",
+    default_repo="nvidia/diar_streaming_sortformer_4spk-v2.1",
+    model=None,
+    device="cpu",
+)
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
+PORT = _runtime.port
 
 # Streaming knobs in 80ms frames, defaulting to the card's high-latency preset (README has the set).
 CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "124") or 124)
@@ -35,7 +36,7 @@ MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)     # fallb
 WINDOW_SEC = float(os.environ.get("DIAR_STREAM_WINDOW_SEC", "60") or 60)
 OVERLAP_SEC = float(os.environ.get("DIAR_STREAM_OVERLAP_SEC", "12") or 12)
 
-_state = {"ready": False, "error": None, "model": None, "device": "cpu"}
+_state = _runtime.state
 # Sortformer's diarize() is blocking and not concurrency-safe, so inference is serialized.
 _infer_lock = asyncio.Lock()
 
@@ -178,28 +179,6 @@ def _diarize(buf):
     return _parse_segments(res[0] if res else [])
 
 
-def _pcm16_to_f32(data):
-    import numpy as np
-
-    if not data:
-        return np.zeros((0,), dtype="float32")
-    return np.frombuffer(data, dtype="<i2").astype("float32") / 32768.0
-
-
-def _resample_linear(seg, src_sr):
-    import numpy as np
-
-    if src_sr == 16000 or seg.shape[0] == 0:
-        return seg.astype("float32", copy=False)
-    dur = seg.shape[0] / float(src_sr)
-    n16 = int(round(dur * 16000))
-    if n16 <= 0:
-        return np.zeros((0,), dtype="float32")
-    xo = np.linspace(0.0, dur, num=seg.shape[0], endpoint=False)
-    xn = np.linspace(0.0, dur, num=n16, endpoint=False)
-    return np.interp(xn, xo, seg).astype("float32")
-
-
 class _FallbackToWindow(Exception):
     # Raised by the pre-flight self-test, so the switch happens before any client audio arrives.
     pass
@@ -328,7 +307,7 @@ async def _run_streaming(ws):
         data = msg.get("bytes")
         if not data:
             continue
-        seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+        seg = resample_linear(pcm16_to_float32(data), sample_rate)
         buf = np.concatenate([buf, seg]) if buf.size else seg
         new_samples += int(seg.shape[0])
         total_new += int(seg.shape[0])
@@ -450,7 +429,7 @@ async def _run_window(ws):
         data = msg.get("bytes")
         if not data:
             continue
-        seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+        seg = resample_linear(pcm16_to_float32(data), sample_rate)
         buf = np.concatenate([buf, seg]) if buf.size else seg
         since += int(seg.shape[0])
         total += int(seg.shape[0])
@@ -502,10 +481,12 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "streaming sortformer")
-    app = build_app(supports)
     _p("diar_stream starting; model=%s port=%s" % (MODEL_REPO, PORT))
     # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
-                ws_ping_interval=None, ws_ping_timeout=None)
+    _runtime.serve(
+        supports,
+        _load,
+        build_app,
+        "streaming sortformer",
+        disable_ws_ping=True,
+    )

@@ -1,33 +1,29 @@
 # Forced alignment via Qwen3-ForcedAligner: a model of its own, hence always its own instance.
 import os
 import tempfile
-import threading
 import logging
 import asyncio
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
+from ..batch import parse_segments
 from ..gpu import mount_metrics
 from ..contract import register
 from ..audioio import spill, unlink
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-align")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-ForcedAligner-0.6B")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime("Qwen/Qwen3-ForcedAligner-0.6B", model=None, device="cpu")
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 # align() REQUIRES language but tolerates an unknown one: "auto" aligns byte-identically to "en".
 DEFAULT_LANGUAGE = "auto"
 
-_state = {"ready": False, "error": None, "model": None, "device": "cpu"}
+_state = _runtime.state
 
 
 def _load():
@@ -95,14 +91,7 @@ def build_app(supports):
         data = await file.read()
         # BATCH mode: `segments` JSON [{start,end,text,[language]}], times slice-relative.
         if segments:
-            import json as _json
-
-            try:
-                segs = _json.loads(segments)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-            if not isinstance(segs, list):
-                raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+            segs = parse_segments(segments)
 
             def _decode_all():
                 import io as _io
@@ -175,7 +164,4 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "Qwen3-ForcedAligner")
-    app = build_app(supports)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+    _runtime.serve(supports, _load, build_app, "Qwen3-ForcedAligner")

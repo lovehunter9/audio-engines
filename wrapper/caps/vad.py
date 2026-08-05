@@ -2,23 +2,19 @@
 import asyncio
 import os
 import logging
-import threading
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 from ..audioio import decode_mono
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-vad")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "silero-v5")
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime("silero-v5", model=None, get_ts=None)
+MODEL_NAME = _runtime.model_name
 SR = 16000
 
 
@@ -36,7 +32,7 @@ VAD_SPEECH_PAD_MS = _envf("VAD_SPEECH_PAD_MS", 200)
 VAD_MIN_SPEECH_MS = _envf("VAD_MIN_SPEECH_MS", 250)
 VAD_MAX_SPEECH_S = _envf("VAD_MAX_SPEECH_S", 30)
 
-_state = {"ready": False, "error": None, "model": None, "get_ts": None}
+_state = _runtime.state
 
 
 def _load():
@@ -128,7 +124,4 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "silero-vad")
-    app = build_app(supports)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+    _runtime.serve(supports, _load, build_app, "silero-vad")

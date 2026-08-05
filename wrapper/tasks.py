@@ -16,7 +16,7 @@ TTL_S = float(os.environ.get("TASK_TTL_S", "1800") or 1800)
 QUEUE_MAX = int(os.environ.get("TASK_QUEUE_MAX", "32") or 32)
 _GC_EVERY_S = 30.0
 
-# The cross-engine query surface (llm-init docs/engine-task-api.md): ocr and image answer these too.
+# The cross-engine async-tasks contract is defined in llm-init's docs/api/openapi.yaml.
 TASKS_PATH = "/v1/tasks"
 # What this engine shipped before the contract existed. Same runner, same tasks, kept for old clients.
 LEGACY_PATH = "/v1/audio/tasks"

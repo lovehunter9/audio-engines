@@ -5,26 +5,21 @@ import io
 import os
 import logging
 import tempfile
-import threading
 import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 from ..audioio import decode_mono, spill, unlink
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-enhance")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "mtl-mimic-voicebank")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime("mtl-mimic-voicebank", model=None, kind=None, device="cpu")
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 SR = 16000  # SpeechBrain enhancement models operate at 16 kHz mono.
 
@@ -42,7 +37,7 @@ _FORMATS = {
 }
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
-_state = {"ready": False, "error": None, "model": None, "kind": None, "device": "cpu"}
+_state = _runtime.state
 
 
 def _load():
@@ -220,7 +215,4 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "speechbrain enhancement")
-    app = build_app(supports)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+    _runtime.serve(supports, _load, build_app, "speechbrain enhancement")
