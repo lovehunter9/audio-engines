@@ -7,21 +7,20 @@ import threading
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
 from fastapi.responses import Response
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
+from ..batch import parse_segments
 from ..gpu import mount_metrics
 from ..contract import register
+from ..audioio import pcm16_to_float32, resample_linear
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-stt-stream")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-ASR-1.7B")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime("Qwen/Qwen3-ASR-1.7B", asr=None)
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
+PORT = _runtime.port
 GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
 MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
 # Holds ONE unit of work (a <=540s offline chunk or a ~240s streaming window); chart-derived.
@@ -33,7 +32,7 @@ DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
 # Finalize + re-init this often, so a long session never overflows vLLM's ~8192-token encoder cache.
 ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
 
-_state = {"ready": False, "error": None, "asr": None}
+_state = _runtime.state
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
@@ -152,28 +151,6 @@ def _offline_transcribe(audio):
     return (t or "").strip()
 
 
-def _pcm16_to_f32(buf):
-    import numpy as np
-
-    if not buf:
-        return np.zeros((0,), dtype="float32")
-    return np.frombuffer(buf, dtype="<i2").astype("float32") / 32768.0
-
-
-def _resample_linear(seg, src_sr):
-    import numpy as np
-
-    if src_sr == 16000 or seg.shape[0] == 0:
-        return seg.astype("float32", copy=False)
-    dur = seg.shape[0] / float(src_sr)
-    n16 = int(round(dur * 16000))
-    if n16 <= 0:
-        return np.zeros((0,), dtype="float32")
-    xo = np.linspace(0.0, dur, num=seg.shape[0], endpoint=False)
-    xn = np.linspace(0.0, dur, num=n16, endpoint=False)
-    return np.interp(xn, xo, seg).astype("float32")
-
-
 def build_app(supports):
     has_stt = "stt" in supports
     has_stream = "stt_stream" in supports
@@ -197,14 +174,7 @@ def build_app(supports):
             audio = await asyncio.to_thread(_decode_to_16k_mono, raw, file.filename)
             # BATCH mode (opt-in): `segments` JSON [{start,end}] — slice + transcribe each.
             if segments:
-                import json as _json
-
-                try:
-                    segs = _json.loads(segments)
-                except Exception as e:
-                    raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-                if not isinstance(segs, list):
-                    raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+                segs = parse_segments(segments)
 
                 def _work_batch(ctx):
                     out = []
@@ -339,7 +309,7 @@ def build_app(supports):
                     data = msg.get("bytes")
                     if not data:
                         continue
-                    seg = _resample_linear(_pcm16_to_f32(data), sample_rate)
+                    seg = resample_linear(pcm16_to_float32(data), sample_rate)
                     pending = np.concatenate([pending, seg]) if pending.size else seg
                     step = max(1, int(round(step_ms / 1000.0 * 16000)))
                     while pending.shape[0] >= step:
@@ -377,16 +347,26 @@ def build_app(supports):
 
 def run(supports):
     _p("stt_stream starting; model=%s port=%s supports=%s" % (MODEL_REPO, PORT, supports))
-    # Armed first: this load blocks the main thread, so only another thread can time it out.
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "qwen-asr vLLM")
-    try:
-        _load_blocking()
-    except Exception as e:
-        _state["error"] = str(e)
-        _p("engine load FAILED: %s" % e)
-        log.exception("engine load failed: %s", e)
-    app = build_app(supports)
-    _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
+
+    def load():
+        try:
+            _load_blocking()
+        except Exception as e:
+            _state["error"] = str(e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("engine load failed: %s", e)
+
+    def build(served):
+        app = build_app(served)
+        _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
+        return app
+
     # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL,
-                ws_ping_interval=None, ws_ping_timeout=None)
+    _runtime.serve(
+        supports,
+        load,
+        build,
+        "qwen-asr vLLM",
+        load_on_main=True,
+        disable_ws_ping=True,
+    )

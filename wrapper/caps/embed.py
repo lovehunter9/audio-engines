@@ -2,28 +2,23 @@
 import asyncio
 import os
 import logging
-import threading
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register
 from ..audioio import decode, spill, unlink
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-embed")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "pyannote-embedding")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime("pyannote-embedding", inference=None, device="cpu", dim=None)
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
-_state = {"ready": False, "error": None, "inference": None, "device": "cpu", "dim": None}
+_state = _runtime.state
 
 
 def _load():
@@ -85,7 +80,4 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "pyannote embedding")
-    app = build_app(supports)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+    _runtime.serve(supports, _load, build_app, "pyannote embedding")

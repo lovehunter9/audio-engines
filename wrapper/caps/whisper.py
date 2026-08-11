@@ -4,25 +4,27 @@ import logging
 import shutil
 import subprocess
 import tempfile
-import threading
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import PlainTextResponse
-import uvicorn
 
 from .. import tasks
-from .. import watchdog
+from ..batch import parse_segments
 from ..gpu import mount_metrics
 from ..contract import register
+from ..runtime import Runtime
 
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "info").lower()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL.upper(), logging.INFO))
 log = logging.getLogger("audio-whisper")
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "Systran/faster-whisper-large-v3")
-_src = os.environ.get("MODEL_SOURCE", "")
-MODEL_REPO = _src[5:] if _src.startswith("hf://") else (_src or MODEL_NAME)
-PORT = int(os.environ.get("WRAPPER_PORT", "8000"))
+_runtime = Runtime(
+    "Systran/faster-whisper-large-v3",
+    model=None,
+    pipeline=None,
+    device=None,
+    compute=None,
+)
+MODEL_NAME = _runtime.model_name
+MODEL_REPO = _runtime.model_repo
 COMPUTE_TYPE = os.environ.get("FW_COMPUTE_TYPE", "float16")
 DEVICE = os.environ.get("FW_DEVICE", "auto")
 BEAM_SIZE = int(os.environ.get("FW_BEAM_SIZE", "5") or 5)
@@ -36,8 +38,7 @@ _LANG = {"english": "en", "chinese": "zh", "mandarin": "zh", "japanese": "ja",
          "korean": "ko", "french": "fr", "german": "de", "spanish": "es",
          "russian": "ru", "italian": "it", "portuguese": "pt", "arabic": "ar"}
 
-_state = {"ready": False, "error": None, "model": None, "pipeline": None,
-          "device": None, "compute": None}
+_state = _runtime.state
 
 
 def _locate():
@@ -299,14 +300,7 @@ def build_app(supports):
         fn = file.filename
         # BATCH mode (opt-in): `segments` = JSON [{start,end}] -> one {text}|{error} each.
         if segments:
-            import json as _json
-
-            try:
-                segs = _json.loads(segments)
-            except Exception as e:
-                raise HTTPException(status_code=400, detail="invalid `segments` json: %s" % e)
-            if not isinstance(segs, list):
-                raise HTTPException(status_code=400, detail="`segments` must be a JSON array")
+            segs = parse_segments(segments)
 
             def _work_batch(ctx):
                 results = _stt_batch(data, fn, segs, language, temperature, prompt, ctx)
@@ -344,7 +338,4 @@ def build_app(supports):
 
 
 def run(supports):
-    threading.Thread(target=_load, daemon=True).start()
-    watchdog.arm(lambda: _state["ready"], lambda: _state["error"], "faster-whisper")
-    app = build_app(supports)
-    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level=LOG_LEVEL)
+    _runtime.serve(supports, _load, build_app, "faster-whisper")

@@ -24,10 +24,28 @@ Every image MUST expose, on the engine port (default `8000`):
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/models` | The standard model list, exactly like any other engine: Ollama `models[]` (with `capabilities`, `details`) merged with OpenAI `data[]`. `id` / `name` MUST equal `MODEL_NAME`; capabilities are the coarse `audio` plus the fine-grained keys this instance serves. Returns **200 only when the model is loaded**, `503` while loading — `llm-init` polls it for liveness/readiness (`WaitAlive`/`Ready`). |
-| `GET /api/engine-spec` | Internal, never load-gated: `implements` (what the image can do), `declares` (what `MODEL_SUPPORTS` asked for), `serves` (what this process mounted) and the capability `endpoints[]`, each with `available` and, when false, the `reason`. `llm-init` merges it into `/api/endpoints`. |
+| `GET /api/engine-spec` | Internal, never load-gated: the versioned account of this engine's proxied data plane. `llm-init` merges it into `/api/endpoints`. |
 | `GET /metrics` | Prometheus text with the generic gauges `gpu_present`, `gpu_mem_used_bytes`, `gpu_mem_total_bytes`, `gpu_util_ratio` (NOT `audio_*`). `llm-init` relays these for the GPU UI. |
 | `GET /health` \| `/healthz` \| `/readyz` | The engine's own health (200 ready / 503 loading). |
 | `POST\|GET /v1/audio/*` | The actual capability endpoints; an unsupported op returns its own `404`. |
+
+Engine-spec v1 has `schema_version: 1`, a non-empty `model`,
+`implements` (what the image can do), `declares` (what `MODEL_SUPPORTS`
+asked for), `serves` (what this process mounted), and a non-empty
+`endpoints[]`. Each usable endpoint has `method`, `path`, `available`, and
+optionally `capability`, `description`, `reason`, or `deprecated`. `base` is
+an audio extension naming the engine family; it is not required by the shared
+v1 contract, so OCR legitimately omits it.
+
+A structurally valid v1 report with at least one usable endpoint row is
+authoritative for `llm-init`'s proxied data-plane catalog: undeclared static
+proxy rows are removed. Reports with an unknown or missing version can still
+relay well-formed endpoint rows for compatibility, but cannot remove the
+static fallback; malformed v1 reports are ignored. If the engine is
+unavailable, the static `MODEL_MODE=audio` / `MODEL_MODE=ocr` task directory
+remains visible. A reported `model` that differs from configured `MODEL_NAME`
+is added to `/api/endpoints` `reasons` as a diagnostic and does not by itself
+change `available`.
 
 `llm-init` does the model **download** (into the shared HF cache) and writes a
 sentinel; the engine container waits for that sentinel, then serves **offline**
@@ -57,7 +75,8 @@ The four query endpoints — `GET /v1/tasks`, `GET /v1/tasks/{id}`,
 `GET /v1/tasks/{id}/result`, `DELETE /v1/tasks/{id}` — and the task document they
 answer with are **not audio's own**: they are the cross-engine async task contract
 that OCR and, later, image implement identically. It is specified in llm-init's
-[`docs/engine-task-api.md`](https://github.com/beclab/llm-init/blob/main/docs/engine-task-api.md);
+[`docs/api/openapi.yaml`](https://github.com/beclab/llm-init/blob/main/docs/api/openapi.yaml);
+the `async-tasks` tag and `Task` schema are the contract's stable locating terms.
 `wrapper/tasks.py` is this engine's implementation of it, with `kind: "audio"`.
 
 The paths this engine shipped first, `/v1/audio/tasks*`, stay mounted as aliases of
@@ -96,9 +115,11 @@ wrapper/                 shared Python package (used by every base)
   gpu.py                 generic gpu_* /metrics
   contract.py            /v1/models + /api/engine-spec + /health surface
   catalog.py             the one table: base -> caps -> endpoints
+  runtime.py             model/source resolution, load lifecycle, watchdog + uvicorn
+  batch.py               validation of the shared segments JSON form field
   tasks.py               the one worker, and the async=1 task API
   watchdog.py            exit non-zero if the model never loads
-  audioio.py             decoding shared by the torch caps
+  audioio.py             temp uploads, PCM/numpy helpers, and torch-cap decoding
   app.py                 entrypoint: dispatch by AUDIO_BASE + MODEL_SUPPORTS
   caps/                  capability implementations
 tests/                   GPU-free checks: every engine stubbed, wiring asserted
