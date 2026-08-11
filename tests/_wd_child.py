@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from wrapper import watchdog  # noqa: E402
 
 mode = sys.argv[1]
+timeout_s = float(sys.argv[2])
 state = {"ready": False, "error": None}
 if mode == "ready":
     def flip():
@@ -19,6 +20,6 @@ if mode == "ready":
 if mode == "failed":
     state["error"] = "model refused to load"
 
-watchdog.arm(lambda: state["ready"], lambda: state["error"], "test engine")
+watchdog.arm(lambda: state["ready"], lambda: state["error"], "test engine", timeout_s=timeout_s)
 time.sleep(4)
 print("survived")

@@ -9,9 +9,10 @@ import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
+from .. import hfgate
 from .. import tasks
-from ..gpu import mount_metrics
-from ..contract import register
+from ..gpu import mount_metrics, quota_mib
+from ..contract import register, EngineArgs
 from ..audioio import decode_mono, spill, unlink
 from ..runtime import Runtime
 
@@ -23,11 +24,15 @@ MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 SR = 16000  # SpeechBrain enhancement models operate at 16 kHz mono.
 
-# Long clips are windowed with an overlap-add crossfade so peak VRAM is bounded by ONE window.
-CHUNK_S = float(os.environ.get("ENHANCE_CHUNK_S", "120") or 120)   # window length (s)
-OVERLAP_S = float(os.environ.get("ENHANCE_OVERLAP_S", "1") or 1)   # crossfade overlap (s)
+# Overlap-add windowing bounds peak VRAM by ONE window, so it shrinks with the slice we got.
+_mib = quota_mib()
+CHUNK_S = 120.0 if _mib >= 4000 else (60.0 if _mib >= 2000 else 30.0)
+OVERLAP_S = 1.0   # crossfade overlap (s)
+
 # A window is one big forward pass, so fp16 is the only speed lever — and it can underflow a mask.
-AMP = (os.environ.get("ENHANCE_AMP", "").strip().lower() in ("1", "true", "yes", "on"))
+_args = EngineArgs()
+AMP = _args.switch("--amp")
+_args.warn_unclaimed(log)
 
 # Default stays WAV, but 16k PCM16 is ~2 MB/min and the gateway buffers whole bodies in memory.
 _FORMATS = {
@@ -73,7 +78,7 @@ def _load():
                 log.info("model is not a %s class (%s)", kind, e)
         raise last or RuntimeError("no compatible speechbrain enhancement class")
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("enhance load failed: %s", e)
 
 

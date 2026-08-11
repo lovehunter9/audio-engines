@@ -1,16 +1,11 @@
-# pyannote CI: triggers and path filters only; the build is the shared build-image.yml.
+# pyannote CI: triggers only; the build is the shared build-image.yml.
 name: pyannote-ci
 
 on:
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
   push:
-    branches: [main]
-    paths:
-      - 'wrapper/**'
-      - 'tests/**'
-      - 'bases/pyannote/**'
-      - '.github/workflows/pyannote-ci.yml'
-      - '.github/workflows/build-image.yml'
     tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
   pull_request:
     paths:
       - 'wrapper/**'
@@ -18,7 +13,7 @@ on:
       - 'bases/pyannote/**'
       - '.github/workflows/pyannote-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch with namespace + image_tag to publish <ns>/<repo>:<tag>; empty = main rules.
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
   workflow_dispatch:
     inputs:
       namespace:
@@ -26,7 +21,7 @@ on:
         required: false
         default: beclab
       image_tag:
-        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
         required: false
         default: ''
 

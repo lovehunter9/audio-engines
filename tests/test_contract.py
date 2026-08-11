@@ -16,8 +16,25 @@ EXPECTED_MOUNTS = {
     ("diar_stream", "diar_stream"): {("WS", "/v1/audio/diarize/stream")},
     ("embed", "speaker_embed"): {("POST", "/v1/audio/embeddings")},
     ("enhance", "enhance"): {("POST", "/v1/audio/enhance")},
+    ("sound_fx", "sound_fx"): {
+        ("POST", "/v1/audio/speech"),
+        ("POST", "/v1/audio/speech/batch"),
+    },
     ("stt_stream", "stt"): {("POST", "/v1/audio/transcriptions")},
     ("stt_stream", "stt_stream"): {("WS", "/v1/audio/stream")},
+    ("tts", "tts"): {
+        ("GET", "/v1/audio/voices"),
+        ("POST", "/v1/audio/speech"),
+        ("POST", "/v1/audio/speech/batch"),
+        ("WS", "/v1/audio/speech/stream"),
+    },
+    ("tts", "tts_clone"): {
+        ("POST", "/v1/audio/speech"),
+        ("POST", "/v1/audio/speech/batch"),
+        ("POST", "/v1/audio/speech/clone"),
+        ("WS", "/v1/audio/speech/stream"),
+    },
+    ("tts_dialogue", "tts_dialogue"): {("POST", "/v1/audio/speech")},
     ("vad", "vad"): {("POST", "/v1/audio/vad")},
     ("whisper", "stt"): {
         ("POST", "/v1/audio/transcriptions"),
@@ -101,7 +118,7 @@ class RuntimeHelperTest(unittest.TestCase):
             {
                 "MODEL_NAME": "served-name",
                 "MODEL_SOURCE": "hf://org/repo",
-                "WRAPPER_PORT": "9123",
+                "ENGINE_PORT": "9123",
                 "LOG_LEVEL": "WARNING",
             },
             clear=False,
@@ -302,7 +319,7 @@ class RuntimeHelperTest(unittest.TestCase):
                     {
                         "MODEL_NAME": expected["model"],
                         "MODEL_SOURCE": "",
-                        "WRAPPER_PORT": "8000",
+                        "ENGINE_PORT": "8000",
                         "LOG_LEVEL": "info",
                     },
                     clear=False,

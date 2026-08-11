@@ -19,6 +19,19 @@ BASES = {
     "nemo": [
         (("diar_stream",), "diar_stream"),
     ],
+    # Qwen3-TTS in-process: CustomVoice weights serve tts, Base weights serve tts_clone.
+    "qwen3tts": [
+        (("tts", "tts_clone"), "tts"),
+    ],
+    # Dasheng-AudioGen: sound effects from English-only captions, so translation sits upstream.
+    "dasheng": [
+        (("sound_fx",), "sound_fx"),
+    ],
+    # SoulX-Podcast: one script, later turns conditioned on earlier; zero-shot cloning only.
+    "soulx": [
+        (("tts_dialogue",), "tts_dialogue"),
+    ],
+    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.
@@ -31,6 +44,9 @@ FAMILIES = {
     "embed": "pyannote",
     "enhance": "speechbrain",
     "diar_stream": "nemo-sortformer",
+    "tts": "qwen3-tts",
+    "sound_fx": "dasheng-audiogen",
+    "tts_dialogue": "soulx-podcast",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -66,6 +82,39 @@ _MOUNTS = {
     ],
     ("diar_stream", "diar_stream"): [
         ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
+    ],
+    ("tts", "tts"): [
+        ("POST", "/v1/audio/speech",
+         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams instead)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
+        ("WS", "/v1/audio/speech/stream",
+         "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
+        ("GET", "/v1/audio/voices", "List preset voices", False),
+    ],
+    ("tts", "tts_clone"): [
+        ("POST", "/v1/audio/speech",
+         "TTS with a ref_audio data: URL (Base weights; OpenAI JSON shape)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS with uploaded voice / ref_audio", True),
+        ("WS", "/v1/audio/speech/stream",
+         "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
+        ("POST", "/v1/audio/speech/clone",
+         "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
+    ],
+    ("sound_fx", "sound_fx"): [
+        ("POST", "/v1/audio/speech",
+         "Sound effect / ambience from an English description (OpenAI shape; optional "
+         "sfx/env/music/speech/asr aspects; length is inferred from the text, not set)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Native batch (JSON items[] 1–8, one denoising pass, base64 audio out)", True),
+    ],
+    # One endpoint: a script is already the unit of work, and the model has no streaming decode.
+    ("tts_dialogue", "tts_dialogue"): [
+        ("POST", "/v1/audio/speech",
+         "Multi-speaker dialogue from a script (speakers[] of {ref_audio, ref_text} + turns[] of "
+         "{speaker, text}; whole conversation in one pass, per_turn=true splits the response)",
+         True),
     ],
 }
 

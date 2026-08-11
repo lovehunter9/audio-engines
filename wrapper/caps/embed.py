@@ -5,6 +5,7 @@ import logging
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
+from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register
@@ -41,7 +42,7 @@ def _load():
         _state.update(inference=inf, device=dev, ready=True)
         log.info("pyannote embedding %s loaded on %s", MODEL_REPO, dev)
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("embedding load failed: %s", e)
 
 
