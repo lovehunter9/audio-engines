@@ -20,9 +20,8 @@ def check(name, cond, extra=""):
 
 
 def child(mode, timeout="1"):
-    env = dict(os.environ, LOAD_TIMEOUT_S=timeout)
-    p = subprocess.run([sys.executable, os.path.join(HERE, "_wd_child.py"), mode],
-                       env=env, capture_output=True, timeout=30)
+    p = subprocess.run([sys.executable, os.path.join(HERE, "_wd_child.py"), mode, timeout],
+                       capture_output=True, timeout=30)
     return p.returncode, (p.stdout + p.stderr).decode()[-300:]
 
 
@@ -51,13 +50,12 @@ def main():
     check("a load that failed loudly stays up to be diagnosed", rc == 0 and "survived" in out,
           (rc, out[-120:]))
     rc, out = child("wedge", timeout="0")
-    check("LOAD_TIMEOUT_S=0 disables it", rc == 0 and "survived" in out, (rc, out[-80:]))
+    check("a zero deadline disables it", rc == 0 and "survived" in out, (rc, out[-80:]))
 
     print("\n[vLLM capture-size probe]")
     from wrapper.caps import stt_stream as q
 
-    os.environ.pop("VLLM_ENFORCE_EAGER", None)
-    os.environ.pop("VLLM_CAPTURE_SIZES", None)
+    q.ENFORCE_EAGER = False
     fake_vllm(["cudagraph_capture_sizes", "level"])
     check("the current field name is used",
           q._capture_kw() == {"compilation_config": {"cudagraph_capture_sizes": [1, 2, 4, 8]}},
@@ -71,12 +69,8 @@ def main():
     fake_vllm(None)
     check("an unimportable vllm.config is survived", q._capture_kw() == {})
     fake_vllm(["cudagraph_capture_sizes"])
-    os.environ["VLLM_CAPTURE_SIZES"] = "1, 4"
-    check("the capture set is overridable",
-          q._capture_kw() == {"compilation_config": {"cudagraph_capture_sizes": [1, 4]}},
-          q._capture_kw())
-    os.environ["VLLM_ENFORCE_EAGER"] = "1"
-    check("the eager escape hatch wins over everything",
+    q.ENFORCE_EAGER = True
+    check("--enforce-eager wins over everything",
           q._capture_kw() == {"enforce_eager": True}, q._capture_kw())
 
     print("\n" + ("FAILURES: %s" % FAILED if FAILED else "all checks passed"))

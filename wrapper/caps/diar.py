@@ -6,9 +6,10 @@ import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
+from .. import hfgate
 from .. import tasks
-from ..gpu import mount_metrics
-from ..contract import register
+from ..gpu import mount_metrics, quota_mib
+from ..contract import register, EngineArgs
 from ..audioio import decode, spill, unlink
 from ..runtime import Runtime
 
@@ -20,16 +21,27 @@ MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 # Both pyannote stages default to batch_size=1: ~12 000 launches of 10 s of audio for a 3 h clip.
-SEG_BATCH = os.environ.get("DIAR_SEG_BATCH", "auto")   # "auto" = GPU-sized batch on CUDA, 1 on CPU
-EMB_BATCH = os.environ.get("DIAR_EMB_BATCH", "auto")
+_args = EngineArgs()
+SEG_BATCH = _args.text("--segmentation-batch-size", "auto")  # "auto" = GPU-sized on CUDA, 1 on CPU
+EMB_BATCH = _args.text("--embedding-batch-size", "auto")
+_args.warn_unclaimed(log)
 
 _state = _runtime.state
 
 
-def _batch(raw, cuda, auto=32):
+def _auto_batch():
+    """A batch big enough to be worth a launch, but sized to the slice we were actually given."""
+    mib = quota_mib()
+    for floor, batch in ((16000, 32), (8000, 16), (4000, 8)):
+        if mib >= floor:
+            return batch
+    return 4
+
+
+def _batch(raw, cuda):
     raw = (raw or "auto").strip().lower()
     if raw in ("", "auto"):
-        return auto if cuda else 1
+        return _auto_batch() if cuda else 1
     try:
         return max(1, int(raw))
     except ValueError:
@@ -71,7 +83,7 @@ def _load():
         _state["pipeline"], _state["device"], _state["ready"] = pipe, dev, True
         log.info("pyannote pipeline %s loaded on %s", MODEL_REPO, dev)
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("pipeline load failed: %s", e)
 
 

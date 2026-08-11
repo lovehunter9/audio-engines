@@ -8,10 +8,11 @@ import tempfile
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import PlainTextResponse
 
+from .. import hfgate
 from .. import tasks
 from ..batch import parse_segments
-from ..gpu import mount_metrics
-from ..contract import register
+from ..gpu import mount_metrics, quota_mib
+from ..contract import register, EngineArgs
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-whisper")
@@ -25,12 +26,16 @@ _runtime = Runtime(
 )
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
-COMPUTE_TYPE = os.environ.get("FW_COMPUTE_TYPE", "float16")
-DEVICE = os.environ.get("FW_DEVICE", "auto")
-BEAM_SIZE = int(os.environ.get("FW_BEAM_SIZE", "5") or 5)
-# WhisperX-style VAD-cut + parallel batched decode; the speedup on a sliced vGPU.
-BATCHED = os.environ.get("FW_BATCHED", "1").lower() in ("1", "true", "yes")
-BATCH_SIZE = int(os.environ.get("FW_BATCH_SIZE", "16") or 16)
+# faster-whisper's own WhisperModel / BatchedInferencePipeline argument names.
+_args = EngineArgs()
+COMPUTE_TYPE = _args.text("--compute-type", "float16")
+DEVICE = _args.text("--device", "auto")
+BEAM_SIZE = _args.count("--beam-size", 5)
+# VAD-cut batched decode; 1 means serial, and the default follows the slice we were given.
+_mib = quota_mib()
+BATCH_SIZE = _args.count("--batch-size", 16 if _mib >= 10000 else (8 if _mib >= 6000 else 4))
+BATCHED = BATCH_SIZE > 1
+_args.warn_unclaimed(log)
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 # So callers can send "English" as well as "en"; anything unknown passes through lower-cased.
@@ -65,8 +70,7 @@ def _ensure_ct2(src, quantization):
     if _is_ct2(src):
         return src
 
-    root = os.environ.get("FW_CT2_CACHE") or os.path.join(
-        os.environ.get("HF_HUB_CACHE") or "/cache/hf/hub", "ct2-converted")
+    root = os.path.join(os.environ.get("HF_HUB_CACHE") or "/cache/hf/hub", "ct2-converted")
     out = os.path.join(root, MODEL_REPO.replace("/", "--"))
     if os.path.isfile(os.path.join(out, ".ct2-complete")):
         log.info("using previously converted CT2 model at %s", out)
@@ -118,7 +122,7 @@ def _load():
         _state.update(model=model, pipeline=pipeline, device=dev, compute=ctype, ready=True)
         log.info("faster-whisper loaded from %s on %s (%s)", path, dev, ctype)
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("stt load failed: %s", e)
 
 
@@ -338,4 +342,5 @@ def build_app(supports):
 
 
 def run(supports):
-    _runtime.serve(supports, _load, build_app, "faster-whisper")
+    # First load converts the checkpoint to CT2, real multi-GB work, hence the longer deadline.
+    _runtime.serve(supports, _load, build_app, "faster-whisper", timeout_s=5400.0)

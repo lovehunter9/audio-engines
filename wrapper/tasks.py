@@ -12,8 +12,8 @@ import uuid
 log = logging.getLogger("audio-tasks")
 
 # A result is kept this long after the job ends, so a client that polls slowly can still fetch it.
-TTL_S = float(os.environ.get("TASK_TTL_S", "1800") or 1800)
-QUEUE_MAX = int(os.environ.get("TASK_QUEUE_MAX", "32") or 32)
+TTL_S = 1800.0
+QUEUE_MAX = 32
 _GC_EVERY_S = 30.0
 
 # The cross-engine async-tasks contract is defined in llm-init's docs/api/openapi.yaml.
@@ -282,9 +282,10 @@ class _Runner:
                 task.error = {"code": 499, "message": str(e)}
                 self._settle(task, "canceled", exc=e)
             except BaseException as e:
-                task.error = {"code": getattr(e, "status_code", 500) or 500,
-                              "message": getattr(e, "detail", None) or str(e)}
-                log.warning("task %s (%s) failed: %s", task.id, task.cap, e)
+                code = getattr(e, "status_code", 500) or 500
+                task.error = {"code": code, "message": getattr(e, "detail", None) or str(e)}
+                # 5xx is ours and its message is often unplaceable without the frame; 4xx is not.
+                log.warning("task %s (%s) failed: %s", task.id, task.cap, e, exc_info=code >= 500)
                 self._settle(task, "failed", exc=e)
             else:
                 if task.keep:

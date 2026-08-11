@@ -86,7 +86,7 @@ append_one() {
     deps_digest="$(crane digest --platform "$platform" "$BASE_IMAGE")"
 
     local env_args=(--env "AUDIO_BASE=$BASE" --env PYTHONPATH=/app --env PYTHONUNBUFFERED=1
-              --env WRAPPER_PORT=8000)
+              --env ENGINE_PORT=8000)
     local kv
     for kv in ${EXTRA_ENV:-}; do env_args+=(--env "$kv"); done
 
@@ -110,7 +110,7 @@ cfg = doc["config"]
 env = dict(e.split("=", 1) for e in cfg.get("Env", []))
 assert env.get("AUDIO_BASE") == want_base, env.get("AUDIO_BASE")
 assert env.get("PYTHONPATH") == "/app", env.get("PYTHONPATH")
-assert env.get("WRAPPER_PORT") == "8000", env.get("WRAPPER_PORT")
+assert env.get("ENGINE_PORT") == "8000", env.get("ENGINE_PORT")
 assert cfg.get("WorkingDir") == "/app", cfg.get("WorkingDir")
 assert cfg.get("Cmd") == ["audio-python", "-m", "wrapper.app"], cfg.get("Cmd")
 assert doc.get("architecture") == want_arch, (doc.get("architecture"), want_arch)

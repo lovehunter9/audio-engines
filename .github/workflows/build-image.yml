@@ -18,7 +18,7 @@ on:
         default: beclab
         type: string
       image_tag:
-        description: 'Explicit tag for a dev build (empty = main/tag rules)'
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
         required: false
         default: ''
         type: string

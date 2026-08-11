@@ -4,14 +4,16 @@ import json
 import asyncio
 import logging
 import threading
+import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, File, UploadFile, Form
 from fastapi.responses import Response
 
+from .. import hfgate
 from .. import tasks
 from ..batch import parse_segments
-from ..gpu import mount_metrics
-from ..contract import register
+from ..gpu import mount_metrics, memory_fraction
+from ..contract import register, EngineArgs
 from ..audioio import pcm16_to_float32, resample_linear
 from ..runtime import Runtime
 
@@ -21,16 +23,27 @@ _runtime = Runtime("Qwen/Qwen3-ASR-1.7B", asr=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 PORT = _runtime.port
-GPU_UTIL = float(os.environ.get("VLLM_GPU_UTIL", "0.45") or 0.45)
-MAX_NEW_TOKENS = int(os.environ.get("STREAM_MAX_NEW_TOKENS", "32") or 32)
-# Holds ONE unit of work (a <=540s offline chunk or a ~240s streaming window); chart-derived.
-MAX_MODEL_LEN = int(os.environ.get("STREAM_MAX_LEN", "16384") or 16384)
-UNFIXED_CHUNK_NUM = int(os.environ.get("STREAM_UNFIXED_CHUNK_NUM", "2") or 2)
-UNFIXED_TOKEN_NUM = int(os.environ.get("STREAM_UNFIXED_TOKEN_NUM", "5") or 5)
-CHUNK_SIZE_SEC = float(os.environ.get("STREAM_CHUNK_SIZE_SEC", "2.0") or 2.0)
-DEFAULT_STEP_MS = int(os.environ.get("STREAM_STEP_MS", "500") or 500)
+
+_args = EngineArgs()
+# vLLM wants a share of the whole card; the platform hands out a quota, so derive one from it.
+GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
+# Holds ONE unit of work; the chart sizes it per machine type, since unified memory needs less.
+MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
+# Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
+ENFORCE_EAGER = _args.switch("--enforce-eager")
+_args.warn_unclaimed(log)
+
+MAX_NEW_TOKENS = 32
+UNFIXED_CHUNK_NUM = 2
+UNFIXED_TOKEN_NUM = 5
+CHUNK_SIZE_SEC = 2.0
+DEFAULT_STEP_MS = 500
 # Finalize + re-init this often, so a long session never overflows vLLM's ~8192-token encoder cache.
-ROLL_SEC = float(os.environ.get("STREAM_ROLL_SEC", "240") or 240)
+ROLL_SEC = 240.0
+_CAPTURE_SIZES = (1, 2, 4, 8)
+# qwen-asr silence-splits at this window; 540s keeps one call inside the ~600s encoder cache.
+OFFLINE_MAX_INPUT_SEC = 540
+OFFLINE_MAX_TOKENS = 4096
 
 _state = _runtime.state
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
@@ -49,14 +62,10 @@ def _p(msg):
 
 
 def _capture_kw():
-    # Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
-    if tasks.truthy(os.environ.get("VLLM_ENFORCE_EAGER")):
-        _p("VLLM_ENFORCE_EAGER is set: skipping CUDA graphs entirely")
+    if ENFORCE_EAGER:
+        _p("--enforce-eager given: skipping CUDA graphs entirely")
         return {"enforce_eager": True}
-    raw = os.environ.get("VLLM_CAPTURE_SIZES", "1,2,4,8")
-    sizes = [int(s) for s in raw.replace(" ", "").split(",") if s]
-    if not sizes:
-        return {}
+    sizes = list(_CAPTURE_SIZES)
     try:
         from vllm.config import CompilationConfig
 
@@ -76,15 +85,13 @@ def _load_blocking():
     _p("importing qwen_asr ...")
     from qwen_asr import Qwen3ASRModel
 
-    # qwen-asr silence-splits at this window; 540s keeps one call inside the ~600s encoder cache.
     try:
         import qwen_asr.inference.qwen3_asr as _qasr_mod
         import qwen_asr.inference.utils as _qasr_utils
 
-        _win = int(os.environ.get("OFFLINE_MAX_INPUT_SEC", "540") or 540)
-        _qasr_utils.MAX_ASR_INPUT_SECONDS = _win
-        _qasr_mod.MAX_ASR_INPUT_SECONDS = _win
-        _p("patched qwen-asr MAX_ASR_INPUT_SECONDS -> %ds" % _win)
+        _qasr_utils.MAX_ASR_INPUT_SECONDS = OFFLINE_MAX_INPUT_SEC
+        _qasr_mod.MAX_ASR_INPUT_SECONDS = OFFLINE_MAX_INPUT_SEC
+        _p("patched qwen-asr MAX_ASR_INPUT_SECONDS -> %ds" % OFFLINE_MAX_INPUT_SEC)
     except Exception as e:
         _p("WARN could not patch MAX_ASR_INPUT_SECONDS (%s)" % e)
     _p("constructing Qwen3ASRModel.LLM(model=%s, gpu_util=%.2f, max_model_len=%d) ..."
@@ -108,9 +115,34 @@ def _load_blocking():
             _p("LLM() rejected %s (%s); retrying with fewer kwargs"
                % (sorted(set(_try) - set(_kw)), e))
     _state["asr"] = asr
+    _warmup()
     _state["ready"] = True
     _p("engine READY: %s (gpu_util=%.2f)" % (MODEL_REPO, GPU_UTIL))
     log.info("qwen-asr streaming engine loaded: %s (gpu_util=%.2f)", MODEL_REPO, GPU_UTIL)
+
+
+def _warmup():
+    """One throwaway transcription before we report ready, so no caller pays the cold-start cost.
+
+    vLLM answers as soon as its constructor returns, but the first real inference still compiles
+    and captures graphs: measured at 74s on a time-sliced card against 0.3s once warm. llm-init
+    allows an upstream 60s to produce response headers, so without this the first offline caller
+    reads a 502 where a transcript belongs. Streaming pays the same cost, only spread across an
+    already-open socket where nothing times out -- and either path warms the other, so warming
+    the simpler one here covers both.
+    """
+    import numpy as np
+
+    t0 = time.time()
+    try:
+        # A voiced-band tone, not silence: the encoder may skip a silent clip and warm nothing.
+        n = 16000
+        tone = (0.25 * np.sin(2 * np.pi * 220 * np.arange(n) / 16000.0)).astype("float32")
+        _offline_transcribe(tone)
+        _p("warmup transcription took %.0fs" % (time.time() - t0))
+    except Exception as e:
+        # Serviceable either way; failing here only means the first caller pays after all.
+        _p("WARN warmup transcription failed after %.0fs: %s" % (time.time() - t0, e))
 
 
 def _decode_to_16k_mono(raw, filename):
@@ -134,12 +166,11 @@ def _decode_to_16k_mono(raw, filename):
 def _offline_transcribe(audio):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
-    off_max = int(os.environ.get("OFFLINE_MAX_TOKENS", "4096") or 4096)
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", None) if sp is not None else None
     try:
         if sp is not None:
-            sp.max_tokens = off_max
+            sp.max_tokens = OFFLINE_MAX_TOKENS
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
         if sp is not None and old is not None:
@@ -352,7 +383,7 @@ def run(supports):
         try:
             _load_blocking()
         except Exception as e:
-            _state["error"] = str(e)
+            _state["error"] = hfgate.explain(MODEL_REPO, e)
             _p("engine load FAILED: %s" % e)
             log.exception("engine load failed: %s", e)
 

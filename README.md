@@ -52,9 +52,26 @@ sentinel; the engine container waits for that sentinel, then serves **offline**
 from the cache. Nothing probes the engine via k8s — `llm-init` gates `/v1/*`
 until the engine's `/v1/models` is alive. Since no probe watches the engine, a
 load that hangs forever would go unnoticed, so `wrapper/watchdog.py` exits
-non-zero after `LOAD_TIMEOUT_S` (default 1800) if the model is neither ready nor
-failed, letting k8s rebuild the container. A load that failed *with a reason* is
+non-zero after 1800 s (`fasterwhisper` asks for 5400, since it may convert to CT2
+first) if the model is neither ready nor failed, letting k8s rebuild the container. A load that failed *with a reason* is
 left alone: `/v1/models` reporting the reason beats a crash loop.
+
+### Tuning: `ENGINE_ARGS` and nothing else
+
+`ENGINE_ARGS` is the one channel for every knob, per `llm-init`'s contract (for
+audio it is read on the engine container, never by `llm-init`). Charts set it,
+`wrapper/contract.py`'s `EngineArgs` parses it, each cap claims the flags it
+understands under the **upstream's own spelling** — `--gpu-memory-utilization`,
+`--max-model-len`, `--beam-size`, `--compute-type` — and whatever is left over is
+handed to a child engine's argv, or logged as ignored where there is no child.
+
+A new knob is therefore a new flag, never a new env. The only envs an engine reads
+are the platform's own (`MODEL_NAME`, `MODEL_SOURCE`, `MODEL_SUPPORTS`,
+`ENGINE_PORT`, `ENGINE_ARGS`, `REQUIRED_GPU_MEMORY`, `HF_*`, `LOG_LEVEL`) plus
+`AUDIO_BASE`, which the image bakes in. Values with only one right answer are
+constants in the code, and where the environment already knows the answer the code
+derives it: GPU utilization comes from `REQUIRED_GPU_MEMORY` measured against the
+card CUDA actually reports, so no chart hardcodes a card's size.
 
 ## Tasks: any-length audio without a long-lived request
 
@@ -102,8 +119,8 @@ while `async=1` only decides who waits.
 
 What tasks deliberately do NOT do: survive a restart (they live in memory, and a
 poll after a pod restart is a `404` the caller should treat as "resubmit"),
-outlive `TASK_TTL_S` (default 1800 s, after which results are reclaimed), or
-queue without bound (`TASK_QUEUE_MAX`, default 32, then `503`). Results larger
+outlive 1800 s (after which results are reclaimed), or queue without bound
+(32 deep, then `503`). Results larger
 than a JSON blob go to a temp file rather than the heap, and because the charts
 mount `/tmp` from a host volume, the runner sweeps `upload-*` / `task-*` files a
 previous run stranded when it starts.
@@ -153,6 +170,9 @@ passes. For the same reason the build's final import check must go **through**
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
+| `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
+| `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
+| `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -167,11 +187,11 @@ the first match and says so in the log.
 **`qwen`.** One vLLM load serves `stt` (task-based) and `stt_stream` (WebSocket),
 so the two are kept off each other with a plain `threading.Lock` the task worker
 also takes — an `asyncio` lock cannot span the worker thread. vLLM is asked to
-capture only a handful of CUDA graph shapes (`VLLM_CAPTURE_SIZES`, default
-`1,2,4,8`) because inference here is always batch 1 and capture is where startup
-has been seen to wedge holding the vGPU lock; the field name is probed off
-`CompilationConfig` rather than assumed, and `VLLM_ENFORCE_EAGER=1` skips graphs
-altogether if that ever needs to be ruled out. Deps `FROM` is arch-selected:
+capture only the shapes `1,2,4,8` because inference here is always batch 1 and
+capture is where startup has been seen to wedge holding the vGPU lock; the field
+name is probed off `CompilationConfig` rather than assumed, and `--enforce-eager`
+skips graphs altogether if that ever needs to be ruled out. Deps `FROM` is
+arch-selected:
 amd64 keeps the validated cu129 / v0.23 image; arm64 uses the general aarch64
 CUDA track (`vllm …:v0.16.0-cu130`) plus an **arm64-only** post-install patch that
 moves `qwen-asr`'s `_get_data_parser` onto `ProcessingInfo.get_data_parser` /
@@ -191,9 +211,9 @@ Wrapper code is identical across arches.
   `faster-whisper`, then force-reinstall the CUDA CT2 wheel. Build asserts
   `get_supported_compute_types("cuda")` is non-empty.
 
-This is also the one base that raises `LOAD_TIMEOUT_S` (to 5400, via its
-`append.env`): CT2 conversion is legitimate multi-GB work and must not look like
-a hung load to the watchdog.
+This is also the one base that raises the load deadline (to 5400 s, from the cap
+itself): CT2 conversion is legitimate multi-GB work and must not look like a hung
+load to the watchdog.
 
 **`pyannote`.** amd64 keeps the maximsachs CUDA image; arm64 builds CUDA
 torch/torchaudio from the PyTorch `cu130` index (same general aarch64 CUDA track
@@ -202,11 +222,11 @@ unchanged from the amd64-tested tree: Silero `vad` stays on Silero's CPU JIT
 path; `diar` / `speaker_embed` / `enhance` select `cuda` when visible. Both
 diarization stages default to `batch_size=1`, and segmentation slides a 10 s
 window at a 1 s hop, so a 3 h clip becomes ~12 000 tiny forward passes with the
-GPU idle in between — hence `DIAR_SEG_BATCH` / `DIAR_EMB_BATCH` (chart-derived
-from the GPU quota, `auto` = 1 on CPU) and the one-way fallback to 1 on CUDA
-OOM. `enhance` windows long clips (`ENHANCE_CHUNK_S`) with an overlap-add
-crossfade and can answer `format=wav|flac|ogg`, degrading to FLAC then WAV if
-libsndfile lacks the codec.
+GPU idle in between — hence `--segmentation-batch-size` / `--embedding-batch-size`
+(`auto` sizes them to `REQUIRED_GPU_MEMORY`, 1 on CPU) and the one-way fallback to
+1 on CUDA OOM. `enhance` windows long clips (120 s, shrinking to 60 or 30 on a
+small slice) with an overlap-add crossfade and can answer `format=wav|flac|ogg`,
+degrading to FLAC then WAV if libsndfile lacks the codec.
 
 **`nemo` (`diar_stream`).** Its own capability rather than `diar` plus a flag,
 because streaming diarization has to keep speaker labels consistent over time at
@@ -236,6 +256,41 @@ own CALLHOME 4spk DER: 12.44 -> 11.72):
 | low (1.04 s, live-first) | 6 | 7 | 188 | 144 | 188 |
 | **high (10 s, accuracy)** | **124** | **1** | **124** | **124** | **188** |
 | very high (30.4 s) | 340 | 40 | 40 | 300 | 188 |
+
+**`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
+other bases apply: no KV cache, no autoregression, and `generate()` denoises a
+whole list in one pass — batch here is a real forward-pass win, not just one
+round trip instead of N. Two consequences shape the cap. First, duration is not
+a parameter: a `DurationPredictor` reads it off the text, so callers steer
+length by describing it. Second, the dtype cast happens after loading rather
+than through `torch_dtype=`, because upstream's `from_pretrained` override
+forwards only `local_files_only` to `_load_external_models` — the text encoder
+and codec would otherwise stay fp32 while the backbone went half, costing ~3.8 GB
+and leaving a dtype seam where `generate()` hands a `content.dtype` latent to
+`audio_tokenizer.decode()`. The config names two more repos to pre-download,
+`google/flan-t5-large` and `mispeech/dashengtokenizer`, so `MODEL_SOURCE` lists
+three. Captions are English-only (the text encoder saw nothing else); translation
+is the caller's job and deliberately not done here.
+
+**`soulx`.** The only base whose engine code is not a dependency: upstream ships
+no PyPI package and no `setup.py`, so `deps.Dockerfile` clones the repo at a
+pinned SHA into `/opt/soulx` and puts it on `PYTHONPATH`. Nothing is copied into
+this repository, and a future fix belongs in a `.patch` applied after checkout,
+not in a vendored tree. Two traps are worth knowing. First, the audio tokenizer
+is **not** in the model repo: `s3tokenizer.load_model()` fetches a ~480 MB onnx
+from ModelScope over plain `urllib`, obeying neither `HF_HUB_OFFLINE` nor
+llm-init, so it is baked into the image and `XDG_CACHE_HOME` is pinned to keep
+the cache findable under whatever `HOME` the pod gets. Second, the API shape is
+dictated by the model, not chosen: every speaker needs a reference clip (there
+are no preset voices), a script is synthesized in one `forward_longform` call so
+later turns are conditioned on earlier ones, and `process_single_input` asserts
+one script per call — hence one endpoint, no batch route and no streaming.
+
+**`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
+the open models that do are, as of 2026-08, either research-licensed or too heavy
+to share a card with the rest of these. The capability names stay declared in
+llm-init and the gateway so nothing downstream has to change when a base for them
+does land.
 
 ## Build
 
@@ -295,7 +350,7 @@ builder; see the `EXTRA` hook in the `Makefile`.
    all deps at **build time** (no runtime pip), assert the imports so a broken
    base fails the build, and leave `/usr/local/bin/audio-python` pointing at the
    interpreter that owns them. Plus `bases/<base>/append.env` for the platform and
-   any extra `ENV` (`AUDIO_BASE`, `PYTHONPATH`, `WRAPPER_PORT` and the `CMD` are
+   any extra `ENV` (`AUDIO_BASE`, `PYTHONPATH`, `ENGINE_PORT` and the `CMD` are
    set for you). Nothing else: no `COPY wrapper`, no `LABEL`.
 2. `wrapper/caps/<cap>.py` — implement the capabilities as `build_app(supports)`
    + `run(supports)`; expose `/v1/audio/*` and wire `wrapper.gpu.mount_metrics` +

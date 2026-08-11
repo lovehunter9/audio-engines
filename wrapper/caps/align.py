@@ -6,6 +6,7 @@ import asyncio
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
+from .. import hfgate
 from .. import tasks
 from ..batch import parse_segments
 from ..gpu import mount_metrics
@@ -44,7 +45,7 @@ def _load():
         _state.update(model=model, device=dev, ready=True)
         log.info("Qwen3-ForcedAligner %s loaded on %s", MODEL_REPO, dev)
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("forced-aligner load failed: %s", e)
 
 

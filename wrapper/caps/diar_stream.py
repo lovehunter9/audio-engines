@@ -7,8 +7,9 @@ import logging
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from .. import hfgate
 from ..gpu import mount_metrics
-from ..contract import register
+from ..contract import register, EngineArgs
 from ..audioio import pcm16_to_float32, resample_linear
 from ..runtime import Runtime
 
@@ -24,17 +25,33 @@ MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 PORT = _runtime.port
 
-# Streaming knobs in 80ms frames, defaulting to the card's high-latency preset (README has the set).
-CHUNK_LEN = int(os.environ.get("DIAR_CHUNK_LEN", "124") or 124)
-RIGHT_CONTEXT = int(os.environ.get("DIAR_RIGHT_CONTEXT", "1") or 1)
-FIFO_LEN = int(os.environ.get("DIAR_FIFO_LEN", "124") or 124)
-UPDATE_PERIOD = int(os.environ.get("DIAR_UPDATE_PERIOD", "124") or 124)
-SPKCACHE_LEN = int(os.environ.get("DIAR_SPKCACHE_LEN", "188") or 188)
-STEP_SEC = float(os.environ.get("DIAR_STREAM_STEP_SEC", "2.0") or 2.0)   # partial every N s of audio
-MIN_SEC = float(os.environ.get("DIAR_STREAM_MIN_SEC", "1.0") or 1.0)     # fallback: minimum to work on
+# The card's presets in 80ms frames; `high` (~10s) resolves adjacent turns and is ~18x cheaper.
+_PRESETS = {
+    "low": (6, 7, 188, 144, 188),
+    "high": (124, 1, 124, 124, 188),
+    "veryhigh": (340, 40, 40, 300, 188),
+}
+
+_args = EngineArgs()
+_preset = (_args.text("--latency-preset", "high") or "high").strip().lower()
+if _preset not in _PRESETS:
+    log.warning("unknown latency preset %r; falling back to high", _preset)
+    _preset = "high"
+_base = _PRESETS[_preset]
+
+# Sortformer's own streaming attributes, each free to deviate from the preset it started at.
+CHUNK_LEN = _args.count("--chunk-len", _base[0])
+RIGHT_CONTEXT = _args.count("--right-context", _base[1])
+FIFO_LEN = _args.count("--fifo-len", _base[2])
+UPDATE_PERIOD = _args.count("--update-period", _base[3])
+SPKCACHE_LEN = _args.count("--spkcache-len", _base[4])
+_args.warn_unclaimed(log)
+
+STEP_SEC = 2.0   # partial every N s of audio
+MIN_SEC = 1.0    # fallback: minimum to work on
 # Fallback only: diarize just the last WINDOW_SEC, or a session would cost O(n^2) and grow forever.
-WINDOW_SEC = float(os.environ.get("DIAR_STREAM_WINDOW_SEC", "60") or 60)
-OVERLAP_SEC = float(os.environ.get("DIAR_STREAM_OVERLAP_SEC", "12") or 12)
+WINDOW_SEC = 60.0
+OVERLAP_SEC = 12.0
 
 _state = _runtime.state
 # Sortformer's diarize() is blocking and not concurrency-safe, so inference is serialized.
@@ -97,7 +114,7 @@ def _load():
         _p("engine READY: %s on %s (chunk=%d rc=%d fifo=%d up=%d cache=%d)"
            % (MODEL_REPO, dev, CHUNK_LEN, RIGHT_CONTEXT, FIFO_LEN, UPDATE_PERIOD, SPKCACHE_LEN))
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_REPO, e)
         _p("engine load FAILED: %s" % e)
         log.exception("engine load failed: %s", e)
 

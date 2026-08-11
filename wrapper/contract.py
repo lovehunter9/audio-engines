@@ -1,7 +1,9 @@
 # The llm-init contract (README): /v1/models 503s until loaded, plus /health; /metrics is gpu.py.
 import datetime
+import json
 import os
 import re
+import shlex
 import time
 
 from . import catalog
@@ -12,7 +14,7 @@ COARSE_CAPABILITY = "audio"
 # How capability keys travel in env, model specs and the gateway; bare names are the internal form.
 SUPPORTS_PREFIX = "supports_"
 
-# Every engine here decodes to 16 kHz mono before inference.
+# The analysis default; generation caps synthesize at their own rate and pass it to register().
 SAMPLE_RATE = 16000
 
 _SIZE_TOKEN = re.compile(r"(\d+(?:\.\d+)?)\s*([bm])(?:[-_.]|$)", re.IGNORECASE)
@@ -46,6 +48,115 @@ def parse_supports():
 def base_name():
     """The base image identity, as baked in at build time."""
     return (os.environ.get("AUDIO_BASE") or "").strip()
+
+
+_NUMBER = re.compile(r"^-\d")
+
+
+class EngineArgs:
+    """ENGINE_ARGS, llm-init's single channel for engine-native flags on the engine container.
+
+    Every tunable is a flag in here, so a new knob costs nothing in env names. Caps claim the flags
+    they understand; whatever is left over passes through to a child engine untouched, keeping the
+    engine's own spelling.
+    """
+
+    def __init__(self, raw=None):
+        if raw is None:
+            raw = os.environ.get("ENGINE_ARGS", "") or ""
+        self._vals, self._spans, self._claimed = {}, [], set()
+        toks = shlex.split(raw)
+        i = 0
+        while i < len(toks):
+            tok = toks[i]
+            if not tok.startswith("-"):
+                self._spans.append((None, [tok]))
+                i += 1
+                continue
+            flag, eq, inline = tok.partition("=")
+            key = self._key(flag)
+            if eq:
+                value, span, i = inline, [tok], i + 1
+            elif i + 1 < len(toks) and not self._is_flag(toks[i + 1]):
+                value, span, i = toks[i + 1], [tok, toks[i + 1]], i + 2
+            else:
+                value, span, i = True, [tok], i + 1  # bare flag, e.g. --enforce-eager
+            # shlex strips the quotes, so re-JSON anything still shaped like an object or array.
+            if isinstance(value, str) and value[:1] in "{[":
+                value = self._as_json(value)
+                if eq:
+                    span = ["%s=%s" % (flag, value)]
+                elif len(span) == 2:
+                    span = [span[0], value]
+            self._vals[key] = value
+            self._spans.append((key, span))
+
+    @staticmethod
+    def _key(name):
+        return name.lstrip("-").replace("-", "_")
+
+    @staticmethod
+    def _is_flag(tok):
+        return tok.startswith("-") and not _NUMBER.match(tok)
+
+    @staticmethod
+    def _as_json(value):
+        """Keep valid JSON; repair the common shlex-stripped form {0:{max_num_seqs:10}}."""
+        try:
+            json.loads(value)
+            return value
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        # shlex ate the quotes: quote bare keys (idents + integers) before ':'
+        fixed = re.sub(r"([{\[,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:", r'\1"\2":', value)
+        fixed = re.sub(r"([{\[,]\s*)(\d+)\s*:", r'\1"\2":', fixed)
+        try:
+            json.loads(fixed)
+            return fixed
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return value
+
+    def text(self, name, default=None):
+        key = self._key(name)
+        self._claimed.add(key)
+        val = self._vals.get(key)
+        return default if val is None or val is True else str(val)
+
+    def number(self, name, default):
+        try:
+            return float(self.text(name) or default)
+        except (TypeError, ValueError):
+            return float(default)
+
+    def count(self, name, default):
+        try:
+            return int(float(self.text(name) or default))
+        except (TypeError, ValueError):
+            return int(default)
+
+    def switch(self, name, default=False):
+        key = self._key(name)
+        self._claimed.add(key)
+        val = self._vals.get(key)
+        if val is None:
+            return bool(default)
+        if val is True:
+            return True
+        return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+    def passthrough(self):
+        """The flags no cap claimed, ready to hand to a child engine's argv."""
+        out = []
+        for key, span in self._spans:
+            if key is None or key not in self._claimed:
+                out.extend(span)
+        return out
+
+    def warn_unclaimed(self, log):
+        """For caps that run no child engine: a typo would otherwise vanish without a trace."""
+        rest = self.passthrough()
+        if rest:
+            log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
 
 
 def _cache_dir(repo):
@@ -86,7 +197,7 @@ def _parameter_size(*names):
 
 
 def models_payload(model_name, capabilities, description="", repo=None, module="",
-                   model_format=None, quantization=None):
+                   model_format=None, quantization=None, sample_rate=None):
     """Ollama models[] and OpenAI data[] for the one model this process serves."""
     repo = repo or model_name
     size, mtime, fmt = _disk(repo)
@@ -129,7 +240,7 @@ def models_payload(model_name, capabilities, description="", repo=None, module="
                     "family": family,
                     "format": fmt,
                     "size": size,
-                    "sample_rate": SAMPLE_RATE,
+                    "sample_rate": sample_rate or SAMPLE_RATE,
                 },
             }
         ],
@@ -145,7 +256,7 @@ CONTRACT_ENDPOINTS = [
 
 
 def register(app, *, model_name, module, served, is_ready, error=None, task_api=False,
-             repo=None, model_format=None, quantization=None):
+             repo=None, model_format=None, quantization=None, sample_rate=None):
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
@@ -179,7 +290,8 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
         if not is_ready():
             raise HTTPException(status_code=503, detail=_err() or "model not loaded yet")
         return models_payload(model_name, capabilities, description=app.title, repo=repo,
-                              module=module, model_format=model_format, quantization=quantization)
+                              module=module, model_format=model_format, quantization=quantization,
+                              sample_rate=sample_rate)
 
     @app.get("/api/engine-spec")
     def engine_spec():

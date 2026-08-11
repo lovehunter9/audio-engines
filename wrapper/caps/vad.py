@@ -1,10 +1,10 @@
 # Voice activity detection with Silero VAD.
 import asyncio
-import os
 import logging
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
+from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register
@@ -18,19 +18,12 @@ MODEL_NAME = _runtime.model_name
 SR = 16000
 
 
-def _envf(name, default):
-    try:
-        return float(os.environ.get(name, "") or default)
-    except Exception:
-        return default
-
-
 # Defaults tuned for music/singing, each overridable per-request via form.
-VAD_THRESHOLD = _envf("VAD_THRESHOLD", 0.3)
-VAD_MIN_SILENCE_MS = _envf("VAD_MIN_SILENCE_MS", 500)
-VAD_SPEECH_PAD_MS = _envf("VAD_SPEECH_PAD_MS", 200)
-VAD_MIN_SPEECH_MS = _envf("VAD_MIN_SPEECH_MS", 250)
-VAD_MAX_SPEECH_S = _envf("VAD_MAX_SPEECH_S", 30)
+VAD_THRESHOLD = 0.3
+VAD_MIN_SILENCE_MS = 500
+VAD_SPEECH_PAD_MS = 200
+VAD_MIN_SPEECH_MS = 250
+VAD_MAX_SPEECH_S = 30
 
 _state = _runtime.state
 
@@ -44,7 +37,7 @@ def _load():
         _state["ready"] = True
         log.info("silero-vad loaded; ready")
     except Exception as e:
-        _state["error"] = str(e)
+        _state["error"] = hfgate.explain(MODEL_NAME, e)
         log.exception("vad load failed: %s", e)
 
 

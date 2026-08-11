@@ -10,11 +10,12 @@ from . import watchdog
 class Runtime:
     def __init__(self, default_model, default_repo=None, **state):
         self.model_name = os.environ.get("MODEL_NAME", default_model)
-        source = os.environ.get("MODEL_SOURCE", "")
+        # MODEL_SOURCE may list several repos; the first is what this engine serves.
+        source = (os.environ.get("MODEL_SOURCE", "").split(",")[0] or "").strip()
         self.model_repo = (
             source[5:] if source.startswith("hf://") else (source or default_repo or self.model_name)
         )
-        self.port = int(os.environ.get("WRAPPER_PORT", "8000"))
+        self.port = int(os.environ.get("ENGINE_PORT", "8000"))
         self.log_level = os.environ.get("LOG_LEVEL", "info").lower()
         logging.basicConfig(
             level=getattr(logging, self.log_level.upper(), logging.INFO)
@@ -31,15 +32,18 @@ class Runtime:
         *,
         load_on_main=False,
         disable_ws_ping=False,
+        timeout_s=None,
     ):
         ready = lambda: self.state["ready"]
         failed = lambda: self.state["error"]
+        # A base whose first load is legitimately hours long must be able to say so.
+        deadline = {} if timeout_s is None else {"timeout_s": timeout_s}
         if load_on_main:
-            watchdog.arm(ready, failed, watchdog_name)
+            watchdog.arm(ready, failed, watchdog_name, **deadline)
             load()
         else:
             threading.Thread(target=load, daemon=True).start()
-            watchdog.arm(ready, failed, watchdog_name)
+            watchdog.arm(ready, failed, watchdog_name, **deadline)
         app = build_app(supports)
         kwargs = {}
         if disable_ws_ping:
