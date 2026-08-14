@@ -251,13 +251,39 @@ def materialize_weights(directory, spec, work_dir="/tmp/acpp"):
     return target
 
 
+def _source_flags():
+    """`--include` / `--subdir` from MODEL_SOURCE: llm-init already honoured these when it fetched.
+
+    The shared HuggingFace cache for `audio-cpp/audio.cpp-gguf` holds every family anyone on this
+    node has downloaded, each in its own folder. Without these flags the first folder that matches
+    a spec wins, which is how a VoxCPM2 install ended up loading MOSS-TTS-Nano.
+    """
+    tokens = os.environ.get("MODEL_SOURCE", "").split()
+    includes, subdir = [], ""
+    i = 0
+    while i < len(tokens):
+        if tokens[i] == "--include" and i + 1 < len(tokens):
+            includes.append(tokens[i + 1])
+            i += 2
+            continue
+        if tokens[i] == "--subdir" and i + 1 < len(tokens):
+            subdir = tokens[i + 1]
+            i += 2
+            continue
+        i += 1
+    return includes, subdir
+
+
 def _snapshot_root(repo, token=None):
     """Where the weights landed. llm-init's own answer wins when it left one."""
-    # Preferred when present because it already accounts for MODEL_SOURCE's --subdir; not every
-    # llm-init writes it, so the hub cache below is the path the other bases rely on.
+    # Preferred when present because it already accounts for MODEL_SOURCE's --include/--subdir.
+    # llm-init sometimes writes the file itself (a single GGUF), not the folder, so a file is
+    # accepted and we load from its directory.
     try:
         with open("/run/llm-init/model_path", "r", encoding="utf-8") as f:
             path = f.read().strip()
+        if path and os.path.isfile(path):
+            return os.path.dirname(path)
         if path and os.path.isdir(path):
             return path
     except OSError:
@@ -281,7 +307,30 @@ def resolve_weights(repo, family="", token=None, spec_dir=SPEC_DIR):
     if family and family not in specs:
         raise SpecError("no audio.cpp spec for family %r; this image ships %d specs (%s, ...)"
                         % (family, len(specs), ", ".join(sorted(specs)[:6])))
-    candidates = [root] + sorted(p for p in glob.glob(os.path.join(root, "*")) if os.path.isdir(p))
+    includes, subdir = _source_flags()
+    include_names = {os.path.basename(p) for p in includes}
+
+    candidates = [root]
+    if subdir:
+        nested = os.path.join(root, subdir)
+        if os.path.isdir(nested):
+            candidates.append(nested)
+    candidates.extend(sorted(p for p in glob.glob(os.path.join(root, "*"))
+                             if os.path.isdir(p) and p not in candidates))
+    # A --include file is the one llm-init actually fetched; keep only folders that hold it.
+    if include_names:
+        holding = []
+        for directory in candidates:
+            try:
+                names = set(os.listdir(directory))
+            except OSError:
+                continue
+            if include_names & names:
+                holding.append(directory)
+        if holding:
+            candidates = holding
+
+    singles = []
     for directory in candidates:
         hits = _claimants(directory, specs)
         if family:
@@ -289,10 +338,17 @@ def resolve_weights(repo, family="", token=None, spec_dir=SPEC_DIR):
                 return directory, specs[family]
             continue
         if len(hits) == 1:
-            return directory, specs[hits[0]]
-        if len(hits) > 1:
+            singles.append((directory, hits[0]))
+        elif len(hits) > 1:
             raise SpecError("%d specs claim the weights in %s (%s); name one with ENGINE_ARGS "
                             "--family" % (len(hits), directory, ", ".join(hits)))
+    if len(singles) == 1:
+        return singles[0][0], specs[singles[0][1]]
+    if len(singles) > 1:
+        families = ", ".join(f for _d, f in singles)
+        raise SpecError("%d model folders under %s (%s); this GGUF repo holds many families. "
+                        "Name one with ENGINE_ARGS --family, or --include the file in MODEL_SOURCE"
+                        % (len(singles), root, families))
     listing = ", ".join(sorted(os.listdir(root))[:8]) if os.path.isdir(root) else "unreadable"
     if family:
         raise SpecError("none of %s or its subdirectories holds a file that the %s spec names "

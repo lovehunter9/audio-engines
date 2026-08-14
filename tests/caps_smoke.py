@@ -1434,12 +1434,30 @@ def t_audiocpp_weight_matching():
         weights = os.path.join(root, "snapshot", "VoxCPM2-GGUF")
         os.makedirs(weights)
         open(os.path.join(weights, "voxcpm2-bf16.gguf"), "wb").close()
+        moss = os.path.join(root, "snapshot", "MOSS-TTS-Nano-100M-GGUF")
+        os.makedirs(moss)
+        open(os.path.join(moss, "moss-tts-nano-100m-bf16.gguf"), "wb").close()
 
         acpp._snapshot_root = lambda repo, token=None: os.path.join(root, "snapshot")
-        found, spec = acpp.resolve_weights("some/repo", spec_dir=specs)
-        check("audiocpp finds the weights one level below the snapshot root", found == weights,
-              found)
-        check("audiocpp matches the spec by filename", spec.family == "voxcpm2", spec.family)
+        os.environ["MODEL_SOURCE"] = (
+            "hf://audio-cpp/audio.cpp-gguf --include VoxCPM2-GGUF/voxcpm2-bf16.gguf")
+        try:
+            found, spec = acpp.resolve_weights("some/repo", spec_dir=specs)
+            check("audiocpp --include picks VoxCPM2 over a sibling MOSS folder",
+                  found == weights and spec.family == "voxcpm2", (found, spec.family))
+        finally:
+            os.environ.pop("MODEL_SOURCE", None)
+
+        try:
+            acpp.resolve_weights("some/repo", spec_dir=specs)
+            check("audiocpp two families without --include raise", False, "no error")
+        except acpp.SpecError as e:
+            check("audiocpp two families say to pass --family",
+                  "--family" in str(e) and "moss_tts_nano" in str(e), str(e)[:160])
+
+        found, spec = acpp.resolve_weights("some/repo", family="voxcpm2", spec_dir=specs)
+        check("audiocpp --family voxcpm2 selects that folder",
+              found == weights and spec.family == "voxcpm2", (found, spec.family))
 
         empty = os.path.join(root, "empty")
         os.makedirs(empty)
