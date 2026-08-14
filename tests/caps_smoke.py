@@ -1269,6 +1269,9 @@ def t_audiocpp_tts():
         check("audiocpp asks the engine for wav and its own model id",
               engine.bodies[-1]["response_format"] == "wav"
               and engine.bodies[-1]["model"] == "engine", engine.bodies[-1])
+        check("audiocpp streaming mode turns retry_badcase off",
+              engine.bodies[-1].get("options", {}).get("retry_badcase") is False,
+              engine.bodies[-1])
         check("audiocpp reports the rate off the engine's own header",
               r.headers.get("X-Audio-Sample-Rate") == "48000",
               r.headers.get("X-Audio-Sample-Rate"))
@@ -1323,6 +1326,9 @@ def t_audiocpp_tts():
         check("audiocpp streaming asks the engine for its audio framing",
               engine.bodies[-1].get("stream") is True
               and engine.bodies[-1].get("stream_format") == "audio", engine.bodies[-1])
+        check("audiocpp a stream request also turns retry_badcase off",
+              engine.bodies[-1].get("options", {}).get("retry_badcase") is False,
+              engine.bodies[-1])
         rw = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
                                               "response_format": "wav"})
         check("audiocpp a streamed wav opens with a RIFF header", rw.content[:4] == b"RIFF",
@@ -1354,6 +1360,19 @@ def t_audiocpp_tts():
               engine.bodies[-1].get("reference_text") == "reference words", engine.bodies[-1])
 
 
+def t_audiocpp_warmup():
+    """Warmup is the first POST the child sees, and VoxCPM2 500s it without retry_badcase=false."""
+    from wrapper.caps import audiocpp_tts as cap
+
+    _, engine, spec = install_audiocpp(streams=True)
+    cap._warmup(engine, spec)
+    check("audiocpp warmup on a streaming family sends retry_badcase=false",
+          engine.bodies[-1].get("options", {}).get("retry_badcase") is False,
+          engine.bodies[-1])
+    check("audiocpp warmup records the engine's sample rate",
+          cap._state["sample_rate"] == 48000, cap._state["sample_rate"])
+
+
 def t_audiocpp_tts_without_streaming():
     """MOSS-TTS-Nano's shape: no streaming decode, so the socket must not exist and must say why."""
     from fastapi.testclient import TestClient
@@ -1369,6 +1388,10 @@ def t_audiocpp_tts_without_streaming():
         check("audiocpp a stream request is a 400 that names the limit",
               rs.status_code == 400 and "no streaming mode" in rs.text,
               (rs.status_code, rs.text[:140]))
+        c.post("/v1/audio/speech", json={"input": "hi"})
+        check("audiocpp offline mode leaves retry_badcase alone",
+              "retry_badcase" not in (engine.bodies[-1].get("options") or {}),
+              engine.bodies[-1])
         row = acpp_spec_rows(c).get(("WS", "/v1/audio/speech/stream"), {})
         check("audiocpp the self-report marks the socket unavailable with a reason",
               row.get("available") is False and "streaming" in (row.get("reason") or ""), row)
@@ -1491,6 +1514,7 @@ def main():
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
                            ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
                            ("audiocpp tts", t_audiocpp_tts, "audiocpp"),
+                           ("audiocpp warmup", t_audiocpp_warmup, "audiocpp"),
                            ("audiocpp tts offline-only", t_audiocpp_tts_without_streaming,
                             "audiocpp"),
                            ("audiocpp tts no cloning", t_audiocpp_tts_without_cloning, "audiocpp"),

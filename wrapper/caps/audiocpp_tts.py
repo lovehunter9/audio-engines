@@ -112,6 +112,19 @@ def _boot():
         log.exception("audio.cpp TTS failed to start: %s", e)
 
 
+def _engine_options(spec):
+    """Options the child requires that our public body never carries.
+
+    A streaming-capable family is configured mode=streaming even for a collected POST
+    /v1/audio/speech: the server runs streaming generation and buffers the result. VoxCPM2
+    then 500s with "streaming generation requires retry_badcase=false" unless that
+    offline-only heuristic is turned off — warmup included, which is how boot died.
+    """
+    if spec is not None and spec.streams:
+        return {"retry_badcase": False}
+    return None
+
+
 def _warmup(engine, spec):
     """One real synthesis before readiness: it builds the CUDA graphs the first caller would
     otherwise pay for, and it is the only place the output sample rate can be learned.
@@ -120,6 +133,9 @@ def _warmup(engine, spec):
     and finding that out now beats every caller finding out with a 500.
     """
     body = {"model": acpp.MODEL_ID, "input": "Warm up.", "response_format": "wav"}
+    opts = _engine_options(spec)
+    if opts:
+        body["options"] = opts
     wav = engine.post("/v1/audio/speech", body).content
     rate, channels = _wav_facts(wav)
     _state.update(sample_rate=rate, channels=channels)
@@ -350,6 +366,9 @@ def build_app(supports):
             body.update(stream=True, stream_format="audio", response_format="pcm")
         else:
             body["response_format"] = "wav"
+        opts = _engine_options(spec)
+        if opts:
+            body["options"] = opts
         return body
 
     def _synthesize_blocking(payload, ref_path):

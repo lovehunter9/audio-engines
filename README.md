@@ -364,6 +364,8 @@ inside the model; and on a `text_prefix` family `instructions` has to be folded 
 since sent as a field it is dropped in silence and the caller gets the default voice with a 200.
 A streaming-capable model is configured `mode=streaming` even for plain requests — the server
 collects its own stream and returns one buffer — so both shapes come from one loaded copy.
+VoxCPM2 then requires `options.retry_badcase=false` on every request (including warmup); the
+cap injects it, callers never see the field.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy
