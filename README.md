@@ -201,6 +201,7 @@ passes. For the same reason the build's final import check must go **through**
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
+| `audiocpp` | `beclab/audio-audiocpp` | `tts`, `tts_clone` | audio.cpp `audiocpp_server` (child process, GGUF) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -337,6 +338,32 @@ in a preset voice. And the binding exposes whole-utterance synthesis only, so
 `stream=1` is sentence-scoped, which is why this base mounts no WebSocket route.
 Output is watermarked: `synthesize()` marks its audio and the unmarked variant
 needs an explicit EU AI Act Art. 50 attestation, which is deliberately not given.
+
+**`audiocpp`.** The only base whose model does not run in this process. audio.cpp is a
+C++ engine with its own HTTP face, so `deps.Dockerfile` starts `FROM` upstream's daily
+multi-arch image (pinned by date+revision) and adds nothing but Python — no compile step,
+and no torch, which is why `wrapper/gpu.py` grew an NVML path for `/metrics`. Upstream's
+`ENTRYPOINT` is a `cli|server|perf|parity` multiplexer, so it is cleared: left in place it
+answers the appended command with "Unknown command" and the wrapper never starts.
+
+`wrapper/acpp.py` owns the child (config, process, wire) and knows nothing about TTS, because
+one image covers 47 model families across TTS, ASR, alignment and music; adding STT here is a
+new `caps/` file, not a rewrite. What a given model can do is **asked of the engine** rather
+than configured: `audiocpp_cli --list-loaders --json` reports each family's tasks, its modes
+per task, and its `instructions_policy`, and the packaged `/app/model_specs/*.json` supply the
+weight filenames used to work out which family the downloaded GGUF even is. Routes follow from
+those facts, so two models on this one base legitimately differ — VoxCPM2 mounts the streaming
+socket, MOSS-TTS-Nano has no streaming decode and withholds that one route, which is what
+`register(withheld=...)` exists to state in `/api/engine-spec` instead of overpromising.
+
+Four translations are the reason a cap exists here at all rather than a proxy: reference audio
+is a server-side **path** to the engine but a data: URL or upload to our callers; it returns WAV
+only, while the contract promises five formats; `voice` must be refused up front, because these
+families have no built-in speakers and an unmatched name is read as a cached voice id and dies
+inside the model; and on a `text_prefix` family `instructions` has to be folded into the text,
+since sent as a field it is dropped in silence and the caller gets the default voice with a 200.
+A streaming-capable model is configured `mode=streaming` even for plain requests — the server
+collects its own stream and returns one buffer — so both shapes come from one loaded copy.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

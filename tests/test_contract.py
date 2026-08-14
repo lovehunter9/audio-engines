@@ -12,6 +12,26 @@ from wrapper import catalog, contract, gpu, tasks
 
 EXPECTED_CAPABILITY_ENDPOINTS = {
     ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},
+    # No /v1/audio/voices: the audio.cpp TTS families have no built-in speakers.
+    ("audiocpp_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("audiocpp_tts", "tts", "POST", "/v1/audio/speech/batch"): {
+        "async_supported": True,
+    },
+    ("audiocpp_tts", "tts", "WS", "/v1/audio/speech/stream"): {
+        "async_supported": False,
+    },
+    ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech"): {
+        "async_supported": True,
+    },
+    ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech/batch"): {
+        "async_supported": True,
+    },
+    ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech/clone"): {
+        "async_supported": True,
+    },
+    ("audiocpp_tts", "tts_clone", "WS", "/v1/audio/speech/stream"): {
+        "async_supported": False,
+    },
     # No WS: ggml synthesizes whole utterances, so stream=1 is sentence-scoped.
     ("crispasr_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
     ("crispasr_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},

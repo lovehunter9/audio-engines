@@ -197,12 +197,14 @@ def _parameter_size(*names):
 
 
 def models_payload(model_name, capabilities, description="", repo=None, module="",
-                   model_format=None, quantization=None, sample_rate=None):
+                   model_format=None, quantization=None, sample_rate=None, family=None):
     """Ollama models[] and OpenAI data[] for the one model this process serves."""
     repo = repo or model_name
     size, mtime, fmt = _disk(repo)
     fmt = model_format or fmt
-    family = catalog.FAMILIES.get(module, "")
+    # The table answers for a module that runs one family; a module driving several (audiocpp)
+    # passes the family of the weights it actually loaded.
+    family = family or catalog.FAMILIES.get(module, "")
     modified = datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc).isoformat()
     owner = "audio-%s" % base_name() if base_name() else "audio-engines"
     details = {
@@ -256,8 +258,12 @@ CONTRACT_ENDPOINTS = [
 
 
 def register(app, *, model_name, module, served, is_ready, error=None, task_api=False,
-             repo=None, model_format=None, quantization=None, sample_rate=None):
+             repo=None, model_format=None, quantization=None, sample_rate=None, family=None,
+             withheld=()):
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
+    # sample_rate and family may be callables for values only known once the model is loaded;
+    # /v1/models is gated on readiness anyway, so they are resolved per request.
+    # withheld: [(method, path, reason)] this instance did not mount - see catalog.spec_endpoints.
     from fastapi import HTTPException
 
     base = base_name()
@@ -271,7 +277,7 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
         "declares": declared,
         "serves": list(served),
         "endpoints": [dict(endpoint) for endpoint in CONTRACT_ENDPOINTS]
-        + catalog.spec_endpoints(base, served, declared),
+        + catalog.spec_endpoints(base, served, declared, withheld),
     }
     # Mounted and advertised together, so the task API can never be one without the other.
     if task_api:
@@ -294,7 +300,8 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
             raise HTTPException(status_code=503, detail=_err() or "model not loaded yet")
         return models_payload(model_name, capabilities, description=app.title, repo=repo,
                               module=module, model_format=model_format, quantization=quantization,
-                              sample_rate=sample_rate)
+                              sample_rate=sample_rate() if callable(sample_rate) else sample_rate,
+                              family=family() if callable(family) else family)
 
     @app.get("/api/engine-spec")
     def engine_spec():

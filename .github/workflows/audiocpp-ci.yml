@@ -1,0 +1,33 @@
+# audiocpp CI: triggers only; the build is the shared build-image.yml.
+name: audiocpp-ci
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audiocpp-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: audiocpp
+      repo: audio-audiocpp
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit

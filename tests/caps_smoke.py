@@ -1170,6 +1170,278 @@ def t_every_engine_args_user_reports_leftovers():
               "warn_unclaimed" in src or ".passthrough()" in src)
 
 
+def acpp_wav(rate=48000, samples=480 * 3):
+    """A real RIFF file: the wrapper parses the header to learn the engine's own sample rate."""
+    import struct
+
+    pcm = b"\x01\x02" * samples
+    return (b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", len(pcm)) + pcm)
+
+
+class FakeAcppEngine:
+    """The audio.cpp child, without the binary: records what it was asked, answers WAV or PCM."""
+
+    def __init__(self, spec, wav):
+        self.spec = spec
+        self.wav = wav
+        self.bodies = []
+        self.alive = True
+
+    def post(self, path, payload, timeout=None):
+        self.bodies.append(payload)
+
+        class R:
+            content = self.wav
+            status_code = 200
+
+        return R()
+
+    def stream(self, path, payload, timeout=None):
+        self.bodies.append(payload)
+        chunks = [self.wav[44:][i::3] for i in range(3)]
+
+        class S:
+            status_code = 200
+
+            def iter_bytes(inner):
+                for chunk in chunks:
+                    yield chunk
+
+            def read(inner):
+                return b""
+
+            def __enter__(inner):
+                return inner
+
+            def __exit__(inner, *exc):
+                return False
+
+        return S()
+
+
+_ACPP_REAL = {}
+
+
+def install_audiocpp(*, streams, clone=True, policy="text_prefix"):
+    """Stub the child engine and the weights: no binary, no GGUF, no card."""
+    from wrapper import acpp
+    from wrapper.caps import audiocpp_tts as cap
+
+    fake_soundfile()
+    # Kept so the test that exercises the real matcher can put it back, whatever the order.
+    _ACPP_REAL.setdefault("resolve_weights", acpp.resolve_weights)
+    _ACPP_REAL.setdefault("_snapshot_root", acpp._snapshot_root)
+    tasks_ = ["tts"] + (["clone"] if clone else [])
+    doc = {"family": "fake_tts", "category": "tts", "display_name": "Fake TTS",
+           "tasks": tasks_, "modes": ["offline"] + (["streaming"] if streams else []),
+           "capabilities": {"clone": ["speaker_reference"]} if clone else {}}
+    advert = {"tasks": {"tts": ["offline"] + (["streaming"] if streams else [])},
+              "instructions_policy": policy, "api_endpoints": ["/v1/audio/speech"]}
+    spec = acpp.Spec("fake_tts", doc, advert)
+    engine = FakeAcppEngine(spec, acpp_wav())
+    # build_app resolves capabilities itself, so that lookup is what has to be stubbed.
+    acpp.resolve_weights = lambda *a, **k: ("/tmp/fake-weights", spec)
+    cap._state.update(ready=True, error=None, engine=engine, spec=spec,
+                      weights="/tmp/fake-weights", sample_rate=48000)
+    return cap, engine, spec
+
+
+def acpp_spec_rows(c):
+    return {(row["method"], row["path"]): row
+            for row in c.get("/api/engine-spec").json()["endpoints"]}
+
+
+def t_audiocpp_tts():
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp(streams=True, clone=True)
+    check("audiocpp a streaming loader is configured in streaming mode",
+          spec.run_mode == "streaming", spec.run_mode)
+    check("audiocpp clone is read off the spec", spec.can_clone)
+
+    with TestClient(cap.build_app(["tts", "tts_clone"])) as c:
+        advertises_tasks(c, "audiocpp")
+        r = c.post("/v1/audio/speech", json={"input": "hello"})
+        check("audiocpp sync 200 wav", r.status_code == 200 and r.content[:4] == b"RIFF",
+              (r.status_code, r.content[:4]))
+        check("audiocpp asks the engine for wav and its own model id",
+              engine.bodies[-1]["response_format"] == "wav"
+              and engine.bodies[-1]["model"] == "engine", engine.bodies[-1])
+        check("audiocpp reports the rate off the engine's own header",
+              r.headers.get("X-Audio-Sample-Rate") == "48000",
+              r.headers.get("X-Audio-Sample-Rate"))
+        # No voice list exists, so a name cannot be checked and the engine would read it as a
+        # cached voice id and fail deep inside the model.
+        rv = c.post("/v1/audio/speech", json={"input": "hi", "voice": "alloy"})
+        check("audiocpp refuses `voice` with a 400 that says why",
+              rv.status_code == 400 and "no built-in voices" in rv.text,
+              (rv.status_code, rv.text[:120]))
+        check("audiocpp mounts no voice list", c.get("/v1/audio/voices").status_code == 404)
+        check("audiocpp an empty input is a 400",
+              c.post("/v1/audio/speech", json={"input": " "}).status_code == 400)
+        check("audiocpp an unsupported response_format is a 400",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "response_format": "midi"}).status_code == 400)
+
+        # text_prefix policy: sent as a field, `instructions` would be dropped in silence and the
+        # caller would get the default voice with a 200.
+        c.post("/v1/audio/speech", json={"input": "hello", "instructions": "a calm narrator"})
+        body = engine.bodies[-1]
+        check("audiocpp folds instructions into the text on a text_prefix family",
+              body["input"].startswith("(a calm narrator)") and "instructions" not in body, body)
+
+        rp = c.post("/v1/audio/speech", json={"input": "hi", "response_format": "pcm"})
+        check("audiocpp pcm carries no container",
+              rp.status_code == 200 and rp.content[:4] != b"RIFF"
+              and len(rp.content) == 480 * 3 * 2, (rp.status_code, len(rp.content)))
+
+        rc = c.post("/v1/audio/speech", json={"input": "hi", "ref_audio": REF})
+        check("audiocpp a reference clip reaches the engine as a server-side path",
+              rc.status_code == 200 and engine.bodies[-1].get("voice_ref", "").startswith("/tmp/"),
+              engine.bodies[-1].get("voice_ref"))
+
+        ra = c.post("/v1/audio/speech?async=1", json={"input": "hello"})
+        check("audiocpp async 202", ra.status_code == 202, (ra.status_code, ra.text[:120]))
+        if ra.status_code == 202:
+            doc = poll(c, ra.json()["task"]["id"])
+            check("audiocpp task succeeded", doc["status"] == "succeeded", doc.get("status"))
+            contract(c, doc, "audiocpp")
+            rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
+            check("audiocpp async bytes == sync bytes", rr.content == r.content,
+                  (len(rr.content), len(r.content)))
+
+        rs = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                              "response_format": "pcm"})
+        check("audiocpp streams raw pcm",
+              rs.status_code == 200 and len(rs.content) == 480 * 3 * 2,
+              (rs.status_code, len(rs.content)))
+        check("audiocpp streaming asks the engine for its audio framing",
+              engine.bodies[-1].get("stream") is True
+              and engine.bodies[-1].get("stream_format") == "audio", engine.bodies[-1])
+        rw = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                              "response_format": "wav"})
+        check("audiocpp a streamed wav opens with a RIFF header", rw.content[:4] == b"RIFF",
+              rw.content[:4])
+        check("audiocpp a container format cannot be streamed",
+              c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                               "response_format": "mp3"}).status_code == 400)
+
+        rows = acpp_spec_rows(c)
+        check("audiocpp advertises the socket it mounted",
+              rows.get(("WS", "/v1/audio/speech/stream"), {}).get("available") is True,
+              rows.get(("WS", "/v1/audio/speech/stream")))
+        check("audiocpp advertises cloning it mounted",
+              rows.get(("POST", "/v1/audio/speech/clone"), {}).get("available") is True)
+        check("audiocpp never advertises a voice list",
+              ("GET", "/v1/audio/voices") not in rows)
+
+        rcl = c.post("/v1/audio/speech/clone",
+                     files={"file": ("ref.wav", b"RIFF----WAVEfake", "audio/wav")},
+                     data={"input": "cloned", "ref_text": "reference words"})
+        check("audiocpp clone 200", rcl.status_code == 200, (rcl.status_code, rcl.text[:120]))
+        check("audiocpp clone forwards the transcript",
+              engine.bodies[-1].get("reference_text") == "reference words", engine.bodies[-1])
+
+
+def t_audiocpp_tts_without_streaming():
+    """MOSS-TTS-Nano's shape: no streaming decode, so the socket must not exist and must say why."""
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp(streams=False, clone=True, policy="soft_tags")
+    check("audiocpp offline-only stays offline", spec.run_mode == "offline", spec.run_mode)
+
+    with TestClient(cap.build_app(["tts", "tts_clone"])) as c:
+        check("audiocpp no socket where the model cannot stream",
+              c.get("/v1/audio/speech/stream").status_code == 404)
+        rs = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                              "response_format": "pcm"})
+        check("audiocpp a stream request is a 400 that names the limit",
+              rs.status_code == 400 and "no streaming mode" in rs.text,
+              (rs.status_code, rs.text[:140]))
+        row = acpp_spec_rows(c).get(("WS", "/v1/audio/speech/stream"), {})
+        check("audiocpp the self-report marks the socket unavailable with a reason",
+              row.get("available") is False and "streaming" in (row.get("reason") or ""), row)
+        # soft_tags: the field is what the loader consumes, so it must not be folded into the text.
+        c.post("/v1/audio/speech", json={"input": "hello", "instructions": "whisper it"})
+        body = engine.bodies[-1]
+        check("audiocpp keeps instructions a field when the policy is not text_prefix",
+              body.get("instructions") == "whisper it" and body["input"] == "hello", body)
+
+
+def t_audiocpp_tts_without_cloning():
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp(streams=True, clone=False)
+    check("audiocpp a spec with no clone entry cannot clone", not spec.can_clone)
+
+    with TestClient(cap.build_app(["tts", "tts_clone"])) as c:
+        check("audiocpp no clone route where the model cannot clone",
+              c.post("/v1/audio/speech/clone",
+                     files={"file": ("r.wav", b"RIFF", "audio/wav")},
+                     data={"input": "x"}).status_code == 404)
+        check("audiocpp ref_audio is a 400 where the model cannot clone",
+              c.post("/v1/audio/speech", json={"input": "hi", "ref_audio": REF}).status_code == 400)
+        row = acpp_spec_rows(c).get(("POST", "/v1/audio/speech/clone"), {})
+        check("audiocpp the self-report marks cloning unavailable",
+              row.get("available") is False, row)
+
+
+def t_audiocpp_not_ready():
+    from fastapi.testclient import TestClient
+
+    cap, _engine, _spec = install_audiocpp(streams=True)
+    cap._state.update(ready=False, error="the child engine died during load")
+    with TestClient(cap.build_app(["tts"])) as c:
+        r = c.post("/v1/audio/speech", json={"input": "hi"})
+        check("audiocpp 503s while the child is not up", r.status_code == 503, r.status_code)
+        check("audiocpp says why", "died during load" in r.text, r.text[:120])
+        # Never gated on load: llm-init reads the contract while the weights are downloading.
+        check("audiocpp self-reports before it is ready",
+              c.get("/api/engine-spec").status_code == 200)
+
+
+def t_audiocpp_weight_matching():
+    """Which spec claims the weights is matched on filenames, not guessed from the model name."""
+    import json as json_
+    import tempfile
+
+    from wrapper import acpp
+
+    # An earlier stub replaced the matcher; this test is about the real one.
+    for name, fn in _ACPP_REAL.items():
+        setattr(acpp, name, fn)
+
+    with tempfile.TemporaryDirectory() as root:
+        specs = os.path.join(root, "specs")
+        os.makedirs(specs)
+        for family, filename in (("voxcpm2", "voxcpm2-bf16.gguf"),
+                                 ("moss_tts_nano", "moss-tts-nano-100m-bf16.gguf")):
+            with open(os.path.join(specs, family + ".json"), "w", encoding="utf-8") as fh:
+                json_.dump({"family": family, "category": "tts", "tasks": ["tts", "clone"],
+                            "modes": ["offline"],
+                            "packages": [{"files": ["%s-GGUF/%s" % (family, filename)]}]}, fh)
+        weights = os.path.join(root, "snapshot", "VoxCPM2-GGUF")
+        os.makedirs(weights)
+        open(os.path.join(weights, "voxcpm2-bf16.gguf"), "wb").close()
+
+        acpp._snapshot_root = lambda repo, token=None: os.path.join(root, "snapshot")
+        found, spec = acpp.resolve_weights("some/repo", spec_dir=specs)
+        check("audiocpp finds the weights one level below the snapshot root", found == weights,
+              found)
+        check("audiocpp matches the spec by filename", spec.family == "voxcpm2", spec.family)
+
+        empty = os.path.join(root, "empty")
+        os.makedirs(empty)
+        acpp._snapshot_root = lambda repo, token=None: empty
+        try:
+            acpp.resolve_weights("some/repo", spec_dir=specs)
+            check("audiocpp unmatched weights raise", False, "no error")
+        except acpp.SpecError as e:
+            check("audiocpp unmatched weights say how to fix it", "--family" in str(e), str(e)[:90])
+
+
 def main():
     print("\n[engine args]")
     t_engine_args()
@@ -1190,7 +1462,13 @@ def main():
                            ("sound_fx not ready", t_sound_fx_not_ready, "dasheng"),
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
-                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx")):
+                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
+                           ("audiocpp tts", t_audiocpp_tts, "audiocpp"),
+                           ("audiocpp tts offline-only", t_audiocpp_tts_without_streaming,
+                            "audiocpp"),
+                           ("audiocpp tts no cloning", t_audiocpp_tts_without_cloning, "audiocpp"),
+                           ("audiocpp not ready", t_audiocpp_not_ready, "audiocpp"),
+                           ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

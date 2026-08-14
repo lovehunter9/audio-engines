@@ -35,6 +35,14 @@ BASES = {
     "crispasr": [
         (("tts",), "crispasr_tts"),
     ],
+    # audio.cpp as a child engine. One image covers many families (VoxCPM2, MOSS-TTS-Nano, ...),
+    # each serving tts and tts_clone from one set of weights, so both caps share one module and
+    # what a given model can actually do is read off the engine at boot. Streaming lives inside
+    # tts rather than a capability of its own, and a family without a streaming decode withholds
+    # that one route (see catalog.spec_endpoints) instead of dropping the capability.
+    "audiocpp": [
+        (("tts", "tts_clone"), "audiocpp_tts"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
@@ -52,6 +60,9 @@ FAMILIES = {
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
+    # Only a fallback: this module drives whichever audio.cpp family the weights turn out to be,
+    # and reports that one (register(family=...)) once they are loaded.
+    "audiocpp_tts": "audiocpp",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -102,6 +113,26 @@ _MOUNTS = {
          "TTS with a ref_audio data: URL (Base weights; OpenAI JSON shape)", True),
         ("POST", "/v1/audio/speech/batch",
          "Batch TTS with uploaded voice / ref_audio", True),
+        ("WS", "/v1/audio/speech/stream",
+         "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
+        ("POST", "/v1/audio/speech/clone",
+         "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
+    ],
+    # Same shape as ("tts", ...) above: one contract, two engines behind it. No /v1/audio/voices,
+    # because these families have no built-in speakers and a picker over an empty list is a lie.
+    ("audiocpp_tts", "tts"): [
+        ("POST", "/v1/audio/speech",
+         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams instead)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
+        ("WS", "/v1/audio/speech/stream",
+         "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
+    ],
+    ("audiocpp_tts", "tts_clone"): [
+        ("POST", "/v1/audio/speech",
+         "TTS with a ref_audio data: URL (zero-shot clone; OpenAI JSON shape)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS with ref_audio per item", True),
         ("WS", "/v1/audio/speech/stream",
          "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
         ("POST", "/v1/audio/speech/clone",
@@ -163,14 +194,23 @@ def endpoints(module, served):
             for cap in served for m in _MOUNTS.get((module, cap), ())]
 
 
-def spec_endpoints(base, served, declared):
-    """Every capability endpoint of the base: the ones mounted here, and why the rest are not."""
+def spec_endpoints(base, served, declared, withheld=()):
+    """Every capability endpoint of the base: the ones mounted here, and why the rest are not.
+
+    withheld is [(method, path, reason)] a cap chose not to mount even though it serves that
+    capability — a route the model behind it cannot honour (no streaming decode, no cloning). Two
+    models on one base can differ that way, so the table below is what the base can mount and this
+    is what this instance did.
+    """
+    holds = {(str(m).upper(), p): why for m, p, why in withheld or ()}
     rows = []
     for cap in implements(base):
         module = module_of(base, cap)
         mounts = _MOUNTS.get((module, cap), ())
         if cap in served:
-            rows.extend(_row(cap, m, True) for m in mounts)
+            for m in mounts:
+                why = holds.get((str(m[0]).upper(), m[1]))
+                rows.append(_row(cap, m, why is None, why))
             continue
         why = ("declared, but needs its own instance of this base" if cap in declared
                else "not declared in MODEL_SUPPORTS")

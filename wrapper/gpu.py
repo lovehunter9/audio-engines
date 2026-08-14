@@ -18,6 +18,33 @@ def quota_mib():
     return _quota_bytes() // (2 ** 20)
 
 
+def _nvml_memory():
+    """(used, total, util) from NVML, for a base with no torch in it.
+
+    A base that runs inference in a child process (audiocpp) has no reason to carry torch, and
+    pulling it in only to read a memory counter would cost gigabytes. NVML is the same source
+    torch reads, and HAMi intercepts it the same way, so the numbers agree with the torch path.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            if pynvml.nvmlDeviceGetCount() < 1:
+                return None
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            try:
+                util = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu) / 100.0
+            except Exception:
+                util = 0.0
+            return int(info.used), int(info.total), util
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:
+        return None
+
+
 def visible_memory_bytes():
     """What CUDA reports as this device's total, or 0 when there is no device to ask."""
     try:
@@ -27,7 +54,8 @@ def visible_memory_bytes():
             return int(torch.cuda.mem_get_info()[1])
     except Exception:
         pass
-    return 0
+    nvml = _nvml_memory()
+    return nvml[1] if nvml else 0
 
 
 def memory_fraction(reserve=0.85, lo=0.1, hi=0.9):
@@ -59,6 +87,11 @@ def gpu_metrics_text():
                 util = 0.0
     except Exception:
         present = 0
+    if not present:
+        nvml = _nvml_memory()
+        if nvml:
+            used, total, util = nvml
+            present = 1
     lines = []
 
     def g(name, help_, val):
