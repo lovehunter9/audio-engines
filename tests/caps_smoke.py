@@ -7,6 +7,7 @@ wiring (form fields, dispatch, progress, result shape), which is exactly where a
 """
 import base64
 import io
+import json
 import os
 import sys
 import time
@@ -1492,6 +1493,176 @@ def t_audiocpp_weight_matching():
             check("audiocpp unmatched weights say how to fix it", "--family" in str(e), str(e)[:90])
 
 
+SSE = (b'data: {"type":"transcript.text.delta","delta":"hel"}\n\n'
+       b'data: {"type":"transcript.text.delta","delta":"lo"}\n\n'
+       b'data: {"type":"transcript.text.done","text":"hello"}\n\n'
+       b'data: [DONE]\n\n')
+
+
+class FakeAcppSttEngine:
+    """The audio.cpp child for ASR, without the binary: records what it was asked, answers JSON/SSE."""
+
+    def __init__(self, spec):
+        self.spec = spec
+        self.bodies = []
+        self.lives = []
+        self.alive = True
+        self.doc = {"text": "hello", "timing": {"wall_ms": 12}}
+
+    def post(self, path, payload, timeout=None):
+        self.bodies.append(("post", path, payload))
+        doc = dict(self.doc)
+        r = types.SimpleNamespace(status_code=200, content=json.dumps(doc).encode())
+        r.json = lambda: dict(doc)
+        return r
+
+    def stream(self, path, payload, timeout=None):
+        self.bodies.append(("stream", path, payload))
+        return _sse_response(SSE)
+
+    def stream_live(self, path, content, params=None, timeout=None):
+        # Do not drain `content`: TestClient's fill task may still be feeding it.
+        self.lives.append((path, dict(params or {})))
+        return _sse_response(SSE)
+
+
+def _sse_response(blob):
+    class S:
+        status_code = 200
+        content = blob
+
+        def iter_bytes(inner):
+            yield blob
+
+        def read(inner):
+            return b""
+
+        def __enter__(inner):
+            return inner
+
+        def __exit__(inner, *exc):
+            return False
+
+    return S()
+
+
+def install_audiocpp_stt(*, streams=True):
+    from wrapper import acpp
+    from wrapper.caps import audiocpp_stt as cap
+
+    fake_soundfile()
+    _ACPP_REAL.setdefault("resolve_weights", acpp.resolve_weights)
+    _ACPP_REAL.setdefault("_snapshot_root", acpp._snapshot_root)
+    doc = {"family": "fake_asr", "category": "asr", "display_name": "Fake ASR",
+           "tasks": ["asr"], "modes": ["offline"] + (["streaming"] if streams else [])}
+    advert = {"tasks": {"asr": ["offline"] + (["streaming"] if streams else [])},
+              "api_endpoints": ["/v1/audio/transcriptions"]}
+    spec = acpp.Spec("fake_asr", doc, advert)
+    engine = FakeAcppSttEngine(spec)
+    acpp.resolve_weights = lambda *a, **k: ("/tmp/fake-weights", spec)
+    cap._state.update(ready=True, error=None, engine=engine, spec=spec,
+                      weights="/tmp/fake-weights")
+    return cap, engine, spec
+
+
+def t_audiocpp_stt():
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp_stt(streams=True)
+    check("audiocpp stt a streaming loader is configured in streaming mode",
+          spec.run_mode == "streaming", spec.run_mode)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        advertises_tasks(c, "audiocpp stt")
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "audiocpp stt")
+        check("audiocpp stt asked the engine for its own model id",
+              engine.bodies[-1][2].get("model") == "engine", engine.bodies[-1])
+        both_ways(c, "/v1/audio/transcriptions", WAV,
+                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'},
+                  "audiocpp stt batch")
+        r = c.post("/v1/audio/transcriptions", files=WAV, data={"response_format": "text"})
+        check("audiocpp stt text/plain still comes back as text",
+              r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
+              and r.text == "hello", (r.status_code, r.headers.get("content-type"), r.text[:40]))
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"keep_tags": "true", "language": "zh"})
+        last = engine.bodies[-1][2]
+        check("audiocpp stt forwards language and SenseVoice options",
+              last.get("language") == "zh" and (last.get("options") or {}).get("keep_tags") is True,
+              last)
+        rs = c.post("/v1/audio/transcriptions", files=WAV, data={"stream": "true"})
+        check("audiocpp stt stream=true is SSE",
+              rs.status_code == 200 and "transcript.text.delta" in rs.text,
+              (rs.status_code, rs.text[:120]))
+        check("audiocpp stt stream=true asked the engine to stream",
+              engine.bodies[-1][0] == "stream" and engine.bodies[-1][2].get("stream") is True,
+              engine.bodies[-1][:2])
+        live = c.post("/v1/audio/transcriptions/live?language=zh", content=b"\x00\x00")
+        check("audiocpp stt /live is SSE",
+              live.status_code == 200 and "transcript.text.delta" in live.text,
+              (live.status_code, live.text[:120]))
+        check("audiocpp stt /live rewrites the model id",
+              engine.lives[-1][1].get("model") == "engine", engine.lives[-1])
+        check("audiocpp stt advertises native live and the platform socket",
+              ("POST", "/v1/audio/transcriptions/live") in mounted(c)
+              and ("WS", "/v1/audio/stream") in mounted(c))
+        rows = acpp_spec_rows(c)
+        paths = [(m, p) for (m, p), row in rows.items()
+                 if row.get("available") and row.get("capability") in ("stt", "stt_stream")]
+        check("audiocpp stt does not advertise the same path twice",
+              len(paths) == len(set(paths)), paths)
+        with c.websocket_connect("/v1/audio/stream") as ws:
+            ready = json.loads(ws.receive_text())
+            check("audiocpp stt WS ready", ready.get("type") == "ready", ready)
+            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh"})
+            ws.send_bytes(b"\x00\x00")
+            ws.send_json({"type": "stop"})
+            kinds = []
+            for _ in range(8):
+                try:
+                    frame = json.loads(ws.receive_text())
+                except Exception:
+                    break
+                kinds.append(frame.get("type"))
+                if frame.get("type") == "closed":
+                    break
+            check("audiocpp stt WS emits partial/final from native SSE",
+                  "partial" in kinds or "final" in kinds, kinds)
+
+
+def t_audiocpp_stt_without_streaming():
+    from fastapi.testclient import TestClient
+
+    cap, _engine, spec = install_audiocpp_stt(streams=False)
+    check("audiocpp stt offline-only stays offline", spec.run_mode == "offline", spec.run_mode)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        check("audiocpp stt no live where the model cannot stream",
+              ("POST", "/v1/audio/transcriptions/live") not in mounted(c))
+        check("audiocpp stt no socket where the model cannot stream",
+              ("WS", "/v1/audio/stream") not in mounted(c))
+        r = c.post("/v1/audio/transcriptions", files=WAV, data={"stream": "true"})
+        check("audiocpp stt a stream request is a 400 that names the limit",
+              r.status_code == 400 and "streaming" in r.text.lower(),
+              (r.status_code, r.text[:160]))
+        rows = acpp_spec_rows(c)
+        check("audiocpp stt the self-report marks live unavailable with a reason",
+              rows[("POST", "/v1/audio/transcriptions/live")]["available"] is False
+              and rows[("POST", "/v1/audio/transcriptions/live")].get("reason"),
+              rows.get(("POST", "/v1/audio/transcriptions/live")))
+
+
+def t_audiocpp_stt_not_ready():
+    from fastapi.testclient import TestClient
+
+    cap, _engine, _spec = install_audiocpp_stt(streams=True)
+    cap._state.update(ready=False, error="died during load")
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        r = c.post("/v1/audio/transcriptions", files=WAV)
+        check("audiocpp stt 503s while the child is not up", r.status_code == 503, r.status_code)
+        check("audiocpp stt says why", "died during load" in r.text, r.text[:120])
+        check("audiocpp stt self-reports before it is ready",
+              c.get("/api/engine-spec").status_code == 200)
+
+
 def main():
     print("\n[engine args]")
     t_engine_args()
@@ -1519,7 +1690,11 @@ def main():
                             "audiocpp"),
                            ("audiocpp tts no cloning", t_audiocpp_tts_without_cloning, "audiocpp"),
                            ("audiocpp not ready", t_audiocpp_not_ready, "audiocpp"),
-                           ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp")):
+                           ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp"),
+                           ("audiocpp stt", t_audiocpp_stt, "audiocpp"),
+                           ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
+                            "audiocpp"),
+                           ("audiocpp stt not ready", t_audiocpp_stt_not_ready, "audiocpp")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

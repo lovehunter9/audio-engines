@@ -409,6 +409,8 @@ class Engine:
             # The wrapper is the only public face; the bundled WebUI and its installer stay off.
             "ui_enabled": False,
             "ui_management": False,
+            # Dictation / a voice-agent turn can outlast the engine's 10-minute live default.
+            "live_ingest": {"total_timeout_ms": 1800000},
             "models": [
                 {
                     "id": MODEL_ID,
@@ -502,6 +504,18 @@ class Engine:
         if not self.alive:
             raise EngineError("audio.cpp is not running:\n%s" % self.log_tail(), status=503)
         return self._client.stream("POST", path, json=payload, timeout=timeout)
+
+    def stream_live(self, path, content, params=None, timeout=REQUEST_TIMEOUT_S):
+        """Chunked PCM in, SSE out: the engine's /v1/audio/transcriptions/live shape.
+
+        `content` is a sync iterator of bytes. httpx sends that as Transfer-Encoding: chunked,
+        which is what the engine requires — a buffered body is a 400.
+        """
+        if not self.alive:
+            raise EngineError("audio.cpp is not running:\n%s" % self.log_tail(), status=503)
+        return self._client.stream("POST", path, content=content, params=params or {},
+                                   headers={"Content-Type": "application/octet-stream"},
+                                   timeout=timeout)
 
 
 class EngineError(RuntimeError):

@@ -35,13 +35,15 @@ BASES = {
     "crispasr": [
         (("tts",), "crispasr_tts"),
     ],
-    # audio.cpp as a child engine. One image covers many families (VoxCPM2, MOSS-TTS-Nano, ...),
-    # each serving tts and tts_clone from one set of weights, so both caps share one module and
-    # what a given model can actually do is read off the engine at boot. Streaming lives inside
-    # tts rather than a capability of its own, and a family without a streaming decode withholds
-    # that one route (see catalog.spec_endpoints) instead of dropping the capability.
+    # audio.cpp as a child engine. One image covers many families (VoxCPM2, Voxtral, SenseVoice,
+    # ...). Caps that need different weights are separate clones: the wrapper serves the first
+    # match. What a given model can actually do is read off the engine at boot; a family without
+    # a streaming decode withholds those routes (see catalog.spec_endpoints) instead of dropping
+    # the capability. Streaming TTS lives inside tts rather than a capability of its own; ASR
+    # streaming is its own cap because the transport is different from an offline file upload.
     "audiocpp": [
         (("tts", "tts_clone"), "audiocpp_tts"),
+        (("stt", "stt_stream"), "audiocpp_stt"),
     ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
@@ -60,9 +62,10 @@ FAMILIES = {
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
-    # Only a fallback: this module drives whichever audio.cpp family the weights turn out to be,
-    # and reports that one (register(family=...)) once they are loaded.
+    # Only a fallback: these modules drive whichever audio.cpp family the weights turn out to be,
+    # and report that one (register(family=...)) once they are loaded.
     "audiocpp_tts": "audiocpp",
+    "audiocpp_stt": "audiocpp",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -135,6 +138,23 @@ _MOUNTS = {
     ("audiocpp_tts", "tts_clone"): [
         ("POST", "/v1/audio/speech/clone",
          "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
+    ],
+    # Native audio.cpp ASR. No /transcriptions/batch: the engine has no such route, so batch is
+    # `segments` on the same POST (same as qwen). stream=true on that POST is output-SSE of an
+    # already-uploaded file, not a second endpoint. Live capture is a different transport
+    # (chunked PCM in, SSE out) so it stays its own path; the WebSocket is the platform shape
+    # DEMO/gateway already speak, translated onto /live, not a third protocol of the model.
+    ("audiocpp_stt", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Offline transcription (OpenAI multipart or native JSON; stream=true for output SSE; "
+         "segments[] batches on this same path; SenseVoice also takes language/enable_itn/"
+         "keep_tags/audio_chunk_*)", True),
+    ],
+    ("audiocpp_stt", "stt_stream"): [
+        ("POST", "/v1/audio/transcriptions/live",
+         "Live ASR: chunked raw PCM in, SSE transcript deltas out (audio.cpp native)", False),
+        ("WS", "/v1/audio/stream",
+         "Streaming ASR (WebSocket; PCM16LE in, partial/final text out)", False),
     ],
     ("sound_fx", "sound_fx"): [
         ("POST", "/v1/audio/speech",
