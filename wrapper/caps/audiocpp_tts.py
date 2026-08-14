@@ -32,7 +32,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-acpp-tts")
 
-_runtime = Runtime("OpenBMB/VoxCPM2", engine=None, spec=None, sample_rate=0)
+_runtime = Runtime("OpenBMB/VoxCPM2", engine=None, spec=None, sample_rate=0, channels=1)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
@@ -276,8 +276,11 @@ def build_app(supports):
         return _state["engine"]
 
     def _headers(mode, fmt):
+        # Channels is not cosmetic: a pcm caller gets no container to read it from, and these
+        # models are not all mono (MOSS-TTS-Nano returns stereo at 48 kHz).
         return {"X-Audio-Model": MODEL_NAME, "X-Audio-Mode": mode, "X-Audio-Format": fmt,
-                "X-Audio-Sample-Rate": str(_state["sample_rate"])}
+                "X-Audio-Sample-Rate": str(_state["sample_rate"]),
+                "X-Audio-Channels": str(_state["channels"])}
 
     def _check(payload):
         """Validate our body shape and settle the response format. Returns the format."""
@@ -374,7 +377,7 @@ def build_app(supports):
 
         def body():
             if fmt == "wav":
-                yield _wav_stream_header(rate)
+                yield _wav_stream_header(rate, _state["channels"])
             ctx = _ref_file(data, suffix) if data else None
             path = ctx.__enter__() if ctx else None
             try:

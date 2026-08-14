@@ -1272,6 +1272,9 @@ def t_audiocpp_tts():
         check("audiocpp reports the rate off the engine's own header",
               r.headers.get("X-Audio-Sample-Rate") == "48000",
               r.headers.get("X-Audio-Sample-Rate"))
+        check("audiocpp reports channels so a pcm caller does not have to guess",
+              r.headers.get("X-Audio-Channels") in ("1", "2"),
+              r.headers.get("X-Audio-Channels"))
         # No voice list exists, so a name cannot be checked and the engine would read it as a
         # cached voice id and fail deep inside the model.
         rv = c.post("/v1/audio/speech", json={"input": "hi", "voice": "alloy"})
@@ -1336,6 +1339,12 @@ def t_audiocpp_tts():
               rows.get(("POST", "/v1/audio/speech/clone"), {}).get("available") is True)
         check("audiocpp never advertises a voice list",
               ("GET", "/v1/audio/voices") not in rows)
+        spec_rows = [row for row in c.get("/api/engine-spec").json()["endpoints"]
+                     if row.get("available")]
+        speech_paths = [(row["method"], row["path"]) for row in spec_rows
+                        if row["path"].startswith("/v1/audio/speech")]
+        check("audiocpp does not advertise the same speech path twice",
+              len(speech_paths) == len(set(speech_paths)), speech_paths)
 
         rcl = c.post("/v1/audio/speech/clone",
                      files={"file": ("ref.wav", b"RIFF----WAVEfake", "audio/wav")},

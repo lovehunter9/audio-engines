@@ -20,17 +20,9 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("audiocpp_tts", "tts", "WS", "/v1/audio/speech/stream"): {
         "async_supported": False,
     },
-    ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech"): {
-        "async_supported": True,
-    },
-    ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech/batch"): {
-        "async_supported": True,
-    },
+    # Shared /speech lives under tts; tts_clone only advertises the multipart clone route.
     ("audiocpp_tts", "tts_clone", "POST", "/v1/audio/speech/clone"): {
         "async_supported": True,
-    },
-    ("audiocpp_tts", "tts_clone", "WS", "/v1/audio/speech/stream"): {
-        "async_supported": False,
     },
     # No WS: ggml synthesizes whole utterances, so stream=1 is sentence-scoped.
     ("crispasr_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
@@ -154,6 +146,13 @@ class CatalogContractTest(unittest.TestCase):
                 metadata = {"async_supported": endpoint["async_supported"]}
                 actual_metadata[key] = metadata
         self.assertEqual(actual_metadata, EXPECTED_CAPABILITY_ENDPOINTS)
+
+    def test_audiocpp_serving_both_caps_does_not_repeat_a_path(self):
+        # These models declare tts and tts_clone together. A path listed under both caps is what
+        # the dashboard then prints twice, so the catalog must not share speech routes that way.
+        rows = catalog.spec_endpoints("audiocpp", ["tts", "tts_clone"], ["tts", "tts_clone"])
+        paths = [(r["method"], r["path"]) for r in rows if r["available"]]
+        self.assertEqual(len(paths), len(set(paths)), paths)
 
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}

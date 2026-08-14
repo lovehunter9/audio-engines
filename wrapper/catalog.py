@@ -118,23 +118,21 @@ _MOUNTS = {
         ("POST", "/v1/audio/speech/clone",
          "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
     ],
-    # Same shape as ("tts", ...) above: one contract, two engines behind it. No /v1/audio/voices,
-    # because these families have no built-in speakers and a picker over an empty list is a lie.
+    # Shared speech routes live only under tts. Qwen3-TTS lists them again under tts_clone because
+    # a given instance serves one cap or the other; these two models serve both at once, and the
+    # same path under two caps is what the dashboard then prints twice. Cloning via `ref_audio` on
+    # /v1/audio/speech still works — that is a field of the same endpoint, not a second one.
+    # No /v1/audio/voices: these families have no built-in speakers.
     ("audiocpp_tts", "tts"): [
         ("POST", "/v1/audio/speech",
-         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams instead)", True),
+         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams instead; "
+         "ref_audio as a data: URL clones)", True),
         ("POST", "/v1/audio/speech/batch",
-         "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
+         "Batch TTS (JSON items[] 1–32, base64 audio out; ref_audio clones per item)", True),
         ("WS", "/v1/audio/speech/stream",
          "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
     ],
     ("audiocpp_tts", "tts_clone"): [
-        ("POST", "/v1/audio/speech",
-         "TTS with a ref_audio data: URL (zero-shot clone; OpenAI JSON shape)", True),
-        ("POST", "/v1/audio/speech/batch",
-         "Batch TTS with ref_audio per item", True),
-        ("WS", "/v1/audio/speech/stream",
-         "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
         ("POST", "/v1/audio/speech/clone",
          "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
     ],
