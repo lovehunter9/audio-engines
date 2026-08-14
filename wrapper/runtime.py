@@ -10,11 +10,15 @@ from . import watchdog
 class Runtime:
     def __init__(self, default_model, default_repo=None, **state):
         self.model_name = os.environ.get("MODEL_NAME", default_model)
-        # MODEL_SOURCE may list several repos; the first is what this engine serves.
+        # MODEL_SOURCE may list several repos; the first is what this engine serves. A segment can
+        # also carry llm-init's inline flags (--include / --subdir / --revision), which a
+        # single-file GGUF out of a many-model repo needs, so the repo is only the first token.
         source = (os.environ.get("MODEL_SOURCE", "").split(",")[0] or "").strip()
-        self.model_repo = (
-            source[5:] if source.startswith("hf://") else (source or default_repo or self.model_name)
-        )
+        if source.startswith("hf://"):
+            tokens = source[5:].split()
+            self.model_repo = tokens[0] if tokens else (default_repo or self.model_name)
+        else:
+            self.model_repo = source or default_repo or self.model_name
         self.port = int(os.environ.get("ENGINE_PORT", "8000"))
         self.log_level = os.environ.get("LOG_LEVEL", "info").lower()
         logging.basicConfig(
