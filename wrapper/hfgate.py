@@ -22,8 +22,9 @@ def explain(repo, err):
     if not repo or "/" not in repo:
         return text          # not a hub id (silero ships inside the image), no gate to speak of
     try:
-        if not _refused(repo):
-            return text
+        with _online():
+            if not _refused(repo):
+                return text
     except Exception as probe:
         # Offline, throttled, misspelled repo, hub outage: none of these are a gate.
         log.info("could not check whether %s is gated (%s)", repo, probe)
@@ -34,6 +35,29 @@ def explain(repo, err):
     return ("%s is a gated repo and %s. Accept the conditions at https://huggingface.co/%s, connect "
             "that HuggingFace account under Olares Settings, then restart this app. "
             "(load error: %s)" % (repo, why, repo, text))
+
+
+class _online:
+    """Let this one probe reach the hub even though the engine runs offline.
+
+    The wrapper scripts export HF_HUB_OFFLINE so that no inference path can ever touch the
+    network, which also means the gate check could never answer: it would fail with "offline mode
+    is enabled" and report that instead of the gate. Confirming a gate requires asking, and this
+    runs once, after a load has already failed, with a 10s timeout. The flag is a module constant
+    read at import time, so setting the environment variable back would have no effect here.
+    """
+
+    def __enter__(self):
+        from huggingface_hub import constants
+
+        self._constants = constants
+        self._was = constants.HF_HUB_OFFLINE
+        constants.HF_HUB_OFFLINE = False
+        return self
+
+    def __exit__(self, *exc):
+        self._constants.HF_HUB_OFFLINE = self._was
+        return False
 
 
 def _refused(repo):

@@ -195,9 +195,66 @@ def _claimants(directory, specs):
     return sorted(s.family for s in specs.values() if _spec_filenames(s) & on_disk)
 
 
+def materialize_weights(directory, spec, work_dir="/tmp/acpp"):
+    """A directory whose weight files are real files, which is what audio.cpp needs to load them.
+
+    The engine resolves the path it is handed with weakly_canonical() and then picks the loader
+    purely from the extension (open_tensor_source, src/framework/assets/tensor_source.cpp). A
+    HuggingFace snapshot is a tree of symlinks into a blob store where each blob is named by its
+    hash and has no extension at all, so following the link turns `model-bf16.gguf` into
+    `blobs/db68...-10` and the engine refuses it as an "unsupported tensor source format" — with
+    the weights sitting right there, fully downloaded.
+
+    Hard links fix that for free: they carry the name, share the bytes, and canonicalize to
+    themselves. They only work within one filesystem, so a copy into work_dir is the fallback for
+    the case where the cache and the scratch space are different mounts.
+    """
+    wanted = _spec_filenames(spec)
+    try:
+        names = sorted(set(os.listdir(directory)) & wanted)
+    except OSError:
+        return directory
+    if not names or not any(os.path.islink(os.path.join(directory, n)) for n in names):
+        return directory
+    real = {n: os.path.realpath(os.path.join(directory, n)) for n in names}
+    # Beside the blob store rather than in it: same filesystem (so linking works), and outside the
+    # models--*/ trees huggingface_hub prunes.
+    cache_root = os.environ.get("HF_HUB_CACHE") or os.path.dirname(os.path.dirname(
+        os.path.dirname(next(iter(real.values())))))
+    for target in (os.path.join(cache_root, ".audiocpp-weights", os.path.basename(directory)),
+                   os.path.join(work_dir, "weights", os.path.basename(directory))):
+        try:
+            os.makedirs(target, exist_ok=True)
+            for name in names:
+                dst, src = os.path.join(target, name), real[name]
+                if os.path.exists(dst) and os.stat(dst).st_ino == os.stat(src).st_ino:
+                    continue  # already linked to this exact blob
+                if os.path.lexists(dst):
+                    os.unlink(dst)
+                os.link(src, dst)
+            log.info("linked %d weight file(s) into %s so the real path keeps its extension",
+                     len(names), target)
+            return target
+        except OSError as e:
+            log.info("cannot hard-link weights into %s (%s); trying a copy", target, e)
+    target = os.path.join(work_dir, "weights", os.path.basename(directory))
+    os.makedirs(target, exist_ok=True)
+    import shutil
+
+    for name in names:
+        dst, src = os.path.join(target, name), real[name]
+        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
+            continue
+        shutil.copy2(src, dst)
+    log.warning("copied %d weight file(s) into %s: hard links were not possible, so this used "
+                "disk equal to the weights", len(names), target)
+    return target
+
+
 def _snapshot_root(repo, token=None):
     """Where the weights landed. llm-init's own answer wins when it left one."""
-    # Written by llm-init after the download, and it already accounts for MODEL_SOURCE --subdir.
+    # Preferred when present because it already accounts for MODEL_SOURCE's --subdir; not every
+    # llm-init writes it, so the hub cache below is the path the other bases rely on.
     try:
         with open("/run/llm-init/model_path", "r", encoding="utf-8") as f:
             path = f.read().strip()
@@ -316,6 +373,9 @@ class Engine:
     def start(self, timeout_s=BOOT_TIMEOUT_S):
         """Write the config, spawn the server, and return once it answers /health."""
         os.makedirs(self._work_dir, exist_ok=True)
+        # Done here rather than in resolve_weights: reading what a model can do has to stay free of
+        # side effects, since the routes are built from it before anything is started.
+        self.weights_dir = materialize_weights(self.weights_dir, self.spec, self._work_dir)
         self._config_path = os.path.join(self._work_dir, "server.json")
         doc = self.config_doc()
         with open(self._config_path, "w", encoding="utf-8") as f:
