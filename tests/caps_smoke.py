@@ -1697,7 +1697,7 @@ def t_audiocpp_join_hops():
           cap._join_asr(["Hola.", "你好"], "voxtral_realtime") == "Hola.\n你好")
     check("start option shortens the utterance cap",
           cap._hop_s({"options": {"audio_chunk_duration_sec": 1}}) == 1.0)
-    check("utterance cap default is 8 s", cap._hop_s({}) == 8.0)
+    check("utterance cap default is 30 s", cap._hop_s({}) == 30.0)
     check("live punct is stripped from the in-progress line",
           cap._strip_live("我们必须回头。") == "我们必须回头")
     check("voxtral pads short PCM to the keep length",

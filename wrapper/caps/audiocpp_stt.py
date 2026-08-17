@@ -208,15 +208,17 @@ def _live_query(cfg):
 # but NOT on a metronome: energy VAD cuts on pauses (how people actually talk).
 # While a breath is still going we decode the current utterance every ~2 s so the
 # GPU stays touched and the DEMO can show a growing interim line. Pause (or the
-# 8 s cap) finalizes. audio_chunk_duration_sec on start is the cap, not a sentence.
+# 30 s safety cap) finalizes. audio_chunk_duration_sec on start is the cap, not a sentence.
 _DECODE_S = 2.0
-_VAD_MAX_S = 8.0
+# Pause-cut only. The cap is a safety lid for a lecture that never breathes,
+# not a metronome — 30 s matches FunASR's max_single_segment_time.
+_VAD_MAX_S = 30.0
 _VAD_MIN_S = 0.4
 _VAD_HANG_S = 0.45
 _VAD_FRAME_S = 0.02
 _VAD_SPEECH_RMS = 400.0
 _HOP_MIN_S = 1.0
-_HOP_MAX_S = 8.0
+_HOP_MAX_S = 30.0
 _WS_HOP_S = _VAD_MAX_S
 _KEEP_S = 2.0
 _LIVE_PUNCT = "。．.！!？?…"
