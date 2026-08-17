@@ -88,10 +88,11 @@ def _boot():
         log.exception("audio.cpp STT failed to start: %s", e)
 
 
-def _warmup_wav():
+def _warmup_wav(seconds=0.25):
     """A short voiced-band tone: silence can make an encoder skip the pass and warm nothing."""
     buf = io.BytesIO()
-    rate, n = 16000, 4000
+    rate = 16000
+    n = max(1, int(rate * float(seconds)))
     with wave.open(buf, "wb") as w:
         w.setnchannels(1)
         w.setsampwidth(2)
@@ -188,12 +189,19 @@ def _live_query(cfg):
     return params
 
 
-# HAMi time-slice releases a process lock after ~5–9 s of 0% GPU util. A long /live
+# HAMi time-slice releases a process lock after ~5–15 s of 0% GPU util. A long /live
 # that only decodes in bursts (Voxtral) or after a 30 s window (SenseVoice) looks idle
-# and then never gets the card back. The platform WS therefore hops every 2 s with an
-# offline POST of that hop only — same process, GPU every hop, bounded work per hop.
-_WS_HOP_S = 2.0
+# and then never gets the card back. The platform WS therefore hops offline POSTs —
+# same process, GPU every hop, bounded work per hop.
+#
+# 2 s hops cut Chinese mid-clause and SenseVoice punctuates each fragment, so the
+# DEMO splits them into one "sentence" per hop. 4 s is still under the idle timer
+# and is long enough for a short clause. Start may override via audio_chunk_duration_sec.
+_WS_HOP_S = 4.0
+_HOP_MIN_S = 1.0
+_HOP_MAX_S = 8.0
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
+_HOP_PUNCT = "。．.！!？?…、,， \t"
 
 
 def _window_live(spec):
@@ -217,17 +225,53 @@ def _transcribe_pcm(pcm, cfg):
             .get("text") or "")
 
 
-def _join_asr(parts):
-    """Join hop transcripts. CJK stays space-free; ASCII words get a space."""
-    out = ""
-    for part in parts:
+def _hop_s(cfg):
+    opts = cfg.get("options") or {} if isinstance(cfg, dict) else {}
+    raw = opts.get("audio_chunk_duration_sec")
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        val = 0.0
+    if val <= 0:
+        val = _WS_HOP_S
+    return min(_HOP_MAX_S, max(_HOP_MIN_S, val))
+
+
+def _join_asr(parts, family=""):
+    """Join hop transcripts.
+
+    SenseVoice punctuates every short window; stripping hop-boundary marks lets
+    clauses glue into sentences. Voxtral auto-detects language per hop, so each
+    hop stays its own line instead of one five-language run-on.
+    """
+    pieces = []
+    n = len(parts)
+    for i, part in enumerate(parts):
         piece = (part or "").strip()
         if not piece:
             continue
+        if family == "sense_asr" and i < n - 1:
+            piece = piece.rstrip(_HOP_PUNCT)
+            if not piece:
+                continue
+        pieces.append(piece)
+    if family == "voxtral_realtime":
+        return "\n".join(pieces)
+    out = ""
+    for piece in pieces:
         if out and out[-1].isascii() and piece[0].isascii() and not out[-1].isspace():
             out += " "
         out += piece
     return out
+
+
+def _session_warm(seconds):
+    """First CUDA graph after a HAMi lock looks like 0% util and gets stolen.
+    Pay that on a dummy hop-sized wav so the first real hop is the fast path."""
+    wav = _warmup_wav(seconds)
+    with _audio_file(wav) as path:
+        _engine().post("/v1/audio/transcriptions",
+                       {"model": acpp.MODEL_ID, "audio": path})
 
 
 def _engine_body(path, payload):
@@ -595,12 +639,19 @@ def build_app(supports):
 
             def pump_windows():
                 rate = int(cfg.get("sample_rate") or 16000)
-                hop = max(1, int(_WS_HOP_S * rate * 2))
+                hop_s = _hop_s(cfg)
+                hop = max(1, int(hop_s * rate * 2))
+                family = getattr(_state.get("spec"), "family", "") or ""
                 buf = bytearray()
                 last = 0
                 parts = []
                 acc = ""
                 try:
+                    if family == "voxtral_realtime":
+                        try:
+                            _session_warm(hop_s)
+                        except Exception as e:
+                            log.warning("session warm failed: %s", e)
                     while True:
                         item = incoming.get()
                         if item is END:
@@ -616,7 +667,7 @@ def build_app(supports):
                                 continue
                             if text and text.strip():
                                 parts.append(text)
-                                acc = _join_asr(parts)
+                                acc = _join_asr(parts, family)
                                 outgoing.put(("partial", acc))
                     tail = bytes(buf[last:])
                     if tail:
@@ -624,7 +675,7 @@ def build_app(supports):
                             text = _transcribe_pcm(tail, cfg)
                             if text and text.strip():
                                 parts.append(text)
-                                acc = _join_asr(parts)
+                                acc = _join_asr(parts, family)
                         except Exception as e:
                             if not acc:
                                 outgoing.put(("error", str(e)))

@@ -1657,12 +1657,12 @@ def t_audiocpp_sense_live_defaults():
 
 
 def t_audiocpp_stt_window_ws():
-    """Voxtral/SenseVoice WS hops offline so the GPU is touched every 2 s, not once per /live."""
+    """Voxtral/SenseVoice WS hops offline so the GPU is touched every hop, not once per /live."""
     from fastapi.testclient import TestClient
 
     cap, engine, spec = install_audiocpp_stt(streams=True, family="voxtral_realtime")
     check("window family is detected", cap._window_live(spec), spec.family)
-    hop = int(cap._WS_HOP_S * 16000 * 2)
+    hop = int(cap._hop_s({}) * 16000 * 2)
     with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
         with c.websocket_connect("/v1/audio/stream") as ws:
             json.loads(ws.receive_text())
@@ -1681,9 +1681,53 @@ def t_audiocpp_stt_window_ws():
             check("window WS emits partial/final from offline hops",
                   "partial" in kinds or "final" in kinds, kinds)
             check("window WS did not open /live", engine.lives == [], engine.lives)
-            check("window WS posted hop PCM as WAV",
-                  any(row[0] == "post" and row[1] == "/v1/audio/transcriptions"
-                      for row in engine.bodies), engine.bodies)
+            posts = [row for row in engine.bodies
+                     if row[0] == "post" and row[1] == "/v1/audio/transcriptions"]
+            check("window WS warmed then posted hop PCM as WAV",
+                  len(posts) >= 2, engine.bodies)
+
+
+def t_audiocpp_join_hops():
+    from wrapper.caps import audiocpp_stt as cap
+
+    check("sense glue strips hop-boundary periods",
+          cap._join_asr(["过去发生的事情。", "都会在今天。"], "sense_asr")
+          == "过去发生的事情都会在今天。")
+    check("voxtral hops stay separate lines",
+          cap._join_asr(["Hola.", "你好"], "voxtral_realtime") == "Hola.\n你好")
+    check("start option shortens the hop",
+          cap._hop_s({"options": {"audio_chunk_duration_sec": 1}}) == 1.0)
+    check("hop default is 4 s", cap._hop_s({}) == 4.0)
+
+
+def t_audiocpp_stt_window_honors_chunk():
+    """audio_chunk_duration_sec on start is the hop length, not a /live query leftover."""
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp_stt(streams=True, family="sense_asr")
+    hop = int(1.0 * 16000 * 2)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        with c.websocket_connect("/v1/audio/stream") as ws:
+            json.loads(ws.receive_text())
+            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh",
+                          "audio_chunk_duration_sec": 1})
+            ws.send_bytes(b"\x00" * hop)
+            ws.send_json({"type": "stop"})
+            kinds = []
+            for _ in range(8):
+                try:
+                    frame = json.loads(ws.receive_text())
+                except Exception:
+                    break
+                kinds.append(frame.get("type"))
+                if frame.get("type") == "closed":
+                    break
+            check("1 s hop emits without waiting for the 4 s default",
+                  "partial" in kinds or "final" in kinds, kinds)
+            check("sense WS did not session-warm (Voxtral-only)",
+                  sum(1 for row in engine.bodies
+                      if row[0] == "post" and row[1] == "/v1/audio/transcriptions") == 1,
+                  engine.bodies)
 
 
 def t_audiocpp_live_duplex():
@@ -1811,6 +1855,9 @@ def main():
                            ("audiocpp sense live defaults", t_audiocpp_sense_live_defaults,
                             "audiocpp"),
                            ("audiocpp stt window ws", t_audiocpp_stt_window_ws, "audiocpp"),
+                           ("audiocpp join hops", t_audiocpp_join_hops, "audiocpp"),
+                           ("audiocpp stt window honors chunk", t_audiocpp_stt_window_honors_chunk,
+                            "audiocpp"),
                            ("audiocpp live duplex", t_audiocpp_live_duplex, "audiocpp"),
                            ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
                             "audiocpp"),
