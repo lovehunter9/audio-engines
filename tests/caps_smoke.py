@@ -1928,6 +1928,75 @@ def t_voxtral_not_ready():
               ("POST", "/v1/audio/transcriptions/live") not in rows, sorted(rows))
 
 
+class FakeMoss:
+    sample_rate = 48000
+
+    def __init__(self):
+        self.calls = []
+        self.voices = ["Junhao", "Ava"]
+
+    def speak(self, text, voice, ref_path):
+        self.calls.append(("speak", {"text": text, "voice": voice, "ref_path": ref_path}))
+        return np.linspace(-0.5, 0.5, 480, dtype="float32"), self.sample_rate
+
+    def speak_stream(self, text, voice, ref_path):
+        self.calls.append(("stream", {"text": text, "voice": voice, "ref_path": ref_path}))
+        for _ in range(3):
+            yield np.linspace(-0.5, 0.5, 480, dtype="float32"), self.sample_rate
+
+
+def t_moss_tts():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import moss_tts as cap
+
+    fake_soundfile()
+    m = FakeMoss()
+    cap._state.update(ready=True, error=None, model=m, speakers=list(m.voices))
+    with TestClient(cap.build_app(["tts", "tts_clone"])) as c:
+        r = c.post("/v1/audio/speech", json={"input": "hello"})
+        check("moss sync 200", r.status_code == 200, (r.status_code, r.text[:120]))
+        check("moss empty input is a 400",
+              c.post("/v1/audio/speech", json={"input": "  "}).status_code == 400)
+        check("moss unknown voice is a 400",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "voice": "nobody"}).status_code == 400)
+        check("moss lists builtin voices",
+              c.get("/v1/audio/voices").json()["voices"] == [{"id": "Junhao"}, {"id": "Ava"}])
+        rs = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                              "response_format": "pcm"})
+        check("moss stream 200 raw pcm", rs.status_code == 200 and len(rs.content) == PCM_BYTES,
+              (rs.status_code, len(rs.content)))
+        check("moss stream used speak_stream",
+              any(k == "stream" for k, _ in m.calls), m.calls)
+        check("moss a container format cannot be streamed",
+              c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
+                                               "response_format": "mp3"}).status_code == 400)
+        spec = c.get("/api/engine-spec").json()
+        rows = {(row["method"], row["path"]) for row in spec.get("endpoints") or []
+                if row.get("available")}
+        check("moss mounts the streaming socket",
+              ("WS", "/v1/audio/speech/stream") in rows, sorted(rows))
+        check("moss mounts clone",
+              ("POST", "/v1/audio/speech/clone") in rows, sorted(rows))
+
+
+def t_moss_not_ready():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import moss_tts as cap
+
+    cap._state.update(ready=False, error="onnx assets missing", model=None, speakers=[])
+    with TestClient(cap.build_app(["tts", "tts_clone"])) as c:
+        r = c.post("/v1/audio/speech", json={"input": "hi"})
+        check("moss 503s while not loaded", r.status_code == 503, r.status_code)
+        check("moss says why", "onnx assets missing" in r.text, r.text[:160])
+        spec = c.get("/api/engine-spec")
+        check("moss self-reports before it is ready", spec.status_code == 200, spec.status_code)
+        with c.websocket_connect("/v1/audio/speech/stream") as ws:
+            frame = ws.receive_json()
+            check("moss socket refuses instead of accepting text it cannot speak",
+                  frame["type"] == "error" and "onnx assets missing" in frame["message"], frame)
+
+
 def main():
     print("\n[engine args]")
     t_engine_args()
@@ -1970,7 +2039,9 @@ def main():
                            ("audiocpp stt not ready", t_audiocpp_stt_not_ready, "audiocpp"),
                            ("voxtral argv", t_voxtral_argv, "voxtral"),
                            ("voxtral fold", t_voxtral_fold, "voxtral"),
-                           ("voxtral not ready", t_voxtral_not_ready, "voxtral")):
+                           ("voxtral not ready", t_voxtral_not_ready, "voxtral"),
+                           ("moss tts", t_moss_tts, "mosstts"),
+                           ("moss not ready", t_moss_not_ready, "mosstts")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

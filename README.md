@@ -203,6 +203,7 @@ passes. For the same reason the build's final import check must go **through**
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
 | `audiocpp` | `beclab/audio-audiocpp` | `tts`, `tts_clone`, `stt`, `stt_stream` | audio.cpp `audiocpp_server` (child process, GGUF) | in progress |
 | `voxtral` | `beclab/audio-voxtral` | `stt`, `stt_stream` | mainline `vllm serve` `/v1/realtime` (child process; not Omni) | in progress |
+| `mosstts` | `beclab/audio-mosstts` | `tts`, `tts_clone` | official MOSS-TTS-Nano ONNX (in-process; realtime streaming decode; not Omni) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -354,7 +355,8 @@ than configured: `audiocpp_cli --list-loaders --json` reports each family's task
 per task, and its `instructions_policy`, and the packaged `/app/model_specs/*.json` supply the
 weight filenames used to work out which family the downloaded GGUF even is. Routes follow from
 those facts, so two models on this one base legitimately differ — VoxCPM2 mounts the streaming
-TTS socket, MOSS-TTS-Nano has no streaming decode and withholds that one route, Voxtral Realtime
+TTS socket, MOSS-TTS-Nano used to withhold it here (the GGUF loader has no streaming decode)
+and now lives on `bases/mosstts`. Voxtral Realtime
 mounts `/v1/audio/transcriptions/live` plus the platform WS, which is what
 `register(withheld=...)` exists to state in `/api/engine-spec` instead of overpromising.
 
@@ -393,6 +395,13 @@ so a filled ENGINE_ARGS cannot collide with the wrapper on :8000. Empty ENGINE_A
 stamps `--tokenizer-mode mistral --enforce-eager --max-model-len 16384` (eager because
 graph capture has wedged HAMi time-slices; 16384 ≈ 21 min at 80 ms/token, the stock
 131072 will not fit a 16 Gi slice).
+
+**`mosstts`.** Official ONNX Runtime in-process (not Omni, not audio.cpp). The model is
+100M, CPU-friendly, and the first-class workflow is clone + Realtime Streaming Decode.
+Builtin voices are listed on `GET /v1/audio/voices`; `ref_audio` clones. Empty
+ENGINE_ARGS stamps `--execution-provider cuda --cpu-threads 4`; CUDA EP falls back
+to cpu if the wheel or the quota cannot do GPU. Weights are two HF repos
+(`MOSS-TTS-Nano-100M-ONNX` + `MOSS-Audio-Tokenizer-Nano-ONNX`).
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

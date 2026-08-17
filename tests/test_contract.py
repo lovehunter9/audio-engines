@@ -53,6 +53,13 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
         "async_supported": True,
     },
     ("enhance", "enhance", "POST", "/v1/audio/enhance"): {"async_supported": True},
+    ("moss_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
+    ("moss_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("moss_tts", "tts", "POST", "/v1/audio/speech/batch"): {"async_supported": True},
+    ("moss_tts", "tts", "WS", "/v1/audio/speech/stream"): {"async_supported": False},
+    ("moss_tts", "tts_clone", "POST", "/v1/audio/speech/clone"): {
+        "async_supported": True,
+    },
     ("sound_fx", "sound_fx", "POST", "/v1/audio/speech"): {"async_supported": True},
     ("sound_fx", "sound_fx", "POST", "/v1/audio/speech/batch"): {
         "async_supported": True,
@@ -184,6 +191,15 @@ class CatalogContractTest(unittest.TestCase):
         self.assertIn(("POST", "/v1/audio/transcriptions"), paths)
         self.assertIn(("WS", "/v1/audio/stream"), paths)
         self.assertNotIn(("POST", "/v1/audio/transcriptions/live"), paths)
+
+    def test_mosstts_serving_both_caps_does_not_repeat_a_path(self):
+        rows = catalog.spec_endpoints("mosstts", ["tts", "tts_clone"], ["tts", "tts_clone"])
+        paths = [(r["method"], r["path"]) for r in rows if r["available"]]
+        self.assertEqual(len(paths), len(set(paths)), paths)
+        self.assertIn(("POST", "/v1/audio/speech"), paths)
+        self.assertIn(("WS", "/v1/audio/speech/stream"), paths)
+        self.assertIn(("GET", "/v1/audio/voices"), paths)
+        self.assertIn(("POST", "/v1/audio/speech/clone"), paths)
 
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}

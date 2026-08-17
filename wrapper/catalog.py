@@ -27,6 +27,10 @@ BASES = {
     "qwen3tts": [
         (("tts", "tts_clone"), "tts"),
     ],
+    # Official MOSS-TTS-Nano ONNX: realtime streaming decode + clone + builtin voices. Not Omni.
+    "mosstts": [
+        (("tts", "tts_clone"), "moss_tts"),
+    ],
     # Dasheng-AudioGen: sound effects from English-only captions, so translation sits upstream.
     "dasheng": [
         (("sound_fx",), "sound_fx"),
@@ -64,6 +68,7 @@ FAMILIES = {
     "enhance": "speechbrain",
     "diar_stream": "nemo-sortformer",
     "tts": "qwen3-tts",
+    "moss_tts": "moss-tts-nano",
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
@@ -133,6 +138,23 @@ _MOUNTS = {
          "Batch TTS with uploaded voice / ref_audio", True),
         ("WS", "/v1/audio/speech/stream",
          "Streaming text-in TTS (WebSocket; sentence-scoped audio out)", False),
+        ("POST", "/v1/audio/speech/clone",
+         "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
+    ],
+    # One instance serves tts + tts_clone together (builtin voices AND clone). Speech routes
+    # live only under tts so the dashboard does not print them twice; cloning via ref_audio
+    # on /v1/audio/speech is a field of that endpoint.
+    ("moss_tts", "tts"): [
+        ("POST", "/v1/audio/speech",
+         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams instead; "
+         "ref_audio as a data: URL clones)", True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS (JSON items[] 1–32, base64 audio out; ref_audio clones per item)", True),
+        ("WS", "/v1/audio/speech/stream",
+         "Streaming text-in TTS (WebSocket; native Realtime Streaming Decode)", False),
+        ("GET", "/v1/audio/voices", "List built-in voices", False),
+    ],
+    ("moss_tts", "tts_clone"): [
         ("POST", "/v1/audio/speech/clone",
          "Voice cloning from reference audio (multipart: file + input + ref_text)", True),
     ],
