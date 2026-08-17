@@ -11,6 +11,7 @@
 # Which streaming routes exist is decided by the loader, not this file: a family without a
 # streaming mode withholds both /live and the socket rather than answering "not supported"
 # on every frame.
+import array
 import asyncio
 import io
 import json
@@ -191,15 +192,21 @@ def _live_query(cfg):
 
 # HAMi time-slice releases a process lock after ~5–15 s of 0% GPU util. A long /live
 # that only decodes in bursts (Voxtral) or after a 30 s window (SenseVoice) looks idle
-# and then never gets the card back. The platform WS therefore hops offline POSTs —
-# same process, GPU every hop, bounded work per hop.
-#
-# 2 s hops cut Chinese mid-clause and SenseVoice punctuates each fragment, so the
-# DEMO splits them into one "sentence" per hop. 4 s is still under the idle timer
-# and is long enough for a short clause. Start may override via audio_chunk_duration_sec.
-_WS_HOP_S = 4.0
+# and then never gets the card back. The platform WS therefore does offline POSTs,
+# but NOT on a metronome: energy VAD cuts on pauses (how people actually talk).
+# While a breath is still going we decode the current utterance every ~2 s so the
+# GPU stays touched and the DEMO can show a growing interim line. Pause (or the
+# 8 s cap) finalizes. audio_chunk_duration_sec on start is the cap, not a sentence.
+_DECODE_S = 2.0
+_VAD_MAX_S = 8.0
+_VAD_MIN_S = 0.4
+_VAD_HANG_S = 0.45
+_VAD_FRAME_S = 0.02
+_VAD_SPEECH_RMS = 400.0
 _HOP_MIN_S = 1.0
 _HOP_MAX_S = 8.0
+_WS_HOP_S = _VAD_MAX_S
+_LIVE_PUNCT = "。．.！!？?…"
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
 
 
@@ -224,7 +231,7 @@ def _transcribe_pcm(pcm, cfg):
             .get("text") or "")
 
 
-def _hop_s(cfg):
+def _vad_max_s(cfg):
     opts = cfg.get("options") or {} if isinstance(cfg, dict) else {}
     raw = opts.get("audio_chunk_duration_sec")
     try:
@@ -232,17 +239,33 @@ def _hop_s(cfg):
     except (TypeError, ValueError):
         val = 0.0
     if val <= 0:
-        val = _WS_HOP_S
+        val = _VAD_MAX_S
     return min(_HOP_MAX_S, max(_HOP_MIN_S, val))
 
 
-def _join_asr(parts, family=""):
-    """Join hop transcripts.
+def _hop_s(cfg):
+    """Back-compat alias: start.audio_chunk_duration_sec is the utterance cap."""
+    return _vad_max_s(cfg)
 
-    SenseVoice keeps each window's own punctuation so the DEMO can split on
-    real 。 — stripping them glued a 30 s lecture into one paragraph.
-    Voxtral auto-detects language per hop, so each hop stays its own line
-    instead of one five-language run-on.
+
+def _frame_rms(frame):
+    n = len(frame) - (len(frame) % 2)
+    if n < 2:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(bytes(frame[:n]))
+    return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+
+def _strip_live(text):
+    return (text or "").strip().rstrip(_LIVE_PUNCT + " \t")
+
+
+def _join_asr(parts, family=""):
+    """Join committed utterances. Live (in-progress) text is appended by the pump,
+    with trailing punct stripped so the DEMO keeps it as the interim line.
+
+    Voxtral auto-detects language per utterance, so each stays its own line.
     """
     pieces = []
     for part in parts:
@@ -257,6 +280,16 @@ def _join_asr(parts, family=""):
             out += " "
         out += piece
     return out
+
+
+def _with_live(parts, live, family):
+    committed = _join_asr(parts, family)
+    piece = _strip_live(live)
+    if not piece:
+        return committed
+    if family == "voxtral_realtime":
+        return piece if not committed else committed + "\n" + piece
+    return committed + piece
 
 
 def _session_warm(seconds):
@@ -633,17 +666,67 @@ def build_app(supports):
 
             def pump_windows():
                 rate = int(cfg.get("sample_rate") or 16000)
-                hop_s = _hop_s(cfg)
-                hop = max(1, int(hop_s * rate * 2))
+                max_s = _vad_max_s(cfg)
                 family = getattr(_state.get("spec"), "family", "") or ""
+                frame_n = max(2, int(rate * _VAD_FRAME_S) * 2)
+                hang_n = max(frame_n, int(_VAD_HANG_S * rate) * 2)
+                min_n = max(frame_n, int(_VAD_MIN_S * rate) * 2)
+                max_n = max(min_n, int(max_s * rate) * 2)
+                decode_n = max(frame_n, int(_DECODE_S * rate) * 2)
                 buf = bytearray()
-                last = 0
+                scan = 0
+                utt0 = None
+                last_loud = 0
+                last_decode = 0
                 parts = []
+                live = ""
                 acc = ""
+
+                def transcribe(piece):
+                    try:
+                        return _transcribe_pcm(piece, cfg)
+                    except Exception as e:
+                        log.warning("window transcribe failed: %s", e)
+                        return None
+
+                def emit():
+                    nonlocal acc
+                    acc = _with_live(parts, live, family)
+                    if acc:
+                        outgoing.put(("partial", acc))
+
+                def commit(end):
+                    nonlocal utt0, live, last_decode, acc
+                    start = utt0
+                    utt0 = None
+                    live = ""
+                    last_decode = end
+                    piece = bytes(buf[start:end])
+                    if len(piece) < min_n:
+                        return
+                    text = transcribe(piece)
+                    if text and text.strip():
+                        parts.append(text)
+                        emit()
+
+                def decode_live(now):
+                    nonlocal last_decode, live
+                    if utt0 is None or now - last_decode < decode_n:
+                        return
+                    piece = bytes(buf[utt0:now])
+                    if len(piece) < min_n:
+                        return
+                    last_decode = now
+                    text = transcribe(piece)
+                    if text is None:
+                        return
+                    live = text
+                    emit()
+
                 try:
                     if family == "voxtral_realtime":
                         try:
-                            _session_warm(hop_s)
+                            _session_warm(_DECODE_S)
                         except Exception as e:
                             log.warning("session warm failed: %s", e)
                     while True:
@@ -651,31 +734,32 @@ def build_app(supports):
                         if item is END:
                             break
                         buf.extend(item)
-                        while len(buf) - last >= hop:
-                            piece = bytes(buf[last:last + hop])
-                            last += hop
-                            try:
-                                text = _transcribe_pcm(piece, cfg)
-                            except Exception as e:
-                                log.warning("window transcribe failed: %s", e)
-                                continue
-                            if text and text.strip():
-                                parts.append(text)
-                                acc = _join_asr(parts, family)
-                                outgoing.put(("partial", acc))
-                    tail = bytes(buf[last:])
-                    if tail:
-                        try:
-                            text = _transcribe_pcm(tail, cfg)
-                            if text and text.strip():
-                                parts.append(text)
-                                acc = _join_asr(parts, family)
-                        except Exception as e:
-                            if not acc:
-                                outgoing.put(("error", str(e)))
-                                return
-                            log.warning("final window transcribe failed: %s", e)
-                    outgoing.put(("final", acc))
+                        while scan + frame_n <= len(buf):
+                            rms = _frame_rms(buf[scan:scan + frame_n])
+                            end = scan + frame_n
+                            if rms >= _VAD_SPEECH_RMS:
+                                if utt0 is None:
+                                    utt0 = scan
+                                    last_decode = scan
+                                last_loud = end
+                            if utt0 is not None:
+                                uttered = last_loud - utt0
+                                silence = end - last_loud
+                                if uttered >= max_n:
+                                    commit(last_loud)
+                                elif uttered >= min_n and silence >= hang_n:
+                                    commit(last_loud)
+                                else:
+                                    decode_live(end)
+                            scan = end
+                    if utt0 is not None:
+                        commit(len(buf))
+                    elif buf and not parts:
+                        text = transcribe(bytes(buf))
+                        if text and text.strip():
+                            parts.append(text)
+                            acc = _join_asr(parts, family)
+                    outgoing.put(("final", acc or _join_asr(parts, family)))
                 except Exception as e:
                     outgoing.put(("error", str(e)))
                 finally:

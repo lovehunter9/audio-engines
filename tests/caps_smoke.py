@@ -1695,13 +1695,15 @@ def t_audiocpp_join_hops():
           == "过去发生的事情。都会在今天。")
     check("voxtral hops stay separate lines",
           cap._join_asr(["Hola.", "你好"], "voxtral_realtime") == "Hola.\n你好")
-    check("start option shortens the hop",
+    check("start option shortens the utterance cap",
           cap._hop_s({"options": {"audio_chunk_duration_sec": 1}}) == 1.0)
-    check("hop default is 4 s", cap._hop_s({}) == 4.0)
+    check("utterance cap default is 8 s", cap._hop_s({}) == 8.0)
+    check("live punct is stripped from the in-progress line",
+          cap._strip_live("我们必须回头。") == "我们必须回头")
 
 
 def t_audiocpp_stt_window_honors_chunk():
-    """audio_chunk_duration_sec on start is the hop length, not a /live query leftover."""
+    """audio_chunk_duration_sec on start is the utterance cap, not a /live query leftover."""
     from fastapi.testclient import TestClient
 
     cap, engine, spec = install_audiocpp_stt(streams=True, family="sense_asr")
@@ -1728,6 +1730,43 @@ def t_audiocpp_stt_window_honors_chunk():
                   sum(1 for row in engine.bodies
                       if row[0] == "post" and row[1] == "/v1/audio/transcriptions") == 1,
                   engine.bodies)
+
+
+def t_audiocpp_vad_pause():
+    """Utterances end on silence, not on a 4 s metronome."""
+    import math
+    import struct
+    from fastapi.testclient import TestClient
+
+    def sine(seconds, rate=16000):
+        n = int(rate * seconds)
+        return b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 220 * i / rate)))
+                        for i in range(n))
+
+    cap, engine, spec = install_audiocpp_stt(streams=True, family="sense_asr")
+    pcm = sine(0.8) + (b"\x00" * int(16000 * 0.7 * 2)) + sine(0.8)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        with c.websocket_connect("/v1/audio/stream") as ws:
+            json.loads(ws.receive_text())
+            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh"})
+            step = 16000 * 2 // 5
+            for i in range(0, len(pcm), step):
+                ws.send_bytes(pcm[i:i + step])
+            ws.send_json({"type": "stop"})
+            kinds = []
+            for _ in range(12):
+                try:
+                    frame = json.loads(ws.receive_text())
+                except Exception:
+                    break
+                kinds.append(frame.get("type"))
+                if frame.get("type") == "closed":
+                    break
+            posts = [row for row in engine.bodies
+                     if row[0] == "post" and row[1] == "/v1/audio/transcriptions"]
+            check("VAD pause splits two utterances",
+                  len(posts) == 2 and ("partial" in kinds or "final" in kinds),
+                  (len(posts), kinds))
 
 
 def t_audiocpp_live_duplex():
@@ -1858,6 +1897,7 @@ def main():
                            ("audiocpp join hops", t_audiocpp_join_hops, "audiocpp"),
                            ("audiocpp stt window honors chunk", t_audiocpp_stt_window_honors_chunk,
                             "audiocpp"),
+                           ("audiocpp vad pause", t_audiocpp_vad_pause, "audiocpp"),
                            ("audiocpp live duplex", t_audiocpp_live_duplex, "audiocpp"),
                            ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
                             "audiocpp"),
