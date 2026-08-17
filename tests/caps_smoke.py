@@ -1681,7 +1681,7 @@ def t_audiocpp_stt_window_ws():
             check("window WS emits partial/final from offline hops",
                   "partial" in kinds or "final" in kinds, kinds)
             check("window WS did not open /live", engine.lives == [], engine.lives)
-            check("window WS posted the growing PCM as WAV",
+            check("window WS posted hop PCM as WAV",
                   any(row[0] == "post" and row[1] == "/v1/audio/transcriptions"
                       for row in engine.bodies), engine.bodies)
 

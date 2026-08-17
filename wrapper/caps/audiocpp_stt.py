@@ -191,7 +191,7 @@ def _live_query(cfg):
 # HAMi time-slice releases a process lock after ~5–9 s of 0% GPU util. A long /live
 # that only decodes in bursts (Voxtral) or after a 30 s window (SenseVoice) looks idle
 # and then never gets the card back. The platform WS therefore hops every 2 s with an
-# offline POST of everything so far — same process, GPU every hop, cumulative text.
+# offline POST of that hop only — same process, GPU every hop, bounded work per hop.
 _WS_HOP_S = 2.0
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
 
@@ -215,6 +215,19 @@ def _transcribe_pcm(pcm, cfg):
     payload.update(cfg.get("options") or {})
     return (_transcribe_blocking(payload, _pcm16_wav(pcm, cfg.get("sample_rate") or 16000))
             .get("text") or "")
+
+
+def _join_asr(parts):
+    """Join hop transcripts. CJK stays space-free; ASCII words get a space."""
+    out = ""
+    for part in parts:
+        piece = (part or "").strip()
+        if not piece:
+            continue
+        if out and out[-1].isascii() and piece[0].isascii() and not out[-1].isspace():
+            out += " "
+        out += piece
+    return out
 
 
 def _engine_body(path, payload):
@@ -585,6 +598,7 @@ def build_app(supports):
                 hop = max(1, int(_WS_HOP_S * rate * 2))
                 buf = bytearray()
                 last = 0
+                parts = []
                 acc = ""
                 try:
                     while True:
@@ -593,18 +607,24 @@ def build_app(supports):
                             break
                         buf.extend(item)
                         while len(buf) - last >= hop:
-                            last = len(buf)
+                            piece = bytes(buf[last:last + hop])
+                            last += hop
                             try:
-                                text = _transcribe_pcm(bytes(buf), cfg)
+                                text = _transcribe_pcm(piece, cfg)
                             except Exception as e:
                                 log.warning("window transcribe failed: %s", e)
                                 continue
-                            if text:
-                                acc = text
+                            if text and text.strip():
+                                parts.append(text)
+                                acc = _join_asr(parts)
                                 outgoing.put(("partial", acc))
-                    if buf:
+                    tail = bytes(buf[last:])
+                    if tail:
                         try:
-                            acc = _transcribe_pcm(bytes(buf), cfg) or acc
+                            text = _transcribe_pcm(tail, cfg)
+                            if text and text.strip():
+                                parts.append(text)
+                                acc = _join_asr(parts)
                         except Exception as e:
                             if not acc:
                                 outgoing.put(("error", str(e)))
