@@ -1683,8 +1683,8 @@ def t_audiocpp_stt_window_ws():
             check("window WS did not open /live", engine.lives == [], engine.lives)
             posts = [row for row in engine.bodies
                      if row[0] == "post" and row[1] == "/v1/audio/transcriptions"]
-            check("window WS warmed then posted hop PCM as WAV",
-                  len(posts) >= 2, engine.bodies)
+            check("window WS posted hop PCM as WAV",
+                  len(posts) >= 1, engine.bodies)
 
 
 def t_audiocpp_join_hops():

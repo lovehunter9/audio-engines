@@ -47,6 +47,9 @@ BOOT_TIMEOUT_S = 2400.0
 
 _state = _runtime.state
 _AUDIO_DIR = "/tmp/acpp/audio"
+_infer_lock = threading.Lock()
+_stream_busy = threading.Event()
+_keep_stop = threading.Event()
 
 # Form/JSON fields that belong to the engine's request.options, not to our wiring.
 _OPTION_KEYS = ("enable_itn", "keep_tags", "audio_chunk_mode", "audio_chunk_duration_sec")
@@ -80,8 +83,15 @@ def _boot():
         engine = acpp.Engine(spec=spec, weights_dir=weights, args=_args)
         engine.start()
         _state["engine"] = engine
-        _warmup(engine)
+        try:
+            _warmup(engine)
+        except Exception as e:
+            log.warning("boot warmup failed: %s", e)
         _state.update(ready=True, error=None)
+        if spec.family == "voxtral_realtime":
+            threading.Thread(target=_keep_gpu, name="acpp-gpu-keep", daemon=True).start()
+            log.info("voxtral gpu keep every %.0fs: first CUDA graph after a lock looks idle to HAMi",
+                     _KEEP_S)
         log.info("%s ready: family=%s mode=%s stream=%s", MODEL_NAME,
                  spec.family, spec.run_mode, spec.streams)
     except Exception as e:
@@ -206,6 +216,7 @@ _VAD_SPEECH_RMS = 400.0
 _HOP_MIN_S = 1.0
 _HOP_MAX_S = 8.0
 _WS_HOP_S = _VAD_MAX_S
+_KEEP_S = 3.0
 _LIVE_PUNCT = "。．.！!？?…"
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
 
@@ -293,12 +304,25 @@ def _with_live(parts, live, family):
 
 
 def _session_warm(seconds):
-    """First CUDA graph after a HAMi lock looks like 0% util and gets stolen.
-    Pay that on a dummy hop-sized wav so the first real hop is the fast path."""
+    """Dummy transcribe so HAMi sees GPU activity and the CUDA graph stays captured."""
     wav = _warmup_wav(seconds)
     with _audio_file(wav) as path:
-        _engine().post("/v1/audio/transcriptions",
-                       {"model": acpp.MODEL_ID, "audio": path})
+        with _infer_lock:
+            _engine().post("/v1/audio/transcriptions",
+                           {"model": acpp.MODEL_ID, "audio": path})
+
+
+def _keep_gpu():
+    """Voxtral's first graph after lock_ok reports 0% util; HAMi steals the lock in ~15 s.
+    Touch the card every few seconds while no stream is running so a 34 s clip is not
+    spent waiting for that tax."""
+    while not _keep_stop.wait(_KEEP_S):
+        if _stream_busy.is_set() or not _state.get("ready"):
+            continue
+        try:
+            _session_warm(0.25)
+        except Exception as e:
+            log.warning("gpu keep failed: %s", e)
 
 
 def _engine_body(path, payload):
@@ -325,8 +349,9 @@ def _transcribe_blocking(payload, wav):
     engine = _engine()
     try:
         with _audio_file(wav) as path:
-            return _parse_engine(engine.post("/v1/audio/transcriptions",
-                                             _engine_body(path, payload)))
+            with _infer_lock:
+                return _parse_engine(engine.post("/v1/audio/transcriptions",
+                                                 _engine_body(path, payload)))
     except acpp.EngineError as e:
         status = e.status if e.status in (400, 413, 429, 503) else 502
         raise HTTPException(status_code=status, detail=str(e))
@@ -724,11 +749,7 @@ def build_app(supports):
                     emit()
 
                 try:
-                    if family == "voxtral_realtime":
-                        try:
-                            _session_warm(_DECODE_S)
-                        except Exception as e:
-                            log.warning("session warm failed: %s", e)
+                    _stream_busy.set()
                     while True:
                         item = incoming.get()
                         if item is END:
@@ -763,6 +784,7 @@ def build_app(supports):
                 except Exception as e:
                     outgoing.put(("error", str(e)))
                 finally:
+                    _stream_busy.clear()
                     outgoing.put(("closed", None))
 
             def pump():
