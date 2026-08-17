@@ -201,7 +201,6 @@ _WS_HOP_S = 4.0
 _HOP_MIN_S = 1.0
 _HOP_MAX_S = 8.0
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
-_HOP_PUNCT = "。．.！!？?…、,， \t"
 
 
 def _window_live(spec):
@@ -240,21 +239,16 @@ def _hop_s(cfg):
 def _join_asr(parts, family=""):
     """Join hop transcripts.
 
-    SenseVoice punctuates every short window; stripping hop-boundary marks lets
-    clauses glue into sentences. Voxtral auto-detects language per hop, so each
-    hop stays its own line instead of one five-language run-on.
+    SenseVoice keeps each window's own punctuation so the DEMO can split on
+    real 。 — stripping them glued a 30 s lecture into one paragraph.
+    Voxtral auto-detects language per hop, so each hop stays its own line
+    instead of one five-language run-on.
     """
     pieces = []
-    n = len(parts)
-    for i, part in enumerate(parts):
+    for part in parts:
         piece = (part or "").strip()
-        if not piece:
-            continue
-        if family == "sense_asr" and i < n - 1:
-            piece = piece.rstrip(_HOP_PUNCT)
-            if not piece:
-                continue
-        pieces.append(piece)
+        if piece:
+            pieces.append(piece)
     if family == "voxtral_realtime":
         return "\n".join(pieces)
     out = ""

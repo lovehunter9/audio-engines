@@ -1690,9 +1690,9 @@ def t_audiocpp_stt_window_ws():
 def t_audiocpp_join_hops():
     from wrapper.caps import audiocpp_stt as cap
 
-    check("sense glue strips hop-boundary periods",
+    check("sense keeps hop periods so the DEMO can split sentences",
           cap._join_asr(["过去发生的事情。", "都会在今天。"], "sense_asr")
-          == "过去发生的事情都会在今天。")
+          == "过去发生的事情。都会在今天。")
     check("voxtral hops stay separate lines",
           cap._join_asr(["Hola.", "你好"], "voxtral_realtime") == "Hola.\n你好")
     check("start option shortens the hop",
