@@ -1864,6 +1864,70 @@ def t_audiocpp_stt_not_ready():
               c.get("/api/engine-spec").status_code == 200)
 
 
+def t_voxtral_argv():
+    from unittest import mock
+    from wrapper.caps import voxtral_realtime as cap
+
+    with mock.patch.dict(os.environ, {"ENGINE_ARGS": ""}, clear=False):
+        argv = cap.vllm_argv("/cache/model", "mistralai/Voxtral-Mini-4B-Realtime-2602", 8001)
+    joined = " ".join(argv)
+    check("empty ENGINE_ARGS still stamps --tokenizer-mode mistral",
+          "--tokenizer-mode" in argv and "mistral" in argv, joined)
+    check("empty ENGINE_ARGS stamps --enforce-eager", "--enforce-eager" in argv, joined)
+    check("empty ENGINE_ARGS stamps --max-model-len 16384",
+          "--max-model-len" in argv and "16384" in argv, joined)
+    check("child always binds 127.0.0.1:8001",
+          "--host" in argv and "127.0.0.1" in argv and "8001" in argv, joined)
+    check("served-model-name is the advertised id",
+          "--served-model-name" in argv and "mistralai/Voxtral-Mini-4B-Realtime-2602" in argv,
+          joined)
+
+    with mock.patch.dict(os.environ, {
+        "ENGINE_ARGS": "--tokenizer-mode mistral --port 8000 --max-model-len 4096",
+    }, clear=False):
+        argv = cap.vllm_argv("/cache/model", "voxtral", 8001)
+    check("user --port 8000 cannot steal the wrapper port",
+          argv[argv.index("--port") + 1] == "8001", argv)
+    check("user --max-model-len reaches the child",
+          argv[argv.index("--max-model-len") + 1] == "4096", argv)
+
+
+def t_voxtral_fold():
+    from wrapper.caps.voxtral_realtime import fold_event
+
+    acc, kind, text = fold_event("", {"type": "transcription.delta", "delta": "你"})
+    check("delta accumulates", acc == "你" and kind == "partial" and text == "你", (acc, kind, text))
+    acc, kind, text = fold_event(acc, {"type": "transcription.delta", "delta": "好"})
+    check("second delta appends", acc == "你好" and text == "你好", (acc, text))
+    acc, kind, text = fold_event(acc, {"type": "transcription.done", "text": "你好。"})
+    check("done replaces with full text", kind == "final" and text == "你好。", (kind, text))
+    acc, kind, text = fold_event("x", {"type": "session.created", "id": "s"})
+    check("hello is ignored", kind is None, (kind, acc))
+    acc, kind, text = fold_event("x", {"type": "error", "message": "boom"})
+    check("error surfaces", kind == "error" and text == "boom", (kind, text))
+
+
+def t_voxtral_not_ready():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import voxtral_realtime as cap
+
+    cap._state.update(ready=False, error="vllm serve died", engine=None)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        r = c.post("/v1/audio/transcriptions", files=WAV)
+        check("voxtral 503s while the child is not up", r.status_code == 503, r.status_code)
+        check("voxtral says why", "vllm serve died" in r.text, r.text[:160])
+        spec = c.get("/api/engine-spec")
+        check("voxtral self-reports before it is ready", spec.status_code == 200, spec.status_code)
+        rows = {(row["method"], row["path"]): row for row in spec.json().get("endpoints") or []
+                if row.get("available")}
+        check("voxtral mounts transcriptions",
+              ("POST", "/v1/audio/transcriptions") in rows, sorted(rows))
+        check("voxtral mounts platform WS",
+              ("WS", "/v1/audio/stream") in rows, sorted(rows))
+        check("voxtral does not mount audio.cpp /live",
+              ("POST", "/v1/audio/transcriptions/live") not in rows, sorted(rows))
+
+
 def main():
     print("\n[engine args]")
     t_engine_args()
@@ -1903,7 +1967,10 @@ def main():
                            ("audiocpp live duplex", t_audiocpp_live_duplex, "audiocpp"),
                            ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
                             "audiocpp"),
-                           ("audiocpp stt not ready", t_audiocpp_stt_not_ready, "audiocpp")):
+                           ("audiocpp stt not ready", t_audiocpp_stt_not_ready, "audiocpp"),
+                           ("voxtral argv", t_voxtral_argv, "voxtral"),
+                           ("voxtral fold", t_voxtral_fold, "voxtral"),
+                           ("voxtral not ready", t_voxtral_not_ready, "voxtral")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

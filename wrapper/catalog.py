@@ -7,6 +7,10 @@ BASES = {
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
     ],
+    # Mainline vLLM /v1/realtime for Voxtral Mini. Not Omni, not the qwen-asr wrapper.
+    "voxtral": [
+        (("stt", "stt_stream"), "voxtral_realtime"),
+    ],
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],
@@ -51,6 +55,7 @@ BASES = {
 # module -> the model family it runs; parameter size is read off the model id instead.
 FAMILIES = {
     "stt_stream": "qwen3-asr",
+    "voxtral_realtime": "voxtral-realtime",
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
     "vad": "silero-vad",
@@ -76,6 +81,16 @@ _MOUNTS = {
     ],
     ("stt_stream", "stt_stream"): [
         ("WS", "/v1/audio/stream", "Streaming ASR (WebSocket)", False),
+    ],
+    ("voxtral_realtime", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Offline transcription (file upload translated onto /v1/realtime; segments[] batches)",
+         True),
+    ],
+    ("voxtral_realtime", "stt_stream"): [
+        ("WS", "/v1/audio/stream",
+         "Streaming ASR (WebSocket; PCM16LE in, partial/final text out; translated onto "
+         "vLLM /v1/realtime)", False),
     ],
     ("whisper", "stt"): [
         ("POST", "/v1/audio/transcriptions",

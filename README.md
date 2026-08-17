@@ -202,6 +202,7 @@ passes. For the same reason the build's final import check must go **through**
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
 | `audiocpp` | `beclab/audio-audiocpp` | `tts`, `tts_clone`, `stt`, `stt_stream` | audio.cpp `audiocpp_server` (child process, GGUF) | in progress |
+| `voxtral` | `beclab/audio-voxtral` | `stt`, `stt_stream` | mainline `vllm serve` `/v1/realtime` (child process; not Omni) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -378,7 +379,20 @@ translated onto `/live`, not a third protocol of the model. That translation is 
 (chunked PCM written on one thread, SSE read on another): httpx's HTTP/1.1 client would
 hold every partial until `stop`. SenseVoice's extra knobs (`language`, `enable_itn`,
 `keep_tags`, `audio_chunk_*`) travel as request options and as `/live` query params from
-the WS `start` frame, not as invented capability keys.
+the WS `start` frame, not as invented capability keys. Voxtral Mini Realtime no longer
+lives on this base: hop-sliced POSTs made a causal 80 ms model look like a language-guessing
+metronome. That family is `bases/voxtral`.
+
+**`voxtral`.** Mainline `vllm serve` (not Omni) as a child, official recipe
+`--tokenizer-mode mistral`. The wrapper is the platform face: `WS /v1/audio/stream` and
+`POST /v1/audio/transcriptions` both translate onto `/v1/realtime`. There is no `/live`
+(llm-init's public entrance `proxy_panic`s on chunked POST). Language cannot be pinned —
+the official asr.md has no `--language`. GPU utilization is derived from
+`REQUIRED_GPU_MEMORY`. `--host` / `--port` / `--model` / `--served-model-name` are claimed
+so a filled ENGINE_ARGS cannot collide with the wrapper on :8000. Empty ENGINE_ARGS
+stamps `--tokenizer-mode mistral --enforce-eager --max-model-len 16384` (eager because
+graph capture has wedged HAMi time-slices; 16384 ≈ 21 min at 80 ms/token, the stock
+131072 will not fit a 16 Gi slice).
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

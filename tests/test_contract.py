@@ -33,6 +33,12 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("audiocpp_stt", "stt_stream", "WS", "/v1/audio/stream"): {
         "async_supported": False,
     },
+    ("voxtral_realtime", "stt", "POST", "/v1/audio/transcriptions"): {
+        "async_supported": True,
+    },
+    ("voxtral_realtime", "stt_stream", "WS", "/v1/audio/stream"): {
+        "async_supported": False,
+    },
     # No WS: ggml synthesizes whole utterances, so stream=1 is sentence-scoped.
     ("crispasr_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
     ("crispasr_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
@@ -170,6 +176,14 @@ class CatalogContractTest(unittest.TestCase):
         self.assertIn(("POST", "/v1/audio/transcriptions"), paths)
         self.assertIn(("POST", "/v1/audio/transcriptions/live"), paths)
         self.assertIn(("WS", "/v1/audio/stream"), paths)
+
+    def test_voxtral_serving_both_caps_does_not_repeat_a_path(self):
+        rows = catalog.spec_endpoints("voxtral", ["stt", "stt_stream"], ["stt", "stt_stream"])
+        paths = [(r["method"], r["path"]) for r in rows if r["available"]]
+        self.assertEqual(len(paths), len(set(paths)), paths)
+        self.assertIn(("POST", "/v1/audio/transcriptions"), paths)
+        self.assertIn(("WS", "/v1/audio/stream"), paths)
+        self.assertNotIn(("POST", "/v1/audio/transcriptions/live"), paths)
 
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}
