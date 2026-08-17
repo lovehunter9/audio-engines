@@ -188,6 +188,35 @@ def _live_query(cfg):
     return params
 
 
+# HAMi time-slice releases a process lock after ~5–9 s of 0% GPU util. A long /live
+# that only decodes in bursts (Voxtral) or after a 30 s window (SenseVoice) looks idle
+# and then never gets the card back. The platform WS therefore hops every 2 s with an
+# offline POST of everything so far — same process, GPU every hop, cumulative text.
+_WS_HOP_S = 2.0
+_WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
+
+
+def _window_live(spec):
+    return bool(spec) and spec.family in _WINDOW_FAMILIES
+
+
+def _pcm16_wav(pcm, rate):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(rate) or 16000)
+        w.writeframes(pcm)
+    return buf.getvalue()
+
+
+def _transcribe_pcm(pcm, cfg):
+    payload = {"language": cfg.get("language") or ""}
+    payload.update(cfg.get("options") or {})
+    return (_transcribe_blocking(payload, _pcm16_wav(pcm, cfg.get("sample_rate") or 16000))
+            .get("text") or "")
+
+
 def _engine_body(path, payload):
     body = {"model": acpp.MODEL_ID, "audio": path}
     language = str(payload.get("language") or "").strip()
@@ -520,7 +549,7 @@ def build_app(supports):
                         return
                     yield item
 
-            def pump():
+            def pump_live():
                 params = _live_query(cfg)
                 try:
                     with _engine().stream_live("/v1/audio/transcriptions/live",
@@ -550,6 +579,48 @@ def build_app(supports):
                     outgoing.put(("error", str(e)))
                 finally:
                     outgoing.put(("closed", None))
+
+            def pump_windows():
+                rate = int(cfg.get("sample_rate") or 16000)
+                hop = max(1, int(_WS_HOP_S * rate * 2))
+                buf = bytearray()
+                last = 0
+                acc = ""
+                try:
+                    while True:
+                        item = incoming.get()
+                        if item is END:
+                            break
+                        buf.extend(item)
+                        while len(buf) - last >= hop:
+                            last = len(buf)
+                            try:
+                                text = _transcribe_pcm(bytes(buf), cfg)
+                            except Exception as e:
+                                log.warning("window transcribe failed: %s", e)
+                                continue
+                            if text:
+                                acc = text
+                                outgoing.put(("partial", acc))
+                    if buf:
+                        try:
+                            acc = _transcribe_pcm(bytes(buf), cfg) or acc
+                        except Exception as e:
+                            if not acc:
+                                outgoing.put(("error", str(e)))
+                                return
+                            log.warning("final window transcribe failed: %s", e)
+                    outgoing.put(("final", acc))
+                except Exception as e:
+                    outgoing.put(("error", str(e)))
+                finally:
+                    outgoing.put(("closed", None))
+
+            def pump():
+                if _window_live(_state.get("spec")):
+                    pump_windows()
+                else:
+                    pump_live()
 
             async def emit(kind, value):
                 if kind == "partial":

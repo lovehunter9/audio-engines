@@ -1548,18 +1548,18 @@ def _sse_response(blob):
     return S()
 
 
-def install_audiocpp_stt(*, streams=True):
+def install_audiocpp_stt(*, streams=True, family="fake_asr"):
     from wrapper import acpp
     from wrapper.caps import audiocpp_stt as cap
 
     fake_soundfile()
     _ACPP_REAL.setdefault("resolve_weights", acpp.resolve_weights)
     _ACPP_REAL.setdefault("_snapshot_root", acpp._snapshot_root)
-    doc = {"family": "fake_asr", "category": "asr", "display_name": "Fake ASR",
+    doc = {"family": family, "category": "asr", "display_name": family,
            "tasks": ["asr"], "modes": ["offline"] + (["streaming"] if streams else [])}
     advert = {"tasks": {"asr": ["offline"] + (["streaming"] if streams else [])},
               "api_endpoints": ["/v1/audio/transcriptions"]}
-    spec = acpp.Spec("fake_asr", doc, advert)
+    spec = acpp.Spec(family, doc, advert)
     engine = FakeAcppSttEngine(spec)
     acpp.resolve_weights = lambda *a, **k: ("/tmp/fake-weights", spec)
     cap._state.update(ready=True, error=None, engine=engine, spec=spec,
@@ -1636,6 +1636,54 @@ def t_audiocpp_stt():
                   and live_params.get("keep_tags") == "true"
                   and live_params.get("audio_chunk_duration_sec") == "5.0",
                   live_params)
+
+
+def t_audiocpp_sense_live_defaults():
+    """SenseVoice /live ignores extra query params; the 3 s window has to be a server default."""
+    from wrapper import acpp
+    from wrapper.contract import EngineArgs
+
+    spec = acpp.Spec("sense_asr", {"tasks": ["asr"], "modes": ["offline", "streaming"]})
+    engine = acpp.Engine(spec=spec, weights_dir="/tmp/w", args=EngineArgs("--family sense_asr"))
+    opts = (engine.config_doc()["models"][0].get("default_request_options") or {})
+    check("sense_asr default live window is 3 s",
+          opts.get("audio_chunk_duration_sec") == 3 and opts.get("audio_chunk_mode") == "none",
+          opts)
+    other = acpp.Spec("voxtral_realtime", {"tasks": ["asr"], "modes": ["streaming"]})
+    vox = acpp.Engine(spec=other, weights_dir="/tmp/w", args=EngineArgs("--family voxtral_realtime"))
+    check("voxtral does not inherit the SenseVoice window default",
+          "default_request_options" not in vox.config_doc()["models"][0],
+          vox.config_doc()["models"][0])
+
+
+def t_audiocpp_stt_window_ws():
+    """Voxtral/SenseVoice WS hops offline so the GPU is touched every 2 s, not once per /live."""
+    from fastapi.testclient import TestClient
+
+    cap, engine, spec = install_audiocpp_stt(streams=True, family="voxtral_realtime")
+    check("window family is detected", cap._window_live(spec), spec.family)
+    hop = int(cap._WS_HOP_S * 16000 * 2)
+    with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
+        with c.websocket_connect("/v1/audio/stream") as ws:
+            json.loads(ws.receive_text())
+            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh"})
+            ws.send_bytes(b"\x00" * hop)
+            ws.send_json({"type": "stop"})
+            kinds = []
+            for _ in range(8):
+                try:
+                    frame = json.loads(ws.receive_text())
+                except Exception:
+                    break
+                kinds.append(frame.get("type"))
+                if frame.get("type") == "closed":
+                    break
+            check("window WS emits partial/final from offline hops",
+                  "partial" in kinds or "final" in kinds, kinds)
+            check("window WS did not open /live", engine.lives == [], engine.lives)
+            check("window WS posted the growing PCM as WAV",
+                  any(row[0] == "post" and row[1] == "/v1/audio/transcriptions"
+                      for row in engine.bodies), engine.bodies)
 
 
 def t_audiocpp_live_duplex():
@@ -1760,6 +1808,9 @@ def main():
                            ("audiocpp not ready", t_audiocpp_not_ready, "audiocpp"),
                            ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp"),
                            ("audiocpp stt", t_audiocpp_stt, "audiocpp"),
+                           ("audiocpp sense live defaults", t_audiocpp_sense_live_defaults,
+                            "audiocpp"),
+                           ("audiocpp stt window ws", t_audiocpp_stt_window_ws, "audiocpp"),
                            ("audiocpp live duplex", t_audiocpp_live_duplex, "audiocpp"),
                            ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
                             "audiocpp"),
