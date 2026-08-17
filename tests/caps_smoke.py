@@ -9,7 +9,9 @@ import base64
 import io
 import json
 import os
+import socket
 import sys
+import threading
 import time
 import types
 
@@ -1613,7 +1615,8 @@ def t_audiocpp_stt():
         with c.websocket_connect("/v1/audio/stream") as ws:
             ready = json.loads(ws.receive_text())
             check("audiocpp stt WS ready", ready.get("type") == "ready", ready)
-            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh"})
+            ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh",
+                          "keep_tags": True, "audio_chunk_duration_sec": 5})
             ws.send_bytes(b"\x00\x00")
             ws.send_json({"type": "stop"})
             kinds = []
@@ -1627,6 +1630,71 @@ def t_audiocpp_stt():
                     break
             check("audiocpp stt WS emits partial/final from native SSE",
                   "partial" in kinds or "final" in kinds, kinds)
+            live_params = engine.lives[-1][1] if engine.lives else {}
+            check("audiocpp stt WS start forwards SenseVoice live options",
+                  live_params.get("language") == "zh"
+                  and live_params.get("keep_tags") == "true"
+                  and live_params.get("audio_chunk_duration_sec") == "5.0",
+                  live_params)
+
+
+def t_audiocpp_live_duplex():
+    """SSE must be readable while the chunked body is still being written."""
+    from wrapper.acpp import LiveDuplex
+
+    ready = threading.Event()
+    saw_sse = threading.Event()
+    port_box = []
+
+    def serve():
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind(("127.0.0.1", 0))
+        port_box.append(srv.getsockname()[1])
+        srv.listen(1)
+        ready.set()
+        conn, _ = srv.accept()
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            buf += conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n")
+        conn.sendall(b'data: {"type":"transcript.text.delta","delta":"hi"}\n\n')
+        # Keep the request open until the client has read that event, then
+        # accept the rest of the body so the writer thread can finish.
+        saw_sse.wait(2)
+        try:
+            conn.settimeout(0.3)
+            while True:
+                if not conn.recv(4096):
+                    break
+        except OSError:
+            pass
+        conn.close()
+        srv.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    if not ready.wait(2):
+        check("audiocpp live duplex server started", False, "no listen")
+        return
+
+    def pcm():
+        yield b"\x00\x00"
+        if not saw_sse.wait(2):
+            return
+        yield b"\x00\x00"
+
+    with LiveDuplex("127.0.0.1", port_box[0], "/v1/audio/transcriptions/live",
+                    pcm(), {"language": "zh"}, timeout=5) as resp:
+        check("audiocpp live duplex status 200 before the body ends",
+              resp.status_code == 200, resp.status_code)
+        first = b""
+        for chunk in resp.iter_bytes():
+            first += chunk
+            if b"hi" in first:
+                saw_sse.set()
+                break
+        check("audiocpp live duplex reads SSE while still sending PCM",
+              b"hi" in first, first[:80])
 
 
 def t_audiocpp_stt_without_streaming():
@@ -1692,6 +1760,7 @@ def main():
                            ("audiocpp not ready", t_audiocpp_not_ready, "audiocpp"),
                            ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp"),
                            ("audiocpp stt", t_audiocpp_stt, "audiocpp"),
+                           ("audiocpp live duplex", t_audiocpp_live_duplex, "audiocpp"),
                            ("audiocpp stt offline-only", t_audiocpp_stt_without_streaming,
                             "audiocpp"),
                            ("audiocpp stt not ready", t_audiocpp_stt_not_ready, "audiocpp")):

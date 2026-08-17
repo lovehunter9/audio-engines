@@ -374,9 +374,11 @@ here. There is no native `/transcriptions/batch`, so batch is `segments` on the 
 as qwen). `stream=true` on that POST is output-SSE of an already-uploaded file; live capture is
 a different transport (`POST /v1/audio/transcriptions/live`, chunked PCM in, SSE out) and is
 exposed as-is. `WS /v1/audio/stream` is the platform shape DEMO/gateway already speak,
-translated onto `/live`, not a third protocol of the model. SenseVoice's extra knobs
-(`language`, `enable_itn`, `keep_tags`, `audio_chunk_*`) travel as request options, not as
-invented capability keys.
+translated onto `/live`, not a third protocol of the model. That translation is duplex
+(chunked PCM written on one thread, SSE read on another): httpx's HTTP/1.1 client would
+hold every partial until `stop`. SenseVoice's extra knobs (`language`, `enable_itn`,
+`keep_tags`, `audio_chunk_*`) travel as request options and as `/live` query params from
+the WS `start` frame, not as invented capability keys.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

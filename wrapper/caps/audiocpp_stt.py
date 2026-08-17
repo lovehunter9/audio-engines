@@ -171,6 +171,23 @@ def _options_of(payload):
     return out
 
 
+def _live_query(cfg):
+    """Query string for /live: wiring fields plus whatever the family reads as options."""
+    params = {"model": acpp.MODEL_ID, "sample_rate": str(cfg.get("sample_rate") or 16000),
+              "channels": "1", "sample_format": "s16le"}
+    language = str(cfg.get("language") or "").strip()
+    if language:
+        params["language"] = language
+    for key, val in (cfg.get("options") or {}).items():
+        if val is None or val == "":
+            continue
+        if isinstance(val, bool):
+            params[key] = "true" if val else "false"
+        else:
+            params[key] = str(val)
+    return params
+
+
 def _engine_body(path, payload):
     body = {"model": acpp.MODEL_ID, "audio": path}
     language = str(payload.get("language") or "").strip()
@@ -491,7 +508,7 @@ def build_app(supports):
                 await ws.close()
                 return
             await ws.send_text(json.dumps({"type": "ready"}))
-            cfg = {"sample_rate": 16000, "language": ""}
+            cfg = {"sample_rate": 16000, "language": "", "options": {}}
             incoming = queue.Queue()
             outgoing = queue.Queue()
             END = object()
@@ -504,10 +521,7 @@ def build_app(supports):
                     yield item
 
             def pump():
-                params = {"model": acpp.MODEL_ID, "sample_rate": str(cfg["sample_rate"]),
-                          "channels": "1", "sample_format": "s16le"}
-                if cfg["language"]:
-                    params["language"] = cfg["language"]
+                params = _live_query(cfg)
                 try:
                     with _engine().stream_live("/v1/audio/transcriptions/live",
                                               sync_iter(), params) as response:
@@ -572,6 +586,11 @@ def build_app(supports):
                         if kind == "start":
                             cfg["language"] = str(obj.get("language") or "")
                             cfg["sample_rate"] = int(obj.get("sample_rate") or 16000)
+                            try:
+                                cfg["options"] = _options_of(obj)
+                            except HTTPException as e:
+                                await emit("error", e.detail)
+                                break
                             if not started:
                                 started = True
                                 worker = threading.Thread(target=pump, daemon=True)

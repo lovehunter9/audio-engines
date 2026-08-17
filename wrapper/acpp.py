@@ -15,9 +15,11 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import threading
 import time
+from urllib.parse import urlencode
 
 import httpx
 
@@ -508,14 +510,158 @@ class Engine:
     def stream_live(self, path, content, params=None, timeout=REQUEST_TIMEOUT_S):
         """Chunked PCM in, SSE out: the engine's /v1/audio/transcriptions/live shape.
 
-        `content` is a sync iterator of bytes. httpx sends that as Transfer-Encoding: chunked,
-        which is what the engine requires — a buffered body is a 400.
+        httpx's HTTP/1.1 client finishes the request body before it reads the
+        response, so every partial arrives after `stop`. This opens one TCP
+        socket, writes chunks on a side thread, and reads SSE on the caller
+        thread — the engine is localhost, so one thread send / one thread recv
+        is enough. A buffered (not chunked) body is a 400 from the engine.
         """
         if not self.alive:
             raise EngineError("audio.cpp is not running:\n%s" % self.log_tail(), status=503)
-        return self._client.stream("POST", path, content=content, params=params or {},
-                                   headers={"Content-Type": "application/octet-stream"},
-                                   timeout=timeout)
+        return LiveDuplex("127.0.0.1", self.port, path, content, params or {}, timeout)
+
+
+class LiveDuplex:
+    """One HTTP/1.1 request that is still sending while the response is read."""
+
+    def __init__(self, host, port, path, content, params, timeout):
+        self.status_code = 0
+        self._host = host
+        self._port = int(port)
+        self._path = path if path.startswith("/") else "/" + path
+        self._content = content
+        self._params = params or {}
+        self._timeout = timeout
+        self._sock = None
+        self._writer = None
+        self._leftover = b""
+        self._chunked = False
+
+    def __enter__(self):
+        qs = urlencode(self._params) if self._params else ""
+        target = "%s?%s" % (self._path, qs) if qs else self._path
+        req = (
+            "POST %s HTTP/1.1\r\n"
+            "Host: %s:%d\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "Accept: text/event-stream\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ) % (target, self._host, self._port)
+        self._sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
+        self._sock.settimeout(self._timeout)
+        self._sock.sendall(req.encode("ascii"))
+        self._writer = threading.Thread(target=self._write_body, daemon=True)
+        self._writer.start()
+        self.status_code, self._leftover, self._chunked = self._read_headers()
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except OSError:
+            pass
+        self._sock = None
+        if self._writer is not None:
+            self._writer.join(timeout=2.0)
+        return False
+
+    def iter_bytes(self):
+        buf = self._leftover
+        self._leftover = b""
+        if self._chunked:
+            yield from self._iter_chunked(buf)
+            return
+        if buf:
+            yield buf
+        while True:
+            chunk = self._recv()
+            if not chunk:
+                return
+            yield chunk
+
+    def read(self):
+        return b"".join(self.iter_bytes())
+
+    def _write_body(self):
+        try:
+            for piece in self._content:
+                if piece:
+                    self._send_chunk(piece)
+            self._send_chunk(b"")
+        except OSError:
+            return
+
+    def _send_chunk(self, data):
+        if self._sock is None:
+            raise OSError("live socket closed")
+        if data:
+            self._sock.sendall(("%x\r\n" % len(data)).encode("ascii") + data + b"\r\n")
+        else:
+            self._sock.sendall(b"0\r\n\r\n")
+
+    def _recv(self):
+        if self._sock is None:
+            return b""
+        try:
+            return self._sock.recv(65536)
+        except (OSError, socket.timeout):
+            return b""
+
+    def _read_headers(self):
+        buf = b""
+        while b"\r\n\r\n" not in buf:
+            chunk = self._recv()
+            if not chunk:
+                raise EngineError("audio.cpp closed before live response headers", status=502)
+            buf += chunk
+        raw, rest = buf.split(b"\r\n\r\n", 1)
+        lines = raw.split(b"\r\n")
+        first = lines[0].decode("ascii", "replace")
+        parts = first.split()
+        if len(parts) < 2:
+            raise EngineError("audio.cpp sent a bad live status line: %s" % first, status=502)
+        try:
+            status = int(parts[1])
+        except ValueError:
+            raise EngineError("audio.cpp sent a bad live status line: %s" % first, status=502)
+        headers = {}
+        for line in lines[1:]:
+            if b":" not in line:
+                continue
+            key, val = line.split(b":", 1)
+            headers[key.decode("ascii", "replace").lower()] = val.strip().decode("ascii", "replace")
+        chunked = "chunked" in headers.get("transfer-encoding", "").lower()
+        return status, rest, chunked
+
+    def _iter_chunked(self, buf):
+        while True:
+            while b"\r\n" not in buf:
+                more = self._recv()
+                if not more:
+                    return
+                buf += more
+            line, buf = buf.split(b"\r\n", 1)
+            try:
+                size = int(line.split(b";", 1)[0], 16)
+            except ValueError:
+                return
+            if size == 0:
+                return
+            while len(buf) < size + 2:
+                more = self._recv()
+                if not more:
+                    if buf:
+                        yield buf
+                    return
+                buf += more
+            piece, buf = buf[:size], buf[size:]
+            if buf.startswith(b"\r\n"):
+                buf = buf[2:]
+            if piece:
+                yield piece
 
 
 class EngineError(RuntimeError):
