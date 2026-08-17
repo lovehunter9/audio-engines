@@ -1700,6 +1700,8 @@ def t_audiocpp_join_hops():
     check("utterance cap default is 8 s", cap._hop_s({}) == 8.0)
     check("live punct is stripped from the in-progress line",
           cap._strip_live("我们必须回头。") == "我们必须回头")
+    check("voxtral pads short PCM to the keep length",
+          len(cap._pad_pcm(b"\x00\x00", 16000, 2.0)) == 16000 * 2 * 2)
 
 
 def t_audiocpp_stt_window_honors_chunk():

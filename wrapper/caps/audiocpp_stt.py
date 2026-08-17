@@ -21,6 +21,7 @@ import os
 import queue
 import struct
 import threading
+import time
 import wave
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -115,7 +116,8 @@ def _warmup_wav(seconds=0.25):
 
 
 def _warmup(engine):
-    wav = _warmup_wav()
+    seconds = _DECODE_S if getattr(_state.get("spec"), "family", "") == "voxtral_realtime" else 0.25
+    wav = _warmup_wav(seconds)
     with _audio_file(wav) as path:
         body = {"model": acpp.MODEL_ID, "audio": path}
         doc = engine.post("/v1/audio/transcriptions", body).json()
@@ -216,7 +218,7 @@ _VAD_SPEECH_RMS = 400.0
 _HOP_MIN_S = 1.0
 _HOP_MAX_S = 8.0
 _WS_HOP_S = _VAD_MAX_S
-_KEEP_S = 3.0
+_KEEP_S = 2.0
 _LIVE_PUNCT = "。．.！!？?…"
 _WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
 
@@ -235,11 +237,20 @@ def _pcm16_wav(pcm, rate):
     return buf.getvalue()
 
 
+def _pad_pcm(pcm, rate, seconds):
+    need = max(0, int(rate * float(seconds)) * 2)
+    if need <= len(pcm):
+        return pcm
+    return pcm + bytes(need - len(pcm))
+
+
 def _transcribe_pcm(pcm, cfg):
     payload = {"language": cfg.get("language") or ""}
     payload.update(cfg.get("options") or {})
-    return (_transcribe_blocking(payload, _pcm16_wav(pcm, cfg.get("sample_rate") or 16000))
-            .get("text") or "")
+    rate = cfg.get("sample_rate") or 16000
+    if getattr(_state.get("spec"), "family", "") == "voxtral_realtime":
+        pcm = _pad_pcm(pcm, rate, _DECODE_S)
+    return (_transcribe_blocking(payload, _pcm16_wav(pcm, rate)).get("text") or "")
 
 
 def _vad_max_s(cfg):
@@ -306,23 +317,32 @@ def _with_live(parts, live, family):
 def _session_warm(seconds):
     """Dummy transcribe so HAMi sees GPU activity and the CUDA graph stays captured."""
     wav = _warmup_wav(seconds)
+    t0 = time.monotonic()
     with _audio_file(wav) as path:
         with _infer_lock:
-            _engine().post("/v1/audio/transcriptions",
-                           {"model": acpp.MODEL_ID, "audio": path})
+            doc = _engine().post("/v1/audio/transcriptions",
+                                 {"model": acpp.MODEL_ID, "audio": path})
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    text = ""
+    try:
+        text = (doc.json().get("text") or "")[:40]
+    except Exception:
+        pass
+    log.info("gpu keep %.2fs audio in %.0fms -> %r", seconds, elapsed_ms, text)
 
 
 def _keep_gpu():
     """Voxtral's first graph after lock_ok reports 0% util; HAMi steals the lock in ~15 s.
-    Touch the card every few seconds while no stream is running so a 34 s clip is not
-    spent waiting for that tax."""
-    while not _keep_stop.wait(_KEEP_S):
-        if _stream_busy.is_set() or not _state.get("ready"):
-            continue
-        try:
-            _session_warm(0.25)
-        except Exception as e:
-            log.warning("gpu keep failed: %s", e)
+    A 0.25 s dummy does not even run the 4B encoder. Keep a 2 s voiced clip — the same
+    length as the first live decode — so the first caption reuses that graph."""
+    while True:
+        if not _stream_busy.is_set() and _state.get("ready"):
+            try:
+                _session_warm(_DECODE_S)
+            except Exception as e:
+                log.warning("gpu keep failed: %s", e)
+        if _keep_stop.wait(_KEEP_S):
+            return
 
 
 def _engine_body(path, payload):
