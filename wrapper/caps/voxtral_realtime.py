@@ -214,23 +214,29 @@ class Child:
                            % (timeout_s, self.log_tail()))
 
     def _assert_realtime(self):
-        """Fail the load if this vLLM has no Realtime route instead of hanging the first WS."""
-        import httpx
+        """Fail the load if this vLLM has no Realtime route instead of hanging the first WS.
+
+        Upstream registers it as `@router.websocket("/v1/realtime")`, and FastAPI keeps
+        WebSocket routes out of openapi.json, so a handshake is the only honest probe:
+        reading the schema would fail every healthy build.
+        """
+        import websockets
+
+        async def probe():
+            ws = await asyncio.wait_for(
+                websockets.connect(self.ws_url, max_size=None), timeout=30)
+            try:
+                await asyncio.wait_for(ws.recv(), timeout=30)
+            finally:
+                await ws.close()
 
         try:
-            r = self._client.get("/openapi.json", timeout=10.0)
-            paths = (r.json() or {}).get("paths") or {}
-            if r.status_code == 200 and paths and "/v1/realtime" not in paths:
-                raise RuntimeError(
-                    "this vLLM has no /v1/realtime (need >= 0.16, documented from 0.20). "
-                    "Do not fall back to hop-sliced POST. Tail:\n%s" % self.log_tail())
-        except RuntimeError:
-            raise
-        except (httpx.HTTPError, ValueError, TypeError):
-            pass
-        joined = "\n".join(self._log_tail)
-        if "realtime" in joined.lower() and "not registered" in joined.lower():
-            raise RuntimeError("vLLM did not register /v1/realtime:\n%s" % self.log_tail())
+            asyncio.run(probe())
+        except Exception as e:
+            raise RuntimeError(
+                "this vLLM refused a /v1/realtime handshake (%s: %s); need >= 0.16, "
+                "documented from 0.20. Do not fall back to hop-sliced POST. Tail:\n%s"
+                % (type(e).__name__, e, self.log_tail()))
 
     def stop(self):
         proc, self._proc = self._proc, None
