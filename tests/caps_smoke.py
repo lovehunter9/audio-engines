@@ -1874,8 +1874,10 @@ def t_voxtral_argv():
     check("empty ENGINE_ARGS still stamps --tokenizer-mode mistral",
           "--tokenizer-mode" in argv and "mistral" in argv, joined)
     check("empty ENGINE_ARGS stamps --enforce-eager", "--enforce-eager" in argv, joined)
-    check("empty ENGINE_ARGS stamps --max-model-len 16384",
-          "--max-model-len" in argv and "16384" in argv, joined)
+    # 16384 wants 4.02 GiB of KV where a 16 Gi quota leaves 3.82 GiB, so the fallback
+    # is 8192; the chart still overrides it per card.
+    check("empty ENGINE_ARGS stamps --max-model-len 8192",
+          "--max-model-len" in argv and "8192" in argv, joined)
     check("child always binds 127.0.0.1:8001",
           "--host" in argv and "127.0.0.1" in argv and "8001" in argv, joined)
     check("served-model-name is the advertised id",
