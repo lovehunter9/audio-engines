@@ -75,21 +75,48 @@ _gen_lock = threading.Lock()
 def _snapshot(repo):
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(repo, local_files_only=True,
-                             cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+    path = Path(snapshot_download(repo, local_files_only=True,
+                                  cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN))
+    # Hub cache root is blobs/ + refs/ + snapshots/<sha>. Named files live under snapshots.
+    if (path / "snapshots").is_dir() and not (path / "tts_browser_onnx_meta.json").exists() \
+            and not (path / "codec_browser_onnx_meta.json").exists():
+        named = [p for p in path.glob("snapshots/*") if p.is_dir()]
+        if not named:
+            raise RuntimeError("no snapshot under %s" % path)
+        path = max(named, key=lambda p: p.stat().st_mtime)
+    return path
+
+
+def _materialize(src, dst):
+    """Copy named files out of a hub snapshot.
+
+    Snapshot entries are symlinks into blobs/<hash>. OnnxTtsRuntime resolve()s the
+    manifest and then looks for siblings next to it, so a symlink-to-blobs directory
+    makes it read blobs/tts_browser_onnx_meta.json (the original filename), which
+    does not exist. Small files are copied; large .data files stay as named symlinks.
+    """
+    import shutil
+
+    if dst.is_symlink():
+        dst.unlink()
+    elif dst.is_dir():
+        shutil.rmtree(dst)
+    dst.mkdir(parents=True)
+    for item in src.iterdir():
+        if item.name == ".gitattributes":
+            continue
+        real = item.resolve()
+        target = dst / item.name
+        # ORT refuses external-data files whose resolved path leaves the model dir,
+        # so even the large .data blobs must be real files here, not hub-cache symlinks.
+        shutil.copy2(real, target)
 
 
 def _model_dir():
-    """Two HF snapshots laid out the way OnnxTtsRuntime.ensure_browser_onnx_model_dir expects."""
-    tts = Path(_snapshot(TTS_REPO))
-    codec = Path(_snapshot(CODEC_REPO))
+    """Two snapshots laid out the way OnnxTtsRuntime expects (sibling named folders)."""
     LAYOUT.mkdir(parents=True, exist_ok=True)
-    pairs = ((LAYOUT / "MOSS-TTS-Nano-100M-ONNX", tts),
-             (LAYOUT / "MOSS-Audio-Tokenizer-Nano-ONNX", codec))
-    for dst, src in pairs:
-        if dst.is_symlink() or dst.exists():
-            dst.unlink()
-        dst.symlink_to(src)
+    _materialize(_snapshot(TTS_REPO), LAYOUT / "MOSS-TTS-Nano-100M-ONNX")
+    _materialize(_snapshot(CODEC_REPO), LAYOUT / "MOSS-Audio-Tokenizer-Nano-ONNX")
     return str(LAYOUT)
 
 
