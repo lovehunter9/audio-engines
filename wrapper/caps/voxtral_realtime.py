@@ -36,11 +36,19 @@ PORT = _runtime.port
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 # Chart-intrinsic: tokenizer-mode is required, eager avoids HAMi graph-capture wedges,
-# 16384 tokens is ~21 min at 80 ms/token (the stock 131072 is 3 h of RoPE and will not
-# fit a 16 Gi slice). Filling ENGINE_ARGS in the UI replaces the whole string.
-DEFAULT_ENGINE_ARGS = "--tokenizer-mode mistral --enforce-eager --max-model-len 16384"
+# 8192 tokens is ~10 min at 80 ms/token. 16384 aborts EngineCore on a 16 Gi quota: the
+# weights take 8.43 GiB and vLLM pads this model to 6 extra KV layers, leaving 3.82 GiB
+# of KV where 16384 wants 4.02 GiB. The chart overrides this per card.
+DEFAULT_ENGINE_ARGS = "--tokenizer-mode mistral --enforce-eager --max-model-len 8192"
 CHILD_PORT = 8001
 BOOT_TIMEOUT_S = 1800.0
+# vLLM's APIServer survives a dead EngineCore, so process liveness alone reports a failed
+# load as "still loading" for the whole boot timeout while the weights stay in VRAM.
+CHILD_FATAL_MARKERS = (
+    "EngineCore failed to start",
+    "Engine core initialization failed",
+    "EngineDeadError",
+)
 REQUEST_TIMEOUT_S = 1800.0
 # Official client sends 4 KiB; 80 ms at 16 kHz PCM16 is 2560 B. Either is fine.
 APPEND_BYTES = 4096
@@ -142,6 +150,7 @@ class Child:
         self._proc = None
         self._log_tail = []
         self._client = None
+        self._fatal = None
 
     @property
     def alive(self):
@@ -163,8 +172,12 @@ class Child:
         import httpx
 
         self._client = httpx.Client(base_url=self.base_url, timeout=REQUEST_TIMEOUT_S)
-        self._await_models(timeout_s)
-        self._assert_realtime()
+        try:
+            self._await_models(timeout_s)
+            self._assert_realtime()
+        except Exception:
+            self.stop()  # otherwise a half-loaded engine holds its weights in VRAM
+            raise
 
     def _pump_logs(self):
         for line in self._proc.stdout:
@@ -173,11 +186,19 @@ class Child:
                 continue
             self._log_tail.append(line)
             del self._log_tail[:-80]
+            if self._fatal is None:
+                for marker in CHILD_FATAL_MARKERS:
+                    if marker in line:
+                        self._fatal = marker
+                        break
             log.info("[vllm] %s", line)
 
     def _await_models(self, timeout_s):
         deadline = time.time() + timeout_s
         while time.time() < deadline:
+            if self._fatal:
+                raise RuntimeError("vllm serve reported %s during startup:\n%s"
+                                   % (self._fatal, self.log_tail()))
             if not self.alive:
                 raise RuntimeError("vllm serve exited with %s during startup:\n%s"
                                    % (self._proc.returncode, self.log_tail()))
