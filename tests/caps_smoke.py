@@ -1586,10 +1586,11 @@ def t_audiocpp_stt():
               r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
               and r.text == "hello", (r.status_code, r.headers.get("content-type"), r.text[:40]))
         r = c.post("/v1/audio/transcriptions", files=WAV,
-                   data={"keep_tags": "true", "language": "zh"})
+                   data={"audio_chunk_duration_sec": "5", "language": "zh"})
         last = engine.bodies[-1][2]
-        check("audiocpp stt forwards language and SenseVoice options",
-              last.get("language") == "zh" and (last.get("options") or {}).get("keep_tags") is True,
+        check("audiocpp stt forwards language and engine request options",
+              last.get("language") == "zh"
+              and (last.get("options") or {}).get("audio_chunk_duration_sec") == 5.0,
               last)
         rs = c.post("/v1/audio/transcriptions", files=WAV, data={"stream": "true"})
         check("audiocpp stt stream=true is SSE",
@@ -1616,7 +1617,7 @@ def t_audiocpp_stt():
             ready = json.loads(ws.receive_text())
             check("audiocpp stt WS ready", ready.get("type") == "ready", ready)
             ws.send_json({"type": "start", "sample_rate": 16000, "language": "zh",
-                          "keep_tags": True, "audio_chunk_duration_sec": 5})
+                          "audio_chunk_duration_sec": 5})
             ws.send_bytes(b"\x00\x00")
             ws.send_json({"type": "stop"})
             kinds = []
@@ -1631,33 +1632,14 @@ def t_audiocpp_stt():
             check("audiocpp stt WS emits partial/final from native SSE",
                   "partial" in kinds or "final" in kinds, kinds)
             live_params = engine.lives[-1][1] if engine.lives else {}
-            check("audiocpp stt WS start forwards SenseVoice live options",
+            check("audiocpp stt WS start forwards live options",
                   live_params.get("language") == "zh"
-                  and live_params.get("keep_tags") == "true"
                   and live_params.get("audio_chunk_duration_sec") == "5.0",
                   live_params)
 
 
-def t_audiocpp_sense_live_defaults():
-    """SenseVoice /live ignores extra query params; the 3 s window has to be a server default."""
-    from wrapper import acpp
-    from wrapper.contract import EngineArgs
-
-    spec = acpp.Spec("sense_asr", {"tasks": ["asr"], "modes": ["offline", "streaming"]})
-    engine = acpp.Engine(spec=spec, weights_dir="/tmp/w", args=EngineArgs("--family sense_asr"))
-    opts = (engine.config_doc()["models"][0].get("default_request_options") or {})
-    check("sense_asr default live window is 3 s",
-          opts.get("audio_chunk_duration_sec") == 3 and opts.get("audio_chunk_mode") == "none",
-          opts)
-    other = acpp.Spec("voxtral_realtime", {"tasks": ["asr"], "modes": ["streaming"]})
-    vox = acpp.Engine(spec=other, weights_dir="/tmp/w", args=EngineArgs("--family voxtral_realtime"))
-    check("voxtral does not inherit the SenseVoice window default",
-          "default_request_options" not in vox.config_doc()["models"][0],
-          vox.config_doc()["models"][0])
-
-
 def t_audiocpp_stt_window_ws():
-    """Voxtral/SenseVoice WS hops offline so the GPU is touched every hop, not once per /live."""
+    """Voxtral WS hops offline so the GPU is touched every hop, not once per /live."""
     from fastapi.testclient import TestClient
 
     cap, engine, spec = install_audiocpp_stt(streams=True, family="voxtral_realtime")
@@ -1690,8 +1672,8 @@ def t_audiocpp_stt_window_ws():
 def t_audiocpp_join_hops():
     from wrapper.caps import audiocpp_stt as cap
 
-    check("sense keeps hop periods so the DEMO can split sentences",
-          cap._join_asr(["过去发生的事情。", "都会在今天。"], "sense_asr")
+    check("a non-voxtral family keeps hop periods so the DEMO can split sentences",
+          cap._join_asr(["过去发生的事情。", "都会在今天。"], "fake_asr")
           == "过去发生的事情。都会在今天。")
     check("voxtral hops stay separate lines",
           cap._join_asr(["Hola.", "你好"], "voxtral_realtime") == "Hola.\n你好")
@@ -1708,7 +1690,7 @@ def t_audiocpp_stt_window_honors_chunk():
     """audio_chunk_duration_sec on start is the utterance cap, not a /live query leftover."""
     from fastapi.testclient import TestClient
 
-    cap, engine, spec = install_audiocpp_stt(streams=True, family="sense_asr")
+    cap, engine, spec = install_audiocpp_stt(streams=True, family="voxtral_realtime")
     hop = int(1.0 * 16000 * 2)
     with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
         with c.websocket_connect("/v1/audio/stream") as ws:
@@ -1728,7 +1710,7 @@ def t_audiocpp_stt_window_honors_chunk():
                     break
             check("1 s hop emits without waiting for the 4 s default",
                   "partial" in kinds or "final" in kinds, kinds)
-            check("sense WS did not session-warm (Voxtral-only)",
+            check("one hop is one POST: the WS pump does not warm on its own",
                   sum(1 for row in engine.bodies
                       if row[0] == "post" and row[1] == "/v1/audio/transcriptions") == 1,
                   engine.bodies)
@@ -1745,7 +1727,7 @@ def t_audiocpp_vad_pause():
         return b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 220 * i / rate)))
                         for i in range(n))
 
-    cap, engine, spec = install_audiocpp_stt(streams=True, family="sense_asr")
+    cap, engine, spec = install_audiocpp_stt(streams=True, family="voxtral_realtime")
     pcm = sine(0.8) + (b"\x00" * int(16000 * 0.7 * 2)) + sine(0.8)
     with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
         with c.websocket_connect("/v1/audio/stream") as ws:
@@ -2028,8 +2010,6 @@ def main():
                            ("audiocpp not ready", t_audiocpp_not_ready, "audiocpp"),
                            ("audiocpp weight matching", t_audiocpp_weight_matching, "audiocpp"),
                            ("audiocpp stt", t_audiocpp_stt, "audiocpp"),
-                           ("audiocpp sense live defaults", t_audiocpp_sense_live_defaults,
-                            "audiocpp"),
                            ("audiocpp stt window ws", t_audiocpp_stt_window_ws, "audiocpp"),
                            ("audiocpp join hops", t_audiocpp_join_hops, "audiocpp"),
                            ("audiocpp stt window honors chunk", t_audiocpp_stt_window_honors_chunk,

@@ -420,25 +420,9 @@ class Engine:
                     "path": self.weights_dir,
                     "task": self.spec.task,
                     "mode": self.spec.run_mode,
-                    **self._default_request_options(),
                 }
             ],
         }
-
-    def _default_request_options(self):
-        """Per-family request defaults. /live has no JSON body, so query params the HTTP
-        adapter does not list never reach the loader; this is the channel that does.
-
-        SenseVoice streaming is a fixed window (docs: audio_chunk_duration_sec, default 30).
-        A 30 s buffer is 30 s of 0% GPU, and HAMi time-slice then releases the lock before
-        the first decode. 3 s is the official streaming example and stays under that idle.
-        """
-        if self.spec.family != "sense_asr":
-            return {}
-        return {"default_request_options": {
-            "audio_chunk_duration_sec": 3,
-            "audio_chunk_mode": "none",
-        }}
 
     def argv(self):
         # Whatever no cap claimed goes to the binary in its own spelling: ENGINE_ARGS is the one

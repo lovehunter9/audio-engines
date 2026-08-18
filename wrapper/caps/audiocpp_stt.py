@@ -53,7 +53,7 @@ _stream_busy = threading.Event()
 _keep_stop = threading.Event()
 
 # Form/JSON fields that belong to the engine's request.options, not to our wiring.
-_OPTION_KEYS = ("enable_itn", "keep_tags", "audio_chunk_mode", "audio_chunk_duration_sec")
+_OPTION_KEYS = ("audio_chunk_mode", "audio_chunk_duration_sec")
 
 
 def _flag(v):
@@ -173,9 +173,7 @@ def _options_of(payload):
         if payload.get(key) is None or payload.get(key) == "":
             continue
         val = payload[key]
-        if key in ("enable_itn", "keep_tags"):
-            out[key] = tasks.truthy(val) if not isinstance(val, bool) else val
-        elif key == "audio_chunk_duration_sec":
+        if key == "audio_chunk_duration_sec":
             try:
                 out[key] = float(val)
             except (TypeError, ValueError):
@@ -203,15 +201,15 @@ def _live_query(cfg):
 
 
 # HAMi time-slice releases a process lock after ~5–15 s of 0% GPU util. A long /live
-# that only decodes in bursts (Voxtral) or after a 30 s window (SenseVoice) looks idle
-# and then never gets the card back. The platform WS therefore does offline POSTs,
+# that only decodes in bursts (Voxtral) looks idle and then never gets the card back.
+# The platform WS therefore does offline POSTs,
 # but NOT on a metronome: energy VAD cuts on pauses (how people actually talk).
 # While a breath is still going we decode the current utterance every ~2 s so the
 # GPU stays touched and the DEMO can show a growing interim line. Pause (or the
 # 30 s safety cap) finalizes. audio_chunk_duration_sec on start is the cap, not a sentence.
 _DECODE_S = 2.0
 # Pause-cut only. The cap is a safety lid for a lecture that never breathes,
-# not a metronome — 30 s matches FunASR's max_single_segment_time.
+# not a metronome.
 _VAD_MAX_S = 30.0
 _VAD_MIN_S = 0.4
 _VAD_HANG_S = 0.45
@@ -222,7 +220,7 @@ _HOP_MAX_S = 30.0
 _WS_HOP_S = _VAD_MAX_S
 _KEEP_S = 2.0
 _LIVE_PUNCT = "。．.！!？?…"
-_WINDOW_FAMILIES = ("voxtral_realtime", "sense_asr")
+_WINDOW_FAMILIES = ("voxtral_realtime",)
 
 
 def _window_live(spec):

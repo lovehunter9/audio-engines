@@ -379,9 +379,9 @@ a different transport (`POST /v1/audio/transcriptions/live`, chunked PCM in, SSE
 exposed as-is. `WS /v1/audio/stream` is the platform shape DEMO/gateway already speak,
 translated onto `/live`, not a third protocol of the model. That translation is duplex
 (chunked PCM written on one thread, SSE read on another): httpx's HTTP/1.1 client would
-hold every partial until `stop`. SenseVoice's extra knobs (`language`, `enable_itn`,
-`keep_tags`, `audio_chunk_*`) travel as request options and as `/live` query params from
-the WS `start` frame, not as invented capability keys. Voxtral Mini Realtime no longer
+hold every partial until `stop`. Family knobs (`language`, `audio_chunk_*`) travel as
+request options and as `/live` query params from the WS `start` frame, not as invented
+capability keys. Voxtral Mini Realtime no longer
 lives on this base: hop-sliced POSTs made a causal 80 ms model look like a language-guessing
 metronome. That family is `bases/voxtral`.
 

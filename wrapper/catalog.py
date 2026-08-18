@@ -43,8 +43,8 @@ BASES = {
     "crispasr": [
         (("tts",), "crispasr_tts"),
     ],
-    # audio.cpp as a child engine. One image covers many families (VoxCPM2, Voxtral, SenseVoice,
-    # ...). Caps that need different weights are separate clones: the wrapper serves the first
+    # audio.cpp as a child engine. One image covers many families (VoxCPM2, Voxtral, ...).
+    # Caps that need different weights are separate clones: the wrapper serves the first
     # match. What a given model can actually do is read off the engine at boot; a family without
     # a streaming decode withholds those routes (see catalog.spec_endpoints) instead of dropping
     # the capability. Streaming TTS lives inside tts rather than a capability of its own; ASR
@@ -184,8 +184,7 @@ _MOUNTS = {
     ("audiocpp_stt", "stt"): [
         ("POST", "/v1/audio/transcriptions",
          "Offline transcription (OpenAI multipart or native JSON; stream=true for output SSE; "
-         "segments[] batches on this same path; SenseVoice also takes language/enable_itn/"
-         "keep_tags/audio_chunk_*)", True),
+         "segments[] batches on this same path)", True),
     ],
     ("audiocpp_stt", "stt_stream"): [
         ("POST", "/v1/audio/transcriptions/live",
