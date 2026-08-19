@@ -72,4 +72,36 @@ print('  .build_data_parser:', hasattr(info, 'build_data_parser')); \
 proc = getattr(p, 'BaseMultiModalProcessor', None); \
 print('vLLM BaseMultiModalProcessor._get_data_parser:', hasattr(proc, '_get_data_parser'))"
 
+# The report above came back as the arm64 case: this vLLM wants get_data_parser on ProcessingInfo,
+# while qwen-asr defines _get_data_parser on the processor. Same patch bases/qwen applies for
+# vLLM 0.16, with no arch gate because this base only ever has the one case. The source blocks are
+# copied verbatim from there on purpose — if qwen-asr drifts, both bases refuse at the same assert
+# instead of one of them patching something it no longer understands.
+RUN audio-python -c "\
+import pathlib; \
+import qwen_asr.core.vllm_backend.qwen3_asr as m; \
+p=pathlib.Path(m.__file__); \
+src=p.read_text(); \
+old_proc='''class Qwen3ASRMultiModalProcessor(\n    Qwen3OmniMoeThinkerMultiModalProcessor,\n):\n    def _get_data_parser(self) -> MultiModalDataParser:\n        feature_extractor = self.info.get_feature_extractor()\n        return Qwen3ASRMultiModalDataParser(\n            target_sr=feature_extractor.sampling_rate,\n        )\n'''; \
+new_proc='''class Qwen3ASRMultiModalProcessor(\n    Qwen3OmniMoeThinkerMultiModalProcessor,\n):\n'''; \
+assert old_proc in src, 'qwen-asr processor block drift; refuse silent patch'; \
+src=src.replace(old_proc, new_proc, 1); \
+old_info='''    def get_supported_mm_limits(self) -> Mapping[str, int | None]:\n        return {\"audio\": None}\n'''; \
+new_info='''    def get_supported_mm_limits(self) -> Mapping[str, int | None]:\n        return {\"audio\": None}\n\n    def get_data_parser(self) -> MultiModalDataParser:\n        feature_extractor = self.get_feature_extractor()\n        return Qwen3ASRMultiModalDataParser(\n            target_sr=feature_extractor.sampling_rate,\n        )\n\n    # vLLM 0.16 error text names build_data_parser; some trees use get_data_parser.\n    def build_data_parser(self) -> MultiModalDataParser:\n        return self.get_data_parser()\n'''; \
+assert old_info in src, 'qwen-asr ProcessingInfo block drift; refuse silent patch'; \
+src=src.replace(old_info, new_info, 1); \
+assert '_get_data_parser' not in src, 'leftover _get_data_parser after patch'; \
+p.write_text(src); \
+print('patched', p)"
+
+# A separate layer so the module is imported fresh: the patch wrote the file the previous process
+# had already loaded, so only a new interpreter proves the result parses and still imports.
+RUN audio-python -c "\
+import inspect; \
+import qwen_asr.core.vllm_backend.qwen3_asr as m; \
+src = inspect.getsource(m); \
+assert '_get_data_parser' not in src, 'patch did not take'; \
+assert 'def get_data_parser' in src, 'get_data_parser missing after patch'; \
+print('ok: data parser now hangs off ProcessingInfo, module imports clean')"
+
 LABEL org.opencontainers.image.title="audio-qwen-xpu-deps"
