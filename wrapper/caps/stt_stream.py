@@ -12,7 +12,7 @@ from fastapi.responses import Response
 from .. import hfgate
 from .. import tasks
 from ..batch import parse_segments
-from ..gpu import mount_metrics, memory_fraction
+from ..gpu import mount_metrics, memory_fraction, is_xpu
 from ..contract import register, EngineArgs
 from ..audioio import pcm16_to_float32, resample_linear
 from ..runtime import Runtime
@@ -31,6 +31,9 @@ GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
 # Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
 ENFORCE_EAGER = _args.switch("--enforce-eager")
+# Left to the weights on CUDA. Intel's first-gen iGPUs have no bf16 conversion instruction, so an
+# Intel install pins fp16 from the chart instead of crashing inside a JIT'd SYCL kernel.
+DTYPE = _args.text("--dtype")
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -65,6 +68,9 @@ def _capture_kw():
     if ENFORCE_EAGER:
         _p("--enforce-eager given: skipping CUDA graphs entirely")
         return {"enforce_eager": True}
+    if is_xpu():
+        _p("Intel XPU: no CUDA graphs to size")
+        return {}
     sizes = list(_CAPTURE_SIZES)
     try:
         from vllm.config import CompilationConfig
@@ -98,10 +104,14 @@ def _load_blocking():
        % (MODEL_REPO, GPU_UTIL, MAX_MODEL_LEN))
     # These are vLLM kwargs qwen-asr forwards; a build that takes fewer of them gets less.
     _kw = dict(model=MODEL_REPO, gpu_memory_utilization=GPU_UTIL, max_new_tokens=MAX_NEW_TOKENS)
-    _cap = _capture_kw()
-    if _cap:
-        _p("graph capture tuning: %s" % _cap)
-    _attempts = [dict(_kw, max_model_len=MAX_MODEL_LEN, **_cap)] if _cap else []
+    # Best-effort kwargs: dropped first when a vLLM build will not take them.
+    _extra = _capture_kw()
+    if _extra:
+        _p("graph capture tuning: %s" % _extra)
+    if DTYPE:
+        _extra["dtype"] = DTYPE
+        _p("dtype pinned by ENGINE_ARGS: %s" % DTYPE)
+    _attempts = [dict(_kw, max_model_len=MAX_MODEL_LEN, **_extra)] if _extra else []
     _attempts += [dict(_kw, max_model_len=MAX_MODEL_LEN), dict(_kw)]
     asr = None
     for _i, _try in enumerate(_attempts, 1):

@@ -7,6 +7,12 @@ BASES = {
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
     ],
+    # The same Qwen3-ASR module on Intel's XPU vLLM instead of CUDA: qwen-asr's streaming state
+    # machine rides vLLM's encoder cache, which is scheduler-level, so the capability set is
+    # identical. align is not here yet — the forced aligner has not been tried on XPU.
+    "qwenxpu": [
+        (("stt", "stt_stream"), "stt_stream"),
+    ],
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],

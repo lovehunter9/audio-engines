@@ -18,8 +18,56 @@ def quota_mib():
     return _quota_bytes() // (2 ** 20)
 
 
+def _xpu_memory():
+    """(used, total, util) from torch.xpu; None when no XPU is visible.
+
+    Intel's runtime exposes no NVML equivalent for compute utilization, so that gauge stays 0.
+    """
+    try:
+        import torch
+
+        xpu = getattr(torch, "xpu", None)
+        if not (xpu and xpu.is_available() and xpu.device_count() > 0):
+            return None
+        mem_get_info = getattr(xpu, "mem_get_info", None)
+        if mem_get_info:
+            free, total = mem_get_info()
+            return int(total - free), int(total), 0.0
+        # Older torch.xpu has no mem_get_info; the device properties still carry the total.
+        total = int(xpu.get_device_properties(0).total_memory)
+        return int(xpu.memory_allocated()), total, 0.0
+    except Exception:
+        return None
+
+
+def _has_cuda():
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
+    except Exception:
+        return False
+
+
+def is_xpu():
+    """True when this install runs on an Intel accelerator, per OLARES_GPU_MODE from the chart.
+
+    Which accelerator to use is the user's choice at install time, not something to probe: a
+    machine can have an NVIDIA card AND an Intel iGPU, and picking `intel` there is a decision,
+    not a fallback. So the mode is told to us; only when nothing told us (plain helm install, or a
+    chart with no Intel mode) do we fall back to what the hardware happens to show.
+    """
+    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+    if mode:
+        return mode.startswith("intel")
+    return not _has_cuda() and _xpu_memory() is not None
+
+
 def visible_memory_bytes():
-    """What CUDA reports as this device's total, or 0 when there is no device to ask."""
+    """What the accelerator reports as this device's total, or 0 when there is no device to ask."""
+    if is_xpu():
+        xpu = _xpu_memory()
+        return xpu[1] if xpu else 0
     try:
         import torch
 
@@ -59,6 +107,13 @@ def gpu_metrics_text():
                 util = 0.0
     except Exception:
         present = 0
+    # An Intel install reports its XPU even where a CUDA device is visible too: the mode is the
+    # user's choice, so these gauges have to describe the device this engine was told to use.
+    if is_xpu() or not present:
+        xpu = _xpu_memory()
+        if xpu:
+            used, total, util = xpu
+            present = 1
     lines = []
 
     def g(name, help_, val):

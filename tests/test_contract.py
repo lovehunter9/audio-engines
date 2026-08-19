@@ -545,5 +545,47 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertEqual(type_declarations, {f"# TYPE {name} gauge" for name in expected})
 
 
+class IntelAcceleratorModeTest(unittest.TestCase):
+    """The accelerator is chosen at install, so it must be read from the mode, never probed.
+
+    A machine can carry an NVIDIA card and an Intel iGPU at the same time, and both modes can be
+    offered by one chart. Picking `intel` there is the user's decision; if the engine inferred the
+    device from what it can see, that decision would be silently overridden.
+    """
+
+    XPU = (2 * 2 ** 30, 8 * 2 ** 30, 0.0)
+
+    def _mode(self, mode):
+        env = {} if mode is None else {"OLARES_GPU_MODE": mode}
+        return mock.patch.dict(os.environ, env, clear=False)
+
+    def test_an_intel_mode_uses_the_xpu_even_where_cuda_is_also_visible(self):
+        with mock.patch.object(gpu, "_xpu_memory", return_value=self.XPU), \
+                mock.patch.object(gpu, "_has_cuda", return_value=True):
+            for mode in ("intel", "intel-gpu"):
+                with self.subTest(mode=mode), self._mode(mode):
+                    self.assertTrue(gpu.is_xpu())
+                    self.assertEqual(gpu.visible_memory_bytes(), self.XPU[1])
+
+    def test_an_nvidia_mode_never_falls_back_to_a_visible_xpu(self):
+        with mock.patch.object(gpu, "_xpu_memory", return_value=self.XPU), \
+                self._mode("nvidia"):
+            self.assertFalse(gpu.is_xpu())
+
+    def test_without_a_mode_the_hardware_decides(self):
+        with mock.patch.object(gpu, "_xpu_memory", return_value=self.XPU):
+            with mock.patch.object(gpu, "_has_cuda", return_value=True), self._mode(None):
+                self.assertFalse(gpu.is_xpu())
+            with mock.patch.object(gpu, "_has_cuda", return_value=False), self._mode(None):
+                self.assertTrue(gpu.is_xpu())
+
+    def test_the_xpu_base_serves_the_same_streaming_stt_module_as_the_cuda_one(self):
+        self.assertEqual(catalog.implements("qwenxpu"), ["stt", "stt_stream"])
+        for cap in ("stt", "stt_stream"):
+            self.assertEqual(catalog.module_of("qwenxpu", cap), catalog.module_of("qwen", cap))
+        # align is a separate load the aligner has not been tried on XPU with.
+        self.assertIsNone(catalog.module_of("qwenxpu", "align"))
+
+
 if __name__ == "__main__":
     unittest.main()
