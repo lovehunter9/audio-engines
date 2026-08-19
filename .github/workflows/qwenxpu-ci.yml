@@ -1,0 +1,45 @@
+# qwenxpu CI: triggers only; the build is the shared build-image.yml.
+name: qwenxpu-ci
+
+on:
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
+  push:
+    tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/qwenxpu/**'
+      - '.github/workflows/qwenxpu-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwenxpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: qwenxpu
+      repo: audio-qwen-xpu
+      # Intel's XPU vLLM image is amd64-only, and so is every machine that has an Intel GPU.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
