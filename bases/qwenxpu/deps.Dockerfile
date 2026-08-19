@@ -1,6 +1,11 @@
 # audio-qwen-xpu deps (hash-tagged rebuilds): Qwen3-ASR on Intel's XPU vLLM, driven by the same
 # qwen-asr wrapper as the CUDA `qwen` base. amd64 only — there is no Intel GPU on arm64.
-FROM docker.io/intel/vllm:0.21.0-ubuntu24.04-20260805
+#
+# NOT Intel's newest tag. 0.21.0-xpu reports vllm 0.21.1.dev18 but pins transformers==5.8.0 and has
+# already dropped vllm.inputs.data, so it is cut from a vLLM main NEWER than the 0.23.0 our CUDA
+# base runs; qwen-asr 0.0.6 fails to import there (it needs transformers 4.x and that module).
+# 0.17.0-xpu is Intel's last transformers-4.x image, i.e. the newest one qwen-asr can meet.
+FROM docker.io/intel/vllm:0.17.0-xpu
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -10,7 +15,6 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # audio-python shim, so every entry point gets a working interpreter — not just the chart's start
 # script. setvars is skipped when SETVARS_COMPLETED says an outer shell already sourced it.
 RUN set -eux; \
-    [ -f /opt/intel/oneapi/setvars.sh ]; \
     PY="$(command -v python3)"; \
     printf '%s\n' \
       '#!/bin/bash' \
@@ -40,10 +44,19 @@ RUN set -eux; \
     audio-python -c "import torch; assert hasattr(torch, 'xpu'), 'torch has no xpu namespace'"; \
     audio-python -c "import qwen_asr, soundfile, librosa, fastapi, uvicorn, multipart, websockets"
 
+# The version story, printed before anything can fail: these are answers a CI log can give and the
+# Intel machine we do not have yet cannot. `pip check` is the one that caught 0.21: it names the
+# transformers pin that qwen-asr and Intel's vLLM disagree on.
+RUN set -x; \
+    audio-python -c "import torch; print('torch', torch.__version__, 'xpu:', hasattr(torch, 'xpu'))" || true; \
+    audio-python -c "import vllm; print('vllm', vllm.__version__)" || true; \
+    audio-python -c "import transformers; print('transformers', transformers.__version__)" || true; \
+    audio-python -m pip check || true
+
 # qwen-asr targets one shape of vLLM's multimodal data parser: v0.23 takes the processor's
 # _get_data_parser, v0.16 wants it on ProcessingInfo (the `qwen` base patches that for arm64).
-# This image is 0.21, i.e. between the two, so report which shape it is: a mismatch would otherwise
-# surface as an unexplained load failure on the first Intel machine we get.
+# 0.17 sits next to the arm64 case, so this reports which shape it is; if it is the 0.16 one, the
+# fix is the patch bases/qwen already carries rather than anything new.
 RUN audio-python -c "\
 import inspect; \
 import vllm; \
