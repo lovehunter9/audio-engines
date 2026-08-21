@@ -34,6 +34,7 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs
+from ..audioio import seconds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-tts-dialogue")
@@ -363,6 +364,8 @@ def build_app(supports):
                          for data, suffix, text in speakers]
                 with _gen_lock:
                     clips = _synthesize_blocking(turns, paths, seed)
+            for clip in clips:
+                ctx.meter(output_seconds=seconds(clip, OUT_SR))
             if per_turn:
                 items = [{"index": i, "speaker": spk, "format": fmt, "sample_rate": OUT_SR,
                           "audio": base64.b64encode(_encode(clip, OUT_SR, fmt)).decode("ascii")}

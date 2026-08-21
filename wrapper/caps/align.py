@@ -11,7 +11,7 @@ from .. import tasks
 from ..batch import parse_segments
 from ..gpu import mount_metrics
 from ..contract import register
-from ..audioio import spill, unlink
+from ..audioio import probe_seconds, spill, unlink
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-align")
@@ -108,6 +108,7 @@ def build_app(supports):
 
             def _work_batch(ctx):
                 out = []
+                ctx.meter(input_seconds=len(arr) / float(sr))
                 ctx.progress(stage="align", done=0, total=len(segs))
                 for i, seg in enumerate(segs, 1):
                     ctx.checkpoint()
@@ -152,6 +153,8 @@ def build_app(supports):
         lang = (language or "").strip() or DEFAULT_LANGUAGE
 
         def _work(ctx):
+            # The aligner opens the file itself, so nothing here holds samples to count.
+            ctx.meter(input_seconds=probe_seconds(path))
             ctx.progress(ratio=0.0, stage="align")
             res = _align(path, text, lang)
             ctx.progress(ratio=1.0, stage="done")

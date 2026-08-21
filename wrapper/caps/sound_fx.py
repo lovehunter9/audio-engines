@@ -30,6 +30,7 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs
+from ..audioio import seconds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-sound-fx")
@@ -336,6 +337,7 @@ def build_app(supports):
             ctx.progress(ratio=0.0, stage="generation")
             with _gen_lock:
                 audio = _generate_blocking([payload])[0]
+            ctx.meter(output_seconds=seconds(audio, OUT_SR))
             body = _encode(audio, OUT_SR, fmt)
             ctx.progress(ratio=1.0, stage="done")
             return tasks.Binary(body, _FORMATS[fmt][2], suffix="." + fmt, headers=_headers(fmt))
@@ -386,6 +388,7 @@ def build_app(supports):
             out = []
             for i, (row, audio) in enumerate(zip(rows, audios)):
                 fmt = row["response_format"]
+                ctx.meter(output_seconds=seconds(audio, OUT_SR))
                 out.append({"index": i, "format": fmt, "sample_rate": OUT_SR,
                             "audio": base64.b64encode(_encode(audio, OUT_SR, fmt)).decode("ascii")})
             ctx.progress(ratio=1.0, stage="batch", done=n, total=n)

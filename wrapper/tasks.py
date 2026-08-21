@@ -31,6 +31,13 @@ _ROUTES = [
     ("DELETE", "/{id}", "Cancel a running task, or drop a finished one's result"),
 ]
 
+# Per-second pricing bills on audio duration, and the engine is the only party that knows it:
+# the gateway forwards request and response as streams and never sees a decoded clip. Reported
+# on the response headers and on the task document, or not at all — a missing header means
+# "not measured", which is not the same as zero.
+INPUT_SECONDS_HEADER = "X-Audio-Input-Duration-Seconds"
+OUTPUT_SECONDS_HEADER = "X-Audio-Output-Duration-Seconds"
+
 # Advertised by /api/engine-spec next to the capability's own endpoints.
 ENDPOINTS = [
     {"method": method, "path": TASKS_PATH + tail, "description": desc}
@@ -99,6 +106,23 @@ class _Ctx:
             p["ratio"] = round(max(0.0, min(1.0, float(ratio))), 4)
         t.progress = p
 
+    def meter(self, input_seconds=None, output_seconds=None):
+        """Report metered audio duration. Additive, so a batch reports once per item."""
+        t = self._task
+        if t is None:
+            return
+        for attr, value in (("input_seconds", input_seconds),
+                            ("output_seconds", output_seconds)):
+            if value is None:
+                continue
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if value < 0:
+                continue
+            setattr(t, attr, round((getattr(t, attr) or 0.0) + value, 3))
+
     def cancelled(self):
         return bool(self._task is not None and self._task.cancel)
 
@@ -131,6 +155,8 @@ class Task:
         self.result_bytes = None
         self.content_type = None
         self.headers = {}
+        self.input_seconds = None    # None means the job never measured it, not that it was 0
+        self.output_seconds = None
         self.cancel = False
         self.future = futures.Future()
         self._cleanup = cleanup
@@ -157,6 +183,14 @@ class Task:
             except Exception:
                 pass
 
+    def meter_headers(self):
+        out = {}
+        if self.input_seconds is not None:
+            out[INPUT_SECONDS_HEADER] = "%.3f" % self.input_seconds
+        if self.output_seconds is not None:
+            out[OUTPUT_SECONDS_HEADER] = "%.3f" % self.output_seconds
+        return out
+
     def doc(self):
         d = {"object": "task", "id": self.id, "kind": KIND,
              "cap": self.cap, "model": self.model, "status": self.status,
@@ -170,6 +204,12 @@ class Task:
         if self.result_kind == "binary":
             d["content_type"] = self.content_type
             d["result_bytes"] = self.result_bytes
+        # Omitted rather than zeroed when unmeasured: a caller billing on these has to be able
+        # to tell "no audio" from "this cap does not report it".
+        if self.input_seconds is not None:
+            d["input_duration_seconds"] = self.input_seconds
+        if self.output_seconds is not None:
+            d["output_duration_seconds"] = self.output_seconds
         # Always the contract path, even when the caller arrived on the legacy alias.
         d["poll"] = "%s/%s" % (TASKS_PATH, self.id)
         d["result_url"] = "%s/%s/result" % (TASKS_PATH, self.id)
@@ -319,6 +359,7 @@ class _Runner:
         task.result_kind = "binary"
         task.content_type = media
         task.result_bytes = len(data)
+        headers.update(task.meter_headers())
         task.headers = headers
         with tempfile.NamedTemporaryFile(prefix="task-", suffix=suffix, delete=False) as f:
             f.write(data)
@@ -350,13 +391,24 @@ def _binary_parts(payload):
     return bytes(body), media, {}, suffix
 
 
-def to_response(payload):
+def to_response(payload, headers=None):
     # The sync path answers exactly what the job returned, so it stays byte-identical.
     if isinstance(payload, Binary):
         from fastapi.responses import Response
 
+        merged = dict(payload.headers)
+        merged.update(headers or {})
         return Response(content=payload.data, media_type=payload.media_type,
-                        headers=payload.headers or None)
+                        headers=merged or None)
+    if not headers:
+        return payload
+    if isinstance(payload, (dict, list)):
+        # Wrapped only to carry the headers; the body is what the job returned.
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(content=payload, headers=headers)
+    for name, value in headers.items():
+        payload.headers[name] = value
     return payload
 
 
@@ -388,7 +440,7 @@ async def dispatch(async_flag, cap, model, work, *, cleanup=None, fail="job fail
         raise HTTPException(status_code=499, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail="%s: %s" % (fail, e))
-    return to_response(payload)
+    return to_response(payload, task.meter_headers())
 
 
 def _doc(t):
@@ -470,7 +522,7 @@ def mount(app):
             raise HTTPException(status_code=409, detail="task is %s%s" % (
                 t.status, ": " + str((t.error or {}).get("message")) if t.error else ""))
         if t.result_kind == "json":
-            return JSONResponse(content=t.result)
+            return JSONResponse(content=t.result, headers=t.meter_headers() or None)
         if not (t.result_path and os.path.isfile(t.result_path)):
             raise HTTPException(status_code=410, detail="the result was already dropped")
         return FileResponse(t.result_path, media_type=t.content_type, headers=t.headers or None)

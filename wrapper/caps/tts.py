@@ -25,6 +25,7 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs
+from ..audioio import seconds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-tts")
@@ -437,6 +438,7 @@ def build_app(supports):
                     audio, sr = _synthesize_blocking(payload, path)
             else:
                 audio, sr = _synthesize_blocking(payload, None)
+            ctx.meter(output_seconds=seconds(audio, sr))
             body = _encode(audio, sr, fmt)
             ctx.progress(ratio=1.0, stage="done")
             return tasks.Binary(body, _FORMATS[fmt][2], suffix="." + fmt,
@@ -490,6 +492,7 @@ def build_app(supports):
                 else:
                     audio, sr = _synthesize_blocking(row, None)
                 fmt = row["response_format"]
+                ctx.meter(output_seconds=seconds(audio, sr))
                 out.append({"index": i, "format": fmt, "sample_rate": sr,
                             "audio": base64.b64encode(_encode(audio, sr, fmt)).decode("ascii")})
                 ctx.progress(ratio=(i + 1) / n, stage="batch", done=i + 1, total=n)

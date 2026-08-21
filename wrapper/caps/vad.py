@@ -93,6 +93,7 @@ def build_app(supports):
         log.info("vad params: %s", {k: v for k, v in kw.items() if k != "sampling_rate"})
 
         def _work(ctx):
+            ctx.meter(input_seconds=int(wav.shape[-1]) / SR)
             ctx.progress(ratio=0.0, stage="inference")
             # silero get_speech_timestamps returns [{'start','end'}] in SAMPLES.
             ts = _state["get_ts"](wav, _state["model"], **kw)

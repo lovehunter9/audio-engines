@@ -13,7 +13,7 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics, quota_mib
 from ..contract import register, EngineArgs
-from ..audioio import decode_mono, spill, unlink
+from ..audioio import decode_mono, seconds, spill, unlink
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-enhance")
@@ -158,6 +158,7 @@ def build_app(supports):
             ctx.progress(ratio=0.0, stage="decode")
             wav = decode_mono(path, SR)  # (1, time) @ 16k
             total = int(wav.shape[-1])
+            ctx.meter(input_seconds=total / SR)
             chunk = int(CHUNK_S * SR)
             ov = int(OVERLAP_S * SR)
             if chunk <= 0 or total <= chunk:
@@ -202,6 +203,7 @@ def build_app(supports):
                     pos += hop
                 nz = wsum > 1e-6
                 out[nz] = out[nz] / wsum[nz]
+            ctx.meter(output_seconds=seconds(out, SR))
             peak = float(np.max(np.abs(out))) if out.size else 0.0
             if peak > 1.0:
                 out = out / peak  # guard against clipping

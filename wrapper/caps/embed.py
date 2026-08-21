@@ -66,6 +66,7 @@ def build_app(supports):
 
             ctx.progress(ratio=0.0, stage="decode")
             waveform, sr = decode(path)
+            ctx.meter(input_seconds=float(waveform.shape[-1]) / float(sr))
             ctx.progress(stage="inference")
             emb = _state["inference"]({"waveform": waveform, "sample_rate": sr})
             vec = np.asarray(emb, dtype="float32").reshape(-1)

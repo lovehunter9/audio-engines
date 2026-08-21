@@ -157,6 +157,7 @@ def build_app(supports):
             ctx.progress(ratio=0.0, stage="decode")
             waveform, sr = decode(path)
             dur = float(waveform.shape[-1]) / float(sr)
+            ctx.meter(input_seconds=dur)
             t0 = time.time()
             out = _infer(waveform, sr, kw, _hook(ctx))
             log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)

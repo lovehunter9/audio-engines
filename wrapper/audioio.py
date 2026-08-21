@@ -21,6 +21,44 @@ def unlink(path):
         pass
 
 
+def seconds(samples, sample_rate):
+    """Duration of an already-decoded buffer, mono (time,) or (channels, time)."""
+    import numpy as np
+
+    a = np.asarray(samples)
+    if not a.ndim or not sample_rate:
+        return None
+    return round(int(a.shape[-1]) / float(sample_rate), 3)
+
+
+def probe_seconds(src):
+    """Duration in seconds without decoding the clip, or None when nothing here can read it.
+
+    For caps that hand the file straight to a model and so never hold samples of their own.
+    None is a real answer: billing reports "not measured" rather than a guess.
+    """
+    buf = io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src
+    try:
+        import soundfile as sf
+
+        info = sf.info(buf)
+        if info.samplerate:
+            return round(float(info.frames) / float(info.samplerate), 3)
+    except Exception:
+        pass
+    if isinstance(buf, io.BytesIO):
+        buf.seek(0)
+    try:
+        import wave
+
+        with wave.open(buf, "rb") as wf:
+            if wf.getframerate():
+                return round(float(wf.getnframes()) / float(wf.getframerate()), 3)
+    except Exception:
+        pass
+    return None
+
+
 def pcm16_to_float32(data):
     import numpy as np
 

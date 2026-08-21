@@ -105,6 +105,27 @@ tasks are the only ones a limit drops, `truncated: true` when it did).
 What is audio-specific is what a result looks like: enhance answers audio bytes
 with the same headers the sync path sends, everything else answers JSON.
 
+## Duration: the only thing downstream can bill
+
+Audio has no tokens, and the gateway in front of this engine streams the payload
+through without decoding it — so nothing outside this process can say how long a
+clip was. Every capability therefore reports what it measured, on the synchronous
+response and on the task document alike:
+
+| Header | Task field | Reported by |
+|---|---|---|
+| `X-Audio-Input-Duration-Seconds` | `input_duration_seconds` | the capabilities that consume audio: `stt`, `stt_stream`, `align`, `vad`, `diar`, `speaker_embed`, `enhance` |
+| `X-Audio-Output-Duration-Seconds` | `output_duration_seconds` | the capabilities that produce it: `tts`, `tts_clone`, `tts_dialogue`, `sound_fx`, `enhance` |
+
+The number is the audio the job actually handled, summed over a batch: a
+transcription of five slices reports their total, not the file's length. A
+capability reports through `ctx.meter(...)`, which is additive precisely so a
+batch loop can call it per item.
+
+**A missing header means unmeasured, never zero.** A WebSocket session and a
+chunked reply both write their headers before the length is known, and Router
+records those calls with an `audio_unmetered` tag rather than a price of zero.
+
 Both paths run on **one worker thread** — one instance owns one model on one
 (time-sliced) GPU — so a sync request now queues behind whatever is running,
 exactly as it already did behind the per-cap inference lock. The event loop stays

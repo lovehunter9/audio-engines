@@ -151,6 +151,7 @@ def _parse_temp(raw):
 def _realize(segments, info, ctx):
     # Iterating the generator is what runs inference, so progress and cancel belong here.
     dur = float(getattr(info, "duration", 0.0) or 0.0)
+    ctx.meter(input_seconds=dur)
     out = []
     ctx.progress(ratio=0.0, stage="transcribe")
     for s in segments:
@@ -265,6 +266,9 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
                     out.append({"text": ""})
                     continue
                 sb = _ffmpeg_slice_wav(whole, a, b - a)
+                # The nested _run gets no ctx, so the slices are metered here instead of
+                # each one overwriting the last.
+                ctx.meter(input_seconds=b - a)
                 res = _run("transcribe", sb, "seg.wav", language, "json",
                            temperature, prompt, False, False)
                 out.append({"text": res.get("text", "") if isinstance(res, dict) else ""})

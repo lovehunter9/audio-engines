@@ -39,6 +39,8 @@ def fake_soundfile():
 
     m.write = write
     m.check_format = lambda *a, **k: True
+    # What probe_seconds reads when a cap hands the file to a model instead of decoding it.
+    m.info = lambda *a, **k: types.SimpleNamespace(frames=SR * 4, samplerate=SR)
     sys.modules["soundfile"] = m
     return m
 
@@ -102,7 +104,25 @@ def contract(c, doc, label):
           and c.get(TASKS, params={"limit": "0"}).status_code == 400)
 
 
-def both_ways(c, path, files, data, label, json_result=True):
+def metered(c, sync, doc, label, want):
+    """Duration is the engine's to report: nothing downstream ever holds the decoded audio.
+
+    Per-second pricing reads the response header, and a task's reader reads the document, so the
+    two have to carry the same number or one of the two callers bills something else.
+    """
+    from wrapper.tasks import INPUT_SECONDS_HEADER, OUTPUT_SECONDS_HEADER
+
+    names = {"input": INPUT_SECONDS_HEADER, "output": OUTPUT_SECONDS_HEADER}
+    for key in want:
+        got = sync.headers.get(names[key])
+        field = (doc or {}).get("%s_duration_seconds" % key)
+        agrees = (got is not None and field is not None
+                  and abs(float(got) - float(field)) < 0.01)
+        check("%s reports the %s duration on the response and the task" % (label, key),
+              agrees, (got, field))
+
+
+def both_ways(c, path, files, data, label, json_result=True, meters=()):
     """POST once sync, once with async=1, and insist the answers agree."""
     r1 = c.post(path, files=files, data=data)
     ok1 = r1.status_code == 200
@@ -117,6 +137,7 @@ def both_ways(c, path, files, data, label, json_result=True):
     if not ok1 or doc["status"] != "succeeded":
         return doc
     contract(c, doc, label)
+    metered(c, r1, doc, label, meters)
     if json_result:
         check("%s async result == sync result" % label, doc["result"] == r1.json())
         rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
@@ -160,7 +181,7 @@ def t_vad():
                       get_ts=lambda wav, model, **kw: [{"start": 0, "end": SR}])
     with TestClient(vad.build_app(["vad"])) as c:
         advertises_tasks(c, "vad")
-        both_ways(c, "/v1/audio/vad", WAV, {"threshold": "0.4"}, "vad")
+        both_ways(c, "/v1/audio/vad", WAV, {"threshold": "0.4"}, "vad", meters=("input",))
 
 
 def t_diar():
@@ -188,7 +209,8 @@ def t_diar():
     diar._state.update(ready=True, pipeline=pipe, device="cpu")
     with TestClient(diar.build_app(["diar"])) as c:
         advertises_tasks(c, "diar")
-        doc = both_ways(c, "/v1/audio/diarization", WAV, {"num_speakers": "2"}, "diar")
+        doc = both_ways(c, "/v1/audio/diarization", WAV, {"num_speakers": "2"}, "diar",
+                         meters=("input",))
         check("diar ends at stage=done, ratio=1",
               (doc or {}).get("progress", {}).get("ratio") == 1.0
               and (doc or {}).get("progress", {}).get("stage") == "done",
@@ -221,7 +243,7 @@ def t_embed():
                         inference=lambda _inp: np.arange(8, dtype="float32"))
     with TestClient(embed.build_app(["speaker_embed"])) as c:
         advertises_tasks(c, "embed")
-        both_ways(c, "/v1/audio/embeddings", WAV, {}, "embed")
+        both_ways(c, "/v1/audio/embeddings", WAV, {}, "embed", meters=("input",))
 
 
 def t_enhance():
@@ -240,7 +262,8 @@ def t_enhance():
     enhance._state.update(ready=True, kind="waveform", device="cpu", model=object())
     with TestClient(enhance.build_app(["enhance"])) as c:
         advertises_tasks(c, "enhance")
-        both_ways(c, "/v1/audio/enhance", WAV, {"format": "ogg"}, "enhance", json_result=False)
+        both_ways(c, "/v1/audio/enhance", WAV, {"format": "ogg"}, "enhance", json_result=False,
+                  meters=("input", "output"))
         r = c.post("/v1/audio/enhance", files=WAV, data={"async": "1"})
         mid = {}
         for _ in range(60):
@@ -265,10 +288,11 @@ def t_align():
     align._state.update(ready=True, model=model, device="cpu")
     with TestClient(align.build_app(["align"])) as c:
         advertises_tasks(c, "align")
-        both_ways(c, "/v1/audio/align", WAV, {"text": "hi there"}, "align single")
+        both_ways(c, "/v1/audio/align", WAV, {"text": "hi there"}, "align single",
+                  meters=("input",))
         both_ways(c, "/v1/audio/align", WAV,
                   {"segments": '[{"start":0,"end":1,"text":"hi"},{"start":1,"end":2,"text":"yo"}]'},
-                  "align batch")
+                  "align batch", meters=("input",))
 
 
 def t_whisper():
@@ -290,12 +314,14 @@ def t_whisper():
     whisper._ffmpeg_slice_wav = lambda src, start, dur: b"RIFFslice"
     with TestClient(whisper.build_app(["stt"])) as c:
         advertises_tasks(c, "whisper")
-        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "whisper stt")
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "whisper stt", meters=("input",))
         both_ways(c, "/v1/audio/transcriptions", WAV, {"response_format": "verbose_json"},
-                  "whisper verbose")
-        both_ways(c, "/v1/audio/translations", WAV, {}, "whisper translations")
+                  "whisper verbose", meters=("input",))
+        both_ways(c, "/v1/audio/translations", WAV, {}, "whisper translations",
+                  meters=("input",))
         both_ways(c, "/v1/audio/transcriptions", WAV,
-                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "whisper batch")
+                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "whisper batch",
+                  meters=("input",))
         r = c.post("/v1/audio/transcriptions", files=WAV, data={"response_format": "text"})
         check("whisper text/plain still comes back as text",
               r.status_code == 200 and r.headers["content-type"].startswith("text/plain"),
@@ -327,9 +353,10 @@ def t_qwen():
         check("align shows up as implemented but not served",
               [e for e in spec["endpoints"]
                if e.get("capability") == "align" and not e["available"]])
-        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "qwen stt")
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "qwen stt", meters=("input",))
         both_ways(c, "/v1/audio/transcriptions", WAV,
-                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch")
+                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
+                  meters=("input",))
 
 
 class FakeTTS:
@@ -451,6 +478,10 @@ def t_tts():
             rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
             check("tts async bytes == sync bytes", rr.content == r.content,
                   (len(rr.content), len(r.content)))
+            metered(c, r, doc, "tts", ("output",))
+            check("tts the stored result carries the duration too",
+                  rr.headers.get("x-audio-output-duration-seconds") is not None,
+                  dict(rr.headers))
 
         rs = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
                                               "response_format": "pcm"})
@@ -745,8 +776,11 @@ def t_sound_fx():
         check("sound_fx mounts no voices route (it has no speakers)",
               ("GET", "/v1/audio/voices") not in paths, sorted(p for _m, p in paths))
 
+        sync = c.post("/v1/audio/speech", json={"input": "A door creaking."})
         r = c.post("/v1/audio/speech?async=1", json={"input": "A door creaking."})
         check("sound_fx async dispatches a task", r.status_code in (200, 202), r.status_code)
+        if r.status_code == 202:
+            metered(c, sync, poll(c, r.json()["task"]["id"]), "sound_fx", ("output",))
 
 
 def t_sound_fx_not_ready():
@@ -934,8 +968,11 @@ def t_tts_dialogue():
             check("tts_dialogue rejects %s with a 400" % name, r.status_code == 400,
                   (r.status_code, r.text[:140]))
 
+        sync = c.post("/v1/audio/speech", json=script)
         r = c.post("/v1/audio/speech?async=1", json=script)
         check("tts_dialogue async dispatches a task", r.status_code in (200, 202), r.status_code)
+        if r.status_code == 202:
+            metered(c, sync, poll(c, r.json()["task"]["id"]), "tts_dialogue", ("output",))
 
 
 def t_tts_dialogue_not_ready():
