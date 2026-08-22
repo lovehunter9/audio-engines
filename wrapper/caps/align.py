@@ -108,7 +108,9 @@ def build_app(supports):
 
             def _work_batch(ctx):
                 out = []
-                ctx.meter(input_seconds=len(arr) / float(sr))
+                # Metered per slice below, not once for the decoded upload: a
+                # long recording sent with two short segments is two seconds of
+                # alignment, and billing the file would charge for the rest.
                 ctx.progress(stage="align", done=0, total=len(segs))
                 for i, seg in enumerate(segs, 1):
                     ctx.checkpoint()
@@ -122,6 +124,7 @@ def build_app(supports):
                         if hi <= lo:
                             out.append({"error": "empty segment"})
                             continue
+                        ctx.meter(input_seconds=(hi - lo) / float(sr))
                         lang = ((str(seg.get("language") or language or "")).strip()
                                 or DEFAULT_LANGUAGE)
                         import soundfile as _sf

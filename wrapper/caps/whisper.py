@@ -10,6 +10,7 @@ from fastapi.responses import PlainTextResponse
 
 from .. import hfgate
 from .. import tasks
+from ..audioio import wav_seconds
 from ..batch import parse_segments
 from ..gpu import mount_metrics, quota_mib
 from ..contract import register, EngineArgs
@@ -267,8 +268,10 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
                     continue
                 sb = _ffmpeg_slice_wav(whole, a, b - a)
                 # The nested _run gets no ctx, so the slices are metered here instead of
-                # each one overwriting the last.
-                ctx.meter(input_seconds=b - a)
+                # each one overwriting the last. The slice ffmpeg produced is what the
+                # model hears: a segment whose `end` runs past the recording asks for
+                # more than exists, and the request is not what was transcribed.
+                ctx.meter(input_seconds=wav_seconds(sb) or (b - a))
                 res = _run("transcribe", sb, "seg.wav", language, "json",
                            temperature, prompt, False, False)
                 out.append({"text": res.get("text", "") if isinstance(res, dict) else ""})

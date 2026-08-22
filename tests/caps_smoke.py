@@ -26,6 +26,19 @@ def check(name, cond, extra=""):
         FAILED.append(name)
 
 
+def wav_of(seconds):
+    """Silence of a given length as real RIFF WAV bytes, for caps that measure what they got."""
+    import wave
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(SR)
+        wf.writeframes(b"\x00\x00" * int(round(seconds * SR)))
+    return buf.getvalue()
+
+
 def fake_soundfile():
     # align's batch mode decodes and re-writes slices with soundfile, absent from a bare venv.
     m = types.ModuleType("soundfile")
@@ -288,11 +301,21 @@ def t_align():
     align._state.update(ready=True, model=model, device="cpu")
     with TestClient(align.build_app(["align"])) as c:
         advertises_tasks(c, "align")
-        both_ways(c, "/v1/audio/align", WAV, {"text": "hi there"}, "align single",
-                  meters=("input",))
-        both_ways(c, "/v1/audio/align", WAV,
-                  {"segments": '[{"start":0,"end":1,"text":"hi"},{"start":1,"end":2,"text":"yo"}]'},
-                  "align batch", meters=("input",))
+        single = both_ways(c, "/v1/audio/align", WAV, {"text": "hi there"}, "align single",
+                           meters=("input",))
+        check("align single bills the whole file it was handed",
+              (single or {}).get("input_duration_seconds") == 4.0,
+              (single or {}).get("input_duration_seconds"))
+        # The upload decodes to four seconds and the segments ask for two of
+        # them. Billing the file here would charge for audio nothing aligned,
+        # and a real caller sends an hour with a handful of seconds in it.
+        batch = both_ways(c, "/v1/audio/align", WAV,
+                          {"segments":
+                           '[{"start":0,"end":1,"text":"hi"},{"start":1,"end":2,"text":"yo"}]'},
+                          "align batch", meters=("input",))
+        check("align batch bills the slices it aligned, not the file",
+              (batch or {}).get("input_duration_seconds") == 2.0,
+              (batch or {}).get("input_duration_seconds"))
 
 
 def t_whisper():
@@ -311,7 +334,11 @@ def t_whisper():
 
     whisper._state.update(ready=True, model=types.SimpleNamespace(transcribe=transcribe),
                           pipeline=None, device="cpu", compute="int8")
-    whisper._ffmpeg_slice_wav = lambda src, start, dur: b"RIFFslice"
+    # A real WAV of the length ffmpeg would actually have produced: the
+    # recording is two seconds long, so a segment asking for more gets what
+    # exists, and billing has to follow the slice rather than the request.
+    whisper._ffmpeg_slice_wav = lambda src, start, dur: wav_of(
+        max(0.0, min(float(dur), 2.0 - float(start))))
     with TestClient(whisper.build_app(["stt"])) as c:
         advertises_tasks(c, "whisper")
         both_ways(c, "/v1/audio/transcriptions", WAV, {}, "whisper stt", meters=("input",))
@@ -319,9 +346,13 @@ def t_whisper():
                   "whisper verbose", meters=("input",))
         both_ways(c, "/v1/audio/translations", WAV, {}, "whisper translations",
                   meters=("input",))
-        both_ways(c, "/v1/audio/transcriptions", WAV,
-                  {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "whisper batch",
-                  meters=("input",))
+        batch = both_ways(
+            c, "/v1/audio/transcriptions", WAV,
+            {"segments": '[{"start":0,"end":1},{"start":1,"end":9}]'}, "whisper batch",
+            meters=("input",))
+        check("whisper batch bills the audio that existed, not the window asked for",
+              (batch or {}).get("input_duration_seconds") == 2.0,
+              (batch or {}).get("input_duration_seconds"))
         r = c.post("/v1/audio/transcriptions", files=WAV, data={"response_format": "text"})
         check("whisper text/plain still comes back as text",
               r.status_code == 200 and r.headers["content-type"].startswith("text/plain"),

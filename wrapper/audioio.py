@@ -31,6 +31,23 @@ def seconds(samples, sample_rate):
     return round(int(a.shape[-1]) / float(sample_rate), 3)
 
 
+def wav_seconds(data):
+    """Duration of RIFF WAV bytes, from the header alone, or None if they are not one.
+
+    For a caller that produced the WAV itself and runs in an image without
+    soundfile; probe_seconds is the general form and prefers soundfile.
+    """
+    import wave
+
+    try:
+        with wave.open(io.BytesIO(data), "rb") as wf:
+            if wf.getframerate():
+                return round(float(wf.getnframes()) / float(wf.getframerate()), 3)
+    except Exception:
+        pass
+    return None
+
+
 def probe_seconds(src):
     """Duration in seconds without decoding the clip, or None when nothing here can read it.
 
