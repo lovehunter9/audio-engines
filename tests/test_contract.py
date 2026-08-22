@@ -474,6 +474,47 @@ class SharedHelperTest(unittest.TestCase):
         self.assertEqual(parse_segments('[{"start": 0, "end": 1}]'), [{"start": 0, "end": 1}])
 
 
+class TaskDurationTest(unittest.TestCase):
+    """What a task document may say about duration, and when.
+
+    A caller bills from these numbers, and several caps measure the input
+    before they produce anything, so the status is what decides whether the
+    measurement describes work that has a result.
+    """
+
+    def _task(self, status):
+        from wrapper import tasks
+
+        t = tasks.Task("stt", "m", lambda ctx: None)
+        t.status = status
+        tasks._Ctx(t).meter(input_seconds=12.5, output_seconds=3.0)
+        return t
+
+    def test_a_succeeded_task_reports_what_it_measured(self):
+        doc = self._task("succeeded").doc()
+        self.assertEqual(doc["input_duration_seconds"], 12.5)
+        self.assertEqual(doc["output_duration_seconds"], 3.0)
+
+    def test_a_task_that_did_not_succeed_reports_no_duration(self):
+        for status in ("running", "failed", "canceled"):
+            doc = self._task(status).doc()
+            self.assertNotIn("input_duration_seconds", doc, status)
+            self.assertNotIn("output_duration_seconds", doc, status)
+
+    def test_metering_is_additive_and_ignores_nonsense(self):
+        from wrapper import tasks
+
+        t = tasks.Task("stt", "m", lambda ctx: None)
+        ctx = tasks._Ctx(t)
+        ctx.meter(input_seconds=1.5)
+        ctx.meter(input_seconds=2.25)
+        ctx.meter(input_seconds=-1)
+        ctx.meter(input_seconds="not a number")
+        ctx.meter(output_seconds=None)
+        self.assertEqual(t.input_seconds, 3.75)
+        self.assertIsNone(t.output_seconds)
+
+
 class EngineSurfaceTest(unittest.TestCase):
     def setUp(self):
         self.ready = False

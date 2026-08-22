@@ -1,7 +1,10 @@
 # Shared audio conversion and decoding; optional numeric dependencies are imported on demand.
 import io
+import logging
 import os
 import tempfile
+
+log = logging.getLogger("audio-io")
 
 
 def spill(data, filename=None, default_suffix=".wav"):
@@ -55,14 +58,15 @@ def probe_seconds(src):
     None is a real answer: billing reports "not measured" rather than a guess.
     """
     buf = io.BytesIO(src) if isinstance(src, (bytes, bytearray)) else src
+    why = None
     try:
         import soundfile as sf
 
         info = sf.info(buf)
         if info.samplerate:
             return round(float(info.frames) / float(info.samplerate), 3)
-    except Exception:
-        pass
+    except Exception as e:
+        why = e
     if isinstance(buf, io.BytesIO):
         buf.seek(0)
     try:
@@ -71,8 +75,12 @@ def probe_seconds(src):
         with wave.open(buf, "rb") as wf:
             if wf.getframerate():
                 return round(float(wf.getnframes()) / float(wf.getframerate()), 3)
-    except Exception:
-        pass
+    except Exception as e:
+        why = why or e
+    # The caller goes on to process this audio and now cannot report how much
+    # of it there was, so the call bills as unmeasured. Silent is the one thing
+    # that must not happen: underbilling has no other symptom.
+    log.warning("could not probe audio duration, the call will bill as unmeasured: %s", why)
     return None
 
 

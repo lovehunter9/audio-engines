@@ -118,13 +118,19 @@ response and on the task document alike:
 | `X-Audio-Output-Duration-Seconds` | `output_duration_seconds` | the capabilities that produce it: `tts`, `tts_clone`, `tts_dialogue`, `sound_fx`, `enhance` |
 
 The number is the audio the job actually handled, summed over a batch: a
-transcription of five slices reports their total, not the file's length. A
-capability reports through `ctx.meter(...)`, which is additive precisely so a
-batch loop can call it per item.
+transcription of five slices reports their total, not the file's length, and a
+slice whose `end` runs past the recording reports what existed rather than what
+was asked for. A capability reports through `ctx.meter(...)`, which is additive
+precisely so a batch loop can call it per item.
 
 **A missing header means unmeasured, never zero.** A WebSocket session and a
 chunked reply both write their headers before the length is known, and Router
 records those calls with an `audio_unmetered` tag rather than a price of zero.
+
+**Only a task that succeeded carries the fields.** Several capabilities measure
+the input before they begin, so a job that fails or is canceled has a number
+that describes audio with no result — and `…/result` answers `409`, so nobody
+could see what they were charged for. The document omits it.
 
 Both paths run on **one worker thread** — one instance owns one model on one
 (time-sliced) GPU — so a sync request now queues behind whatever is running,

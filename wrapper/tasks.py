@@ -206,10 +206,17 @@ class Task:
             d["result_bytes"] = self.result_bytes
         # Omitted rather than zeroed when unmeasured: a caller billing on these has to be able
         # to tell "no audio" from "this cap does not report it".
-        if self.input_seconds is not None:
-            d["input_duration_seconds"] = self.input_seconds
-        if self.output_seconds is not None:
-            d["output_duration_seconds"] = self.output_seconds
+        #
+        # Only on a task that finished successfully. Several caps measure the
+        # input before they start work, so a job that fails or is canceled
+        # halfway would otherwise hand a biller a duration for audio that
+        # produced no result — and the result endpoint answers 409, so nobody
+        # can even see what they were charged for.
+        if self.status == "succeeded":
+            if self.input_seconds is not None:
+                d["input_duration_seconds"] = self.input_seconds
+            if self.output_seconds is not None:
+                d["output_duration_seconds"] = self.output_seconds
         # Always the contract path, even when the caller arrived on the legacy alias.
         d["poll"] = "%s/%s" % (TASKS_PATH, self.id)
         d["result_url"] = "%s/%s/result" % (TASKS_PATH, self.id)
