@@ -270,7 +270,8 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
         "implements": catalog.implements(base),
         "declares": declared,
         "serves": list(served),
-        "endpoints": CONTRACT_ENDPOINTS + catalog.spec_endpoints(base, served, declared),
+        "endpoints": [dict(endpoint) for endpoint in CONTRACT_ENDPOINTS]
+        + catalog.spec_endpoints(base, served, declared),
     }
     # Mounted and advertised together, so the task API can never be one without the other.
     if task_api:
@@ -278,6 +279,8 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
 
         tasks.mount(app)
         spec["endpoints"].extend(dict(e, available=True) for e in tasks.ENDPOINTS)
+    for endpoint in spec["endpoints"]:
+        endpoint.setdefault("async_supported", False)
 
     def _err():
         try:

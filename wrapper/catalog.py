@@ -137,7 +137,7 @@ def _row(cap, mount, available, reason=None):
     if is_async:
         desc = "%s; %s" % (desc, tasks.ASYNC_HINT)
     row = {"capability": cap, "method": method, "path": path, "description": desc,
-           "available": available}
+           "available": available, "async_supported": is_async}
     if reason:
         row["reason"] = reason
     return row
@@ -145,14 +145,16 @@ def _row(cap, mount, available, reason=None):
 
 def endpoints(module, served):
     """The capability endpoints this process mounts."""
-    return [_row(cap, m, True) for cap in served for m in _MOUNTS.get((module, cap), ())]
+    return [_row(cap, m, True)
+            for cap in served for m in _MOUNTS.get((module, cap), ())]
 
 
 def spec_endpoints(base, served, declared):
     """Every capability endpoint of the base: the ones mounted here, and why the rest are not."""
     rows = []
     for cap in implements(base):
-        mounts = _MOUNTS.get((module_of(base, cap), cap), ())
+        module = module_of(base, cap)
+        mounts = _MOUNTS.get((module, cap), ())
         if cap in served:
             rows.extend(_row(cap, m, True) for m in mounts)
             continue

@@ -10,35 +10,49 @@ from fastapi.testclient import TestClient
 
 from wrapper import catalog, contract, gpu, tasks
 
-EXPECTED_MOUNTS = {
-    ("align", "align"): {("POST", "/v1/audio/align")},
-    ("diar", "diar"): {("POST", "/v1/audio/diarization")},
-    ("diar_stream", "diar_stream"): {("WS", "/v1/audio/diarize/stream")},
-    ("embed", "speaker_embed"): {("POST", "/v1/audio/embeddings")},
-    ("enhance", "enhance"): {("POST", "/v1/audio/enhance")},
-    ("sound_fx", "sound_fx"): {
-        ("POST", "/v1/audio/speech"),
-        ("POST", "/v1/audio/speech/batch"),
+EXPECTED_CAPABILITY_ENDPOINTS = {
+    ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},
+    ("diar", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
+    ("diar_stream", "diar_stream", "WS", "/v1/audio/diarize/stream"): {
+        "async_supported": False,
     },
-    ("stt_stream", "stt"): {("POST", "/v1/audio/transcriptions")},
-    ("stt_stream", "stt_stream"): {("WS", "/v1/audio/stream")},
-    ("tts", "tts"): {
-        ("GET", "/v1/audio/voices"),
-        ("POST", "/v1/audio/speech"),
-        ("POST", "/v1/audio/speech/batch"),
-        ("WS", "/v1/audio/speech/stream"),
+    ("embed", "speaker_embed", "POST", "/v1/audio/embeddings"): {
+        "async_supported": True,
     },
-    ("tts", "tts_clone"): {
-        ("POST", "/v1/audio/speech"),
-        ("POST", "/v1/audio/speech/batch"),
-        ("POST", "/v1/audio/speech/clone"),
-        ("WS", "/v1/audio/speech/stream"),
+    ("enhance", "enhance", "POST", "/v1/audio/enhance"): {"async_supported": True},
+    ("sound_fx", "sound_fx", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("sound_fx", "sound_fx", "POST", "/v1/audio/speech/batch"): {
+        "async_supported": True,
     },
-    ("tts_dialogue", "tts_dialogue"): {("POST", "/v1/audio/speech")},
-    ("vad", "vad"): {("POST", "/v1/audio/vad")},
-    ("whisper", "stt"): {
-        ("POST", "/v1/audio/transcriptions"),
-        ("POST", "/v1/audio/translations"),
+    ("stt_stream", "stt", "POST", "/v1/audio/transcriptions"): {
+        "async_supported": True,
+    },
+    ("stt_stream", "stt_stream", "WS", "/v1/audio/stream"): {
+        "async_supported": False,
+    },
+    ("tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
+    ("tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("tts", "tts", "POST", "/v1/audio/speech/batch"): {"async_supported": True},
+    ("tts", "tts", "WS", "/v1/audio/speech/stream"): {"async_supported": False},
+    ("tts", "tts_clone", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("tts", "tts_clone", "POST", "/v1/audio/speech/batch"): {
+        "async_supported": True,
+    },
+    ("tts", "tts_clone", "POST", "/v1/audio/speech/clone"): {
+        "async_supported": True,
+    },
+    ("tts", "tts_clone", "WS", "/v1/audio/speech/stream"): {
+        "async_supported": False,
+    },
+    ("tts_dialogue", "tts_dialogue", "POST", "/v1/audio/speech"): {
+        "async_supported": True,
+    },
+    ("vad", "vad", "POST", "/v1/audio/vad"): {"async_supported": True},
+    ("whisper", "stt", "POST", "/v1/audio/transcriptions"): {
+        "async_supported": True,
+    },
+    ("whisper", "stt", "POST", "/v1/audio/translations"): {
+        "async_supported": True,
     },
 }
 
@@ -50,6 +64,22 @@ TASK_PATHS = {
 
 
 class CatalogContractTest(unittest.TestCase):
+    def test_register_does_not_mutate_shared_contract_endpoints(self):
+        original = [dict(endpoint) for endpoint in contract.CONTRACT_ENDPOINTS]
+
+        for model_name in ("first-model", "second-model"):
+            app = FastAPI(title=model_name)
+            contract.register(
+                app,
+                model_name=model_name,
+                module="stt_stream",
+                served=["stt"],
+                is_ready=lambda: True,
+                task_api=True,
+            )
+
+        self.assertEqual(contract.CONTRACT_ENDPOINTS, original)
+
     def test_catalog_imports_without_engine_dependencies(self):
         modules = {
             module
@@ -71,18 +101,33 @@ class CatalogContractTest(unittest.TestCase):
             for caps, module in entries
             for cap in caps
         }
-        self.assertEqual(catalog_pairs, set(EXPECTED_MOUNTS))
+        expected_pairs = {
+            (module, cap)
+            for module, cap, _method, _path in EXPECTED_CAPABILITY_ENDPOINTS
+        }
+        self.assertEqual(catalog_pairs, expected_pairs)
         self.assertEqual(catalog_pairs, set(catalog._MOUNTS))
         self.assertEqual(
             set(catalog.FAMILIES),
             {module for entries in catalog.BASES.values() for _caps, module in entries},
         )
 
+        expected_mounts = {}
+        for module, cap, method, path in EXPECTED_CAPABILITY_ENDPOINTS:
+            expected_mounts.setdefault((module, cap), set()).add((method, path))
         actual = {
             pair: {(method, path) for method, path, _description, _async in mounts}
             for pair, mounts in catalog._MOUNTS.items()
         }
-        self.assertEqual(actual, EXPECTED_MOUNTS)
+        self.assertEqual(actual, expected_mounts)
+
+        actual_metadata = {}
+        for module, cap in catalog_pairs:
+            for endpoint in catalog.endpoints(module, [cap]):
+                key = (module, cap, endpoint["method"], endpoint["path"])
+                metadata = {"async_supported": endpoint["async_supported"]}
+                actual_metadata[key] = metadata
+        self.assertEqual(actual_metadata, EXPECTED_CAPABILITY_ENDPOINTS)
 
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}
@@ -562,6 +607,27 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertTrue(spec["endpoints"])
         advertised = {endpoint["path"] for endpoint in spec["endpoints"]}
         self.assertTrue(TASK_PATHS.issubset(advertised))
+        self.assertTrue(all("async_supported" in endpoint for endpoint in spec["endpoints"]))
+        by_route = {
+            (endpoint["method"], endpoint["path"]): endpoint
+            for endpoint in spec["endpoints"]
+        }
+        self.assertFalse(by_route[("GET", "/v1/models")]["async_supported"])
+        for method, path in (
+            ("GET", "/v1/tasks"),
+            ("GET", "/v1/tasks/{id}"),
+            ("GET", "/v1/tasks/{id}/result"),
+            ("DELETE", "/v1/tasks/{id}"),
+        ):
+            self.assertFalse(by_route[(method, path)]["async_supported"])
+
+        transcription = next(
+            endpoint
+            for endpoint in spec["endpoints"]
+            if endpoint["path"] == "/v1/audio/transcriptions"
+        )
+        self.assertTrue(transcription["async_supported"])
+        self.assertTrue(all("max_input_seconds" not in endpoint for endpoint in spec["endpoints"]))
 
     def test_metrics_expose_exactly_the_four_generic_gpu_gauges(self):
         response = self.client.get("/metrics")
