@@ -31,6 +31,10 @@ BASES = {
     "soulx": [
         (("tts_dialogue",), "tts_dialogue"),
     ],
+    # Voxtral-4B-TTS on ggml. tts only: the published weights ship no encoder to clone a voice with.
+    "crispasr": [
+        (("tts",), "crispasr_tts"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
@@ -47,6 +51,7 @@ FAMILIES = {
     "tts": "qwen3-tts",
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
+    "crispasr_tts": "voxtral-tts",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -108,6 +113,15 @@ _MOUNTS = {
          "sfx/env/music/speech/asr aspects; length is inferred from the text, not set)", True),
         ("POST", "/v1/audio/speech/batch",
          "Native batch (JSON items[] 1–8, one denoising pass, base64 audio out)", True),
+    ],
+    # No WebSocket: the binding synthesizes whole utterances, so stream=1 is sentence-scoped.
+    ("crispasr_tts", "tts"): [
+        ("POST", "/v1/audio/speech",
+         "Text to speech, OpenAI shape (JSON in, audio out; stream=1 streams sentence by sentence)",
+         True),
+        ("POST", "/v1/audio/speech/batch",
+         "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
+        ("GET", "/v1/audio/voices", "List preset voices", False),
     ],
     # One endpoint: a script is already the unit of work, and the model has no streaming decode.
     ("tts_dialogue", "tts_dialogue"): [

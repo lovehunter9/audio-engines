@@ -200,6 +200,7 @@ passes. For the same reason the build's final import check must go **through**
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
+| `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -312,6 +313,30 @@ dictated by the model, not chosen: every speaker needs a reference clip (there
 are no preset voices), a script is synthesized in one `forward_longform` call so
 later turns are conditioned on earlier ones, and `process_single_input` asserts
 one script per call — hence one endpoint, no batch route and no streaming.
+
+**`crispasr`.** The only base with no Python ML framework at all. Voxtral-4B-TTS's
+reference stack is vLLM-Omni, whose two-stage design gives each stage its own
+CUDA context and KV pool — the reference run peaks at ~20.5 GiB on a 24 GB card,
+and HF transformers has no merged support — so the model would own a card that
+has to be shared with an ASR engine, an LLM and an embedder. CrispASR
+reimplements all three stages as ggml graphs, which puts Q8_0 at ~4.3 GB of
+weights and is the entire reason this base exists. ggml links CUDA itself, so the
+image carries no torch and the `/metrics` gauges are read through NVML in the cap
+rather than through `gpu.py`. Four things follow from the packaging. The CUDA
+build is x86_64-only upstream, so the CI passes a single-arch `slices` and the
+Dockerfile refuses anything else — an arm64 image would install cleanly and then
+be CPU. The wheel also ships a CPU ggml backend, but that is not a fallback:
+`libcrispasr.so` lists `libggml-cuda.so.0` as a hard `DT_NEEDED` and that needs
+`libcuda.so.1`, so without a driver the loader fails before any Python runs —
+this engine must always be given a GPU. The build therefore checks
+`libggml-cuda.so`'s own `DT_NEEDED` with `readelf` rather than importing the
+package, which would fail on a correct image on a driverless runner. The published
+checkpoint ships no audio encoder, so cloning is impossible and `tts_clone` is
+never served — reference audio is refused with a 400 rather than quietly answered
+in a preset voice. And the binding exposes whole-utterance synthesis only, so
+`stream=1` is sentence-scoped, which is why this base mounts no WebSocket route.
+Output is watermarked: `synthesize()` marks its audio and the unmarked variant
+needs an explicit EU AI Act Art. 50 attestation, which is deliberately not given.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

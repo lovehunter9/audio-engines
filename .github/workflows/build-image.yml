@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      slices:
+        description: 'Arch slices to build, as JSON [{arch, platform, runner}]. Default builds both.'
+        required: false
+        default: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"},{"arch":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]'
+        type: string
 
 permissions:
   contents: read
@@ -133,14 +138,9 @@ jobs:
     if: needs.meta.outputs.push == 'true'
     strategy:
       fail-fast: false
+      # A single-arch base says so in `slices`; the default is both, so existing callers are unchanged.
       matrix:
-        include:
-          - platform: linux/amd64
-            arch: amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            arch: arm64
-            runner: ubuntu-24.04-arm
+        include: ${{ fromJSON(inputs.slices) }}
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -309,14 +309,16 @@ jobs:
           DH_NAMESPACE: ${{ inputs.namespace }}
           DH_REPO: ${{ inputs.repo }}
           TAG_NAMES: ${{ needs.meta.outputs.tag_names }}
+          ARCHES: ${{ join(fromJSON(inputs.slices).*.arch, ' ') }}
         run: |
           set -euo pipefail
           count=0
           while IFS= read -r name; do
             [ -n "$name" ] || continue
             tag="${DH_NAMESPACE}/${DH_REPO}:${name}"
-            echo "merging $tag-amd64 + $tag-arm64 -> $tag"
-            ./scripts/merge-index.sh "$tag" amd64 arm64
+            echo "indexing $tag over: $ARCHES"
+            # Unquoted on purpose: ARCHES is a word list.
+            ./scripts/merge-index.sh "$tag" $ARCHES
             count=$((count + 1))
           done <<< "$TAG_NAMES"
           if [ "$count" -eq 0 ]; then
@@ -329,6 +331,7 @@ jobs:
         env:
           DH_NAMESPACE: ${{ inputs.namespace }}
           DH_REPO: ${{ inputs.repo }}
+          ARCHES: ${{ join(fromJSON(inputs.slices).*.arch, ' ') }}
         run: |
           set -euo pipefail
           if [ ! -f "bases/${{ inputs.base }}/deps.Dockerfile" ]; then
@@ -337,8 +340,13 @@ jobs:
           fi
           RUNTIME_REPO="${DH_NAMESPACE}/${DH_REPO}"
           IMG=$(./scripts/deps-image.sh "${{ inputs.base }}" "$RUNTIME_REPO")
-          if crane manifest "${IMG}-amd64" >/dev/null 2>&1 && crane manifest "${IMG}-arm64" >/dev/null 2>&1; then
-            ./scripts/merge-index.sh "$IMG" amd64 arm64
+          missing=""
+          for arch in $ARCHES; do
+            crane manifest "${IMG}-${arch}" >/dev/null 2>&1 || missing="$missing $arch"
+          done
+          if [ -z "$missing" ]; then
+            # Unquoted on purpose: ARCHES is a word list.
+            ./scripts/merge-index.sh "$IMG" $ARCHES
           else
-            echo "per-arch deps not both present (may have reused a prior multi-arch $IMG); ok"
+            echo "per-arch deps missing for:$missing (may have reused a prior multi-arch $IMG); ok"
           fi

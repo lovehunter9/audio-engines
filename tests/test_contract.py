@@ -12,6 +12,12 @@ from wrapper import catalog, contract, gpu, tasks
 
 EXPECTED_CAPABILITY_ENDPOINTS = {
     ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},
+    # No WS: ggml synthesizes whole utterances, so stream=1 is sentence-scoped.
+    ("crispasr_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
+    ("crispasr_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
+    ("crispasr_tts", "tts", "POST", "/v1/audio/speech/batch"): {
+        "async_supported": True,
+    },
     ("diar", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("diar_stream", "diar_stream", "WS", "/v1/audio/diarize/stream"): {
         "async_supported": False,

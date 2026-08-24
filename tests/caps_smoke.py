@@ -1042,6 +1042,102 @@ def t_tts_not_ready():
                   frame["type"] == "error" and "weights are missing" in frame["message"], frame)
 
 
+class FakeCrispSession:
+    # Same shape the cap calls; 1 s of silence so duration metering has a known number.
+    def __init__(self):
+        self.backend = "voxtral-tts"
+        self.texts = []
+        self.voice = None
+        self.n = 24000
+
+    def speakers(self):
+        return ["de_female", "casual_male"]
+
+    def output_sample_rate(self):
+        return 24000
+
+    def set_speaker_name(self, voice):
+        self.voice = voice
+
+    def set_voice(self, voice):
+        self.voice = voice
+
+    def synthesize(self, text):
+        self.texts.append(text)
+        return np.zeros((self.n,), dtype="float32")
+
+
+def install_crispasr():
+    from wrapper.caps import crispasr_tts
+
+    fake_soundfile()
+    sess = FakeCrispSession()
+    crispasr_tts._state.update(ready=True, error=None, session=sess,
+                               speakers=sess.speakers(), out_sr=24000, quant="Q8_0",
+                               voice_set="")
+    return crispasr_tts, sess
+
+
+def t_crispasr():
+    from fastapi.testclient import TestClient
+
+    cap, sess = install_crispasr()
+    with TestClient(cap.build_app(["tts"])) as c:
+        advertises_tasks(c, "crispasr")
+        r = c.post("/v1/audio/speech", json={"input": "hello"})
+        check("crispasr sync 200", r.status_code == 200, (r.status_code, r.text[:120]))
+        check("crispasr an empty input is a 400",
+              c.post("/v1/audio/speech", json={"input": "  "}).status_code == 400)
+        check("crispasr an unknown voice is a 400",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "voice": "nobody"}).status_code == 400)
+        check("crispasr refuses ref_audio rather than answering in a preset",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "ref_audio": "data:audio/wav;base64,AA"}).status_code == 400)
+        check("crispasr lists its voices",
+              c.get("/v1/audio/voices").json()["voices"] == [{"id": "de_female"},
+                                                            {"id": "casual_male"}])
+        r2 = c.post("/v1/audio/speech?async=1", json={"input": "hello"})
+        check("crispasr async 202", r2.status_code == 202, (r2.status_code, r2.text[:120]))
+        if r2.status_code == 202:
+            doc = poll(c, r2.json()["task"]["id"])
+            check("crispasr task succeeded", doc["status"] == "succeeded", doc.get("status"))
+            contract(c, doc, "crispasr")
+            metered(c, r, doc, "crispasr", ("output",))
+        paths = mounted(c)
+        check("crispasr mounts no websocket (ggml speaks whole utterances)",
+              not any(m == "WS" for m, _p in paths), sorted(paths))
+        rb = c.post("/v1/audio/speech/batch",
+                    json={"items": [{"input": "one"}, {"input": "two", "voice": "casual_male"}]})
+        check("crispasr batch 200", rb.status_code == 200, (rb.status_code, rb.text[:160]))
+        if rb.status_code == 200:
+            items = rb.json()["items"]
+            check("crispasr batch answers one item per input",
+                  [i["index"] for i in items] == [0, 1] and all(i["audio"] for i in items),
+                  [(i["index"], len(i.get("audio") or "")) for i in items])
+            check("crispasr batch items override the shared voice",
+                  sess.voice == "casual_male", sess.voice)
+
+
+def t_crispasr_not_ready():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import crispasr_tts
+
+    crispasr_tts._state.update(ready=False, error="weights are missing", session=None,
+                               speakers=[])
+    with TestClient(crispasr_tts.build_app(["tts"])) as c:
+        for path, call in (("/v1/audio/speech",
+                            lambda: c.post("/v1/audio/speech", json={"input": "hi"})),
+                           ("/v1/audio/speech/batch",
+                            lambda: c.post("/v1/audio/speech/batch",
+                                           json={"items": [{"input": "hi"}]})),
+                           ("/v1/audio/voices", lambda: c.get("/v1/audio/voices"))):
+            r = call()
+            check("crispasr %s 503s while unloaded" % path, r.status_code == 503,
+                  (r.status_code, r.text[:120]))
+            check("crispasr %s says why" % path, "missing" in r.text, r.text[:120])
+
+
 def t_engine_args():
     # Every knob is a flag in ENGINE_ARGS now, so this parser is the one gate they all pass through.
     from wrapper.contract import EngineArgs
@@ -1088,6 +1184,8 @@ def main():
                            ("tts clone", t_tts_clone, "qwen3tts"),
                            ("tts warmup", t_tts_warmup, "qwen3tts"),
                            ("tts not ready", t_tts_not_ready, "qwen3tts"),
+                           ("crispasr tts", t_crispasr, "crispasr"),
+                           ("crispasr not ready", t_crispasr_not_ready, "crispasr"),
                            ("sound_fx", t_sound_fx, "dasheng"),
                            ("sound_fx not ready", t_sound_fx_not_ready, "dasheng"),
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
