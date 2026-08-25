@@ -30,7 +30,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-tts")
 
-_runtime = Runtime(model=None, speakers=[], custom_voice=False)
+_runtime = Runtime(model=None, speakers=[], custom_voice=False, voice_design=False)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
@@ -94,12 +94,13 @@ def _load():
             speakers = list(getter() or [])
             if speakers:
                 break
-    custom = False
+    # Kind is read off the weights (e.g. custom_voice / voice_design / base), never off MODEL_NAME.
+    kind = ""
     try:
-        custom = m.model.model.tts_model_type == "custom_voice"
+        kind = (m.model.model.tts_model_type or "").strip().lower()
     except AttributeError:
-        custom = bool(speakers)
-    return m, speakers, custom
+        kind = "custom_voice" if speakers else "base"
+    return m, speakers, kind == "custom_voice", kind == "voice_design"
 
 
 def _warmup():
@@ -118,6 +119,9 @@ def _warmup():
             if _state["custom_voice"]:
                 m.generate_custom_voice(text="Warm up.", speaker=_default_voice(),
                                         language="English")
+            elif _state["voice_design"]:
+                m.generate_voice_design(text="Warm up.", language="English",
+                                        instruct="A calm narrator.")
             else:
                 # A clone-only model has no preset voice; it needs a reference clip either way.
                 with _temp_ref(_tone_wav(), ".wav") as ref:
@@ -132,15 +136,15 @@ def _warmup():
 def _boot():
     global OUT_SR
     try:
-        m, speakers, custom = _load()
-        _state.update(model=m, speakers=speakers, custom_voice=custom)
+        m, speakers, custom, design = _load()
+        _state.update(model=m, speakers=speakers, custom_voice=custom, voice_design=design)
         rate = int(getattr(m, "sample_rate", OUT_SR) or OUT_SR)
         if rate != OUT_SR:
             log.warning("this checkpoint decodes at %d Hz, not the %d Hz /v1/models already "
                         "advertised; response headers will carry the real rate", rate, OUT_SR)
             OUT_SR = rate
-        log.info("%s loaded: custom_voice=%s speakers=%d sample_rate=%d",
-                 MODEL_NAME, custom, len(speakers), OUT_SR)
+        log.info("%s loaded: custom_voice=%s voice_design=%s speakers=%d sample_rate=%d",
+                 MODEL_NAME, custom, design, len(speakers), OUT_SR)
         _warmup()
         _state.update(ready=True, error=None)
     except Exception as e:
@@ -275,6 +279,8 @@ def _synthesize_blocking(payload, ref_path):
             return m.generate_voice_clone(text=text, language=language, ref_audio=ref_path,
                                           ref_text=ref_text, xvec_only=xvec, instruct=instruct,
                                           **kw)
+        if _state["voice_design"]:
+            return m.generate_voice_design(text=text, language=language, instruct=instruct, **kw)
         return m.generate_custom_voice(text=text, speaker=str(payload.get("voice")
                                                               or _default_voice()),
                                        language=language, instruct=instruct, **kw)
@@ -293,6 +299,9 @@ def _stream_blocking(payload, ref_path, chunk_size):
             it = m.generate_voice_clone_streaming(text=text, language=language, ref_audio=ref_path,
                                                   ref_text=ref_text, xvec_only=xvec,
                                                   instruct=instruct, chunk_size=chunk_size, **kw)
+        elif _state["voice_design"]:
+            it = m.generate_voice_design_streaming(text=text, language=language,
+                                                   instruct=instruct, chunk_size=chunk_size, **kw)
         else:
             it = m.generate_custom_voice_streaming(text=text,
                                                    speaker=str(payload.get("voice")
@@ -367,6 +376,8 @@ def build_app(supports):
 
     def _voice_error(voice):
         """The one check the socket shares with the body; it has no response to raise into."""
+        if voice and _state["voice_design"]:
+            return ("this checkpoint has no preset voices; describe the voice in instructions")
         if voice and _state["speakers"] and str(voice) not in _state["speakers"]:
             return "unknown voice %r; see GET /v1/audio/voices" % str(voice)
         return None
@@ -374,22 +385,33 @@ def build_app(supports):
     def _ref_from_payload(payload):
         """ref_audio arrives as a data: URL; anything else is the caller's own fetch to make.
 
-        One instance holds one checkpoint and the two kinds are not interchangeable: a
-        preset-voice checkpoint (e.g. Qwen3-TTS CustomVoice etc.) cannot clone; a clone
-        checkpoint (e.g. Qwen3-TTS Base etc.) has no presets. Refusing here beats
-        letting the model fail deep inside generation with something unreadable.
+        One instance holds one checkpoint. A preset-voice checkpoint (e.g. Qwen3-TTS CustomVoice
+        etc.) cannot clone; a clone checkpoint (e.g. Qwen3-TTS Base etc.) has no presets; a
+        design checkpoint (e.g. Qwen3-TTS VoiceDesign etc.) takes a written description in
+        instructions and neither presets nor a reference clip. Refusing here beats letting the
+        model fail deep inside generation with something unreadable.
         """
         ref = payload.get("ref_audio")
         if not ref:
-            if not _state["custom_voice"]:
-                raise HTTPException(status_code=400,
-                                    detail="%s has no preset voices; supply ref_audio (a data: "
-                                           "URL) or POST /v1/audio/speech/clone" % MODEL_NAME)
-            return None, None
+            if _state["custom_voice"]:
+                return None, None
+            if _state["voice_design"]:
+                if not str(payload.get("instructions") or "").strip():
+                    raise HTTPException(status_code=400,
+                                        detail="%s designs a voice from instructions; "
+                                               "the description is required" % MODEL_NAME)
+                return None, None
+            raise HTTPException(status_code=400,
+                                detail="%s has no preset voices; supply ref_audio (a data: "
+                                       "URL) or POST /v1/audio/speech/clone" % MODEL_NAME)
         if _state["custom_voice"]:
             raise HTTPException(status_code=400,
                                 detail="%s speaks its preset voices only; cloning needs an "
                                        "instance of the Base weights" % MODEL_NAME)
+        if _state["voice_design"]:
+            raise HTTPException(status_code=400,
+                                detail="%s cannot clone from a reference clip; describe the "
+                                       "voice in instructions" % MODEL_NAME)
         if not isinstance(ref, str) or not ref.startswith("data:"):
             raise HTTPException(status_code=400,
                                 detail="ref_audio must be a data: URL (base64 reference audio)")
@@ -624,10 +646,13 @@ def build_app(supports):
             worker.cancel()
 
     if has_tts:
-        # Only the preset-voice checkpoint has anything to list; clone-only must not mount it.
+        # Only a preset-voice checkpoint has anything to list; clone/design must not look like they do.
         @app.get("/v1/audio/voices")
         def voices_list():
             _require_ready()
+            if not _state["custom_voice"]:
+                raise HTTPException(status_code=404,
+                                    detail="%s has no preset voices" % MODEL_NAME)
             return JSONResponse({"model": MODEL_NAME,
                                  "voices": [{"id": s} for s in _state["speakers"]]})
 

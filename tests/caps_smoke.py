@@ -478,11 +478,16 @@ class FakeTTS:
 
     sample_rate = 24000
 
-    def __init__(self, custom=True):
+    def __init__(self, custom=True, design=False):
         self.calls = []
         self.refuse_over = None
-        self.model = types.SimpleNamespace(model=types.SimpleNamespace(
-            tts_model_type="custom_voice" if custom else "base"))
+        if custom:
+            kind = "custom_voice"
+        elif design:
+            kind = "voice_design"
+        else:
+            kind = "base"
+        self.model = types.SimpleNamespace(model=types.SimpleNamespace(tts_model_type=kind))
 
     def get_supported_speakers(self):
         return ["aiden", "nofish"]
@@ -529,13 +534,22 @@ class FakeTTS:
         for _ in range(3):
             yield self._audio()[0], self.sample_rate, {}
 
+    def generate_voice_design(self, **kw):
+        self._record("design", kw)
+        return self._audio(), self.sample_rate
 
-def install_tts(custom):
+    def generate_voice_design_streaming(self, **kw):
+        self._record("design_stream", kw)
+        for _ in range(3):
+            yield self._audio()[0], self.sample_rate, {}
+
+
+def install_tts(custom=True, design=False):
     from wrapper.caps import tts
 
     fake_soundfile()
-    m = FakeTTS(custom=custom)
-    tts._state.update(ready=True, error=None, model=m, custom_voice=custom,
+    m = FakeTTS(custom=custom, design=design)
+    tts._state.update(ready=True, error=None, model=m, custom_voice=custom, voice_design=design,
                       speakers=m.get_supported_speakers() if custom else [])
     return tts, m
 
@@ -725,6 +739,52 @@ def t_tts_clone():
                      data={"input": "hi"}).status_code == 400)
 
 
+def t_tts_design():
+    from fastapi.testclient import TestClient
+
+    tts, m = install_tts(custom=False, design=True)
+
+    with TestClient(tts.build_app(["tts"])) as c:
+        advertises_tasks(c, "tts")
+        check("a design instance refuses speech with no instructions",
+              c.post("/v1/audio/speech", json={"input": "hi"}).status_code == 400)
+        r = c.post("/v1/audio/speech",
+                   json={"input": "hi", "instructions": "a calm low female narrator"})
+        check("a design instance speaks from instructions", r.status_code == 200,
+              (r.status_code, r.text[:160]))
+        kw = m.last("design")
+        check("and the description reaches the model as instruct",
+              kw and kw["instruct"] == "a calm low female narrator" and kw["text"] == "hi", kw)
+        check("a design instance refuses a preset voice",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "voice": "vivian",
+                           "instructions": "calm"}).status_code == 400)
+        check("a design instance refuses ref_audio",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "instructions": "calm",
+                           "ref_audio": REF}).status_code == 400)
+        check("a design instance has no voice list",
+              c.get("/v1/audio/voices").status_code == 404)
+
+        rs = c.post("/v1/audio/speech",
+                    json={"input": "hi", "instructions": "calm", "stream": True,
+                          "response_format": "pcm"})
+        check("a design instance streams", rs.status_code == 200 and "design_stream" in m.kinds(),
+              (rs.status_code, m.kinds()))
+
+        rb = c.post("/v1/audio/speech/batch",
+                    json={"response_format": "pcm",
+                          "instructions": "a calm narrator",
+                          "items": [{"input": "one"},
+                                    {"input": "two", "instructions": "a bright child"}]})
+        check("a design batch 200", rb.status_code == 200, (rb.status_code, rb.text[:160]))
+        if rb.status_code == 200:
+            check("a design batch items override the shared instruct",
+                  m.calls[-1][1]["instruct"] == "a bright child"
+                  and m.calls[-2][1]["instruct"] == "a calm narrator",
+                  [m.calls[-2][1].get("instruct"), m.calls[-1][1].get("instruct")])
+
+
 def t_tts_warmup():
     # Ready has to mean warmed, or the first caller waits longer than llm-init holds a proxy open.
     tts, m = install_tts(custom=True)
@@ -747,6 +807,11 @@ def t_tts_warmup():
     m.generate_voice_clone = refuse
     tts._warmup()
     check("a refused warmup is survivable", True)
+
+    tts, m = install_tts(custom=False, design=True)
+    tts._warmup()
+    check("a design warmup speaks from a throwaway instruct",
+          m.kinds() == ["warmup", "design"] and m.last("design")["instruct"], m.kinds())
 
     import wave
 
@@ -1107,7 +1172,7 @@ def t_tts_not_ready():
     from wrapper.caps import tts
 
     tts._state.update(ready=False, error="weights are missing", model=None, custom_voice=True,
-                      speakers=[])
+                      voice_design=False, speakers=[])
     with TestClient(tts.build_app(["tts"])) as c:
         for path, call in (("/v1/audio/speech", lambda: c.post("/v1/audio/speech",
                                                                json={"input": "hi"})),
@@ -1265,6 +1330,7 @@ def main():
                            ("qwen", t_qwen, "qwen"),
                            ("tts", t_tts, "qwen3tts"),
                            ("tts clone", t_tts_clone, "qwen3tts"),
+                           ("tts design", t_tts_design, "qwen3tts"),
                            ("tts warmup", t_tts_warmup, "qwen3tts"),
                            ("tts not ready", t_tts_not_ready, "qwen3tts"),
                            ("crispasr tts", t_crispasr, "crispasr"),
