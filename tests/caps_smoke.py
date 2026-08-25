@@ -1317,6 +1317,7 @@ def t_audiocpp_tts():
             doc = poll(c, ra.json()["task"]["id"])
             check("audiocpp task succeeded", doc["status"] == "succeeded", doc.get("status"))
             contract(c, doc, "audiocpp")
+            metered(c, r, doc, "audiocpp", ("output",))
             rr = c.get("%s/%s/result" % (TASKS, doc["id"]))
             check("audiocpp async bytes == sync bytes", rr.content == r.content,
                   (len(rr.content), len(r.content)))
@@ -1575,12 +1576,12 @@ def t_audiocpp_stt():
           spec.run_mode == "streaming", spec.run_mode)
     with TestClient(cap.build_app(["stt", "stt_stream"])) as c:
         advertises_tasks(c, "audiocpp stt")
-        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "audiocpp stt")
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "audiocpp stt", meters=("input",))
         check("audiocpp stt asked the engine for its own model id",
               engine.bodies[-1][2].get("model") == "engine", engine.bodies[-1])
         both_ways(c, "/v1/audio/transcriptions", WAV,
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'},
-                  "audiocpp stt batch")
+                  "audiocpp stt batch", meters=("input",))
         r = c.post("/v1/audio/transcriptions", files=WAV, data={"response_format": "text"})
         check("audiocpp stt text/plain still comes back as text",
               r.status_code == 200 and r.headers["content-type"].startswith("text/plain")
@@ -1946,6 +1947,13 @@ def t_moss_tts():
                      json={"input": "hi", "voice": "nobody"}).status_code == 400)
         check("moss lists builtin voices",
               c.get("/v1/audio/voices").json()["voices"] == [{"id": "Junhao"}, {"id": "Ava"}])
+        r2 = c.post("/v1/audio/speech?async=1", json={"input": "hello"})
+        check("moss async 202", r2.status_code == 202, (r2.status_code, r2.text[:120]))
+        if r2.status_code == 202:
+            doc = poll(c, r2.json()["task"]["id"])
+            check("moss task succeeded", doc["status"] == "succeeded", doc.get("status"))
+            contract(c, doc, "moss")
+            metered(c, r, doc, "moss", ("output",))
         rs = c.post("/v1/audio/speech", json={"input": "hi", "stream": True,
                                               "response_format": "pcm"})
         check("moss stream 200 raw pcm", rs.status_code == 200 and len(rs.content) == PCM_BYTES,

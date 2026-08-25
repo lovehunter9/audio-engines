@@ -30,6 +30,7 @@ from fastapi.responses import Response, StreamingResponse
 from .. import acpp
 from .. import hfgate
 from .. import tasks
+from ..audioio import probe_seconds
 from ..batch import parse_segments
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
@@ -501,6 +502,7 @@ def build_app(supports):
                         if not piece:
                             out.append({"text": ""})
                         else:
+                            ctx.meter(input_seconds=probe_seconds(piece))
                             out.append({"text": _transcribe_blocking(payload, piece).get("text") or ""})
                     except tasks.Cancelled:
                         raise
@@ -517,6 +519,7 @@ def build_app(supports):
 
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="transcribe")
+            ctx.meter(input_seconds=probe_seconds(wav))
             doc = _transcribe_blocking(payload, wav)
             ctx.progress(ratio=1.0, stage="done")
             return _format_result(doc, fmt)
@@ -527,6 +530,7 @@ def build_app(supports):
     async def _dispatch_path(payload, path, async_flag, fmt):
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="transcribe")
+            ctx.meter(input_seconds=probe_seconds(path))
             try:
                 doc = _parse_engine(_engine().post("/v1/audio/transcriptions",
                                                    _engine_body(path, payload)))

@@ -370,6 +370,7 @@ def build_app(supports):
                             if hi <= lo:
                                 out.append({"text": ""})
                             else:
+                                ctx.meter(input_seconds=(hi - lo) / 16000.0)
                                 out.append({"text": _offline_transcribe(audio[lo:hi])})
                         except tasks.Cancelled:
                             raise
@@ -421,6 +422,7 @@ def build_app(supports):
 
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="transcribe")
+                ctx.meter(input_seconds=len(audio) / 16000.0)
                 text = _offline_transcribe(audio)
                 ctx.progress(ratio=1.0, stage="done")
                 if response_format in ("text", "srt", "vtt"):

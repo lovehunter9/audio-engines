@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import hfgate
 from .. import tasks
+from ..audioio import seconds
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics, quota_mib
 from ..runtime import Runtime
@@ -472,6 +473,7 @@ def build_app(supports):
                     audio, sr = _synthesize_blocking(payload, path)
             else:
                 audio, sr = _synthesize_blocking(payload, None)
+            ctx.meter(output_seconds=seconds(audio, sr))
             body = _encode(audio, sr, fmt)
             ctx.progress(ratio=1.0, stage="done")
             return tasks.Binary(body, _FORMATS[fmt][2], suffix="." + fmt,
@@ -520,6 +522,7 @@ def build_app(supports):
                         audio, sr = _synthesize_blocking(row, path)
                 else:
                     audio, sr = _synthesize_blocking(row, None)
+                ctx.meter(output_seconds=seconds(audio, sr))
                 fmt = row["response_format"]
                 out.append({"index": i, "format": fmt, "sample_rate": sr,
                             "audio": base64.b64encode(_encode(audio, sr, fmt)).decode("ascii")})
