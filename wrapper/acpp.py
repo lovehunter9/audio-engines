@@ -33,8 +33,10 @@ SPEC_DIR = "/app/model_specs"
 # one instance holds one model, so a stable internal id keeps the config free of naming rules.
 MODEL_ID = "engine"
 
-# Enough for the process to bind and register its models; the model load is waited on separately.
-BOOT_TIMEOUT_S = 120.0
+# lazy_load is False, so /health is the weight load, not just the bind. A 4 GiB GGUF on a
+# time-sliced GPU routinely takes minutes; 120s left a live audiocpp_server orphaned after
+# the wrapper gave up, which is how VoxCPM2 took the node down.
+BOOT_TIMEOUT_S = 1800.0
 # Synthesis of a long script on a busy card. The engine's own busy timeout is what queues requests.
 REQUEST_TIMEOUT_S = 1800.0
 
@@ -450,7 +452,13 @@ class Engine:
         threading.Thread(target=self._pump_logs, daemon=True).start()
         atexit.register(self.stop)
         self._client = httpx.Client(base_url=self.base_url, timeout=REQUEST_TIMEOUT_S)
-        self._await_health(timeout_s)
+        try:
+            self._await_health(timeout_s)
+        except Exception:
+            # The child is already allocating GPU; leaving it up after we report failure is
+            # what filled the node when VoxCPM2's first load outlasted the old 120s budget.
+            self.stop()
+            raise
 
     def _pump_logs(self):
         """The child's stdout is the only account of a load failure, so it goes to ours."""

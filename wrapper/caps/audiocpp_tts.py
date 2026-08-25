@@ -102,9 +102,14 @@ def _boot():
             weights, spec = _capabilities()
             _state.update(weights=weights, spec=spec)
         engine = acpp.Engine(spec=spec, weights_dir=weights, args=_args)
-        engine.start()
-        _state["engine"] = engine
-        _warmup(engine, spec)
+        try:
+            engine.start(timeout_s=BOOT_TIMEOUT_S)
+            _state["engine"] = engine
+            _warmup(engine, spec)
+        except Exception:
+            engine.stop()
+            _state["engine"] = None
+            raise
         _state.update(ready=True, error=None)
         log.info("%s ready: family=%s mode=%s sample_rate=%d clone=%s stream=%s", MODEL_NAME,
                  spec.family, spec.run_mode, _state["sample_rate"], spec.can_clone, spec.streams)

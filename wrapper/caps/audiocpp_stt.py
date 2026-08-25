@@ -83,7 +83,11 @@ def _boot():
             weights, spec = _capabilities()
             _state.update(weights=weights, spec=spec)
         engine = acpp.Engine(spec=spec, weights_dir=weights, args=_args)
-        engine.start()
+        try:
+            engine.start(timeout_s=BOOT_TIMEOUT_S)
+        except Exception:
+            engine.stop()
+            raise
         _state["engine"] = engine
         try:
             _warmup(engine)

@@ -1,7 +1,10 @@
 import importlib
+import io
 import json
 import os
 import sys
+import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -630,6 +633,32 @@ class TaskDurationTest(unittest.TestCase):
         ctx.meter(output_seconds=None)
         self.assertEqual(t.input_seconds, 3.75)
         self.assertIsNone(t.output_seconds)
+
+
+class AcppEngineStartTest(unittest.TestCase):
+    def test_start_kills_the_child_when_health_never_arrives(self):
+        # The old 120s budget returned while audiocpp_server was still loading VoxCPM2, and the
+        # orphan kept the GPU. A timeout has to take the child with it.
+        from wrapper import acpp
+
+        spec = types.SimpleNamespace(family="voxcpm2", task="tts", run_mode="streaming",
+                                     doc={})
+        proc = mock.Mock()
+        proc.poll.return_value = None
+        proc.stdout = io.StringIO("")
+        unhealthy = mock.Mock(status_code=503)
+        with tempfile.TemporaryDirectory() as work:
+            engine = acpp.Engine(spec=spec, weights_dir=work, args=contract.EngineArgs(""),
+                                 work_dir=work)
+            with mock.patch.object(acpp.subprocess, "Popen", return_value=proc), \
+                    mock.patch.object(acpp.httpx, "Client") as client_cls, \
+                    mock.patch.object(acpp.time, "sleep"):
+                client_cls.return_value.get.return_value = unhealthy
+                with self.assertRaises(RuntimeError) as raised:
+                    engine.start(timeout_s=0.05)
+        self.assertIn("did not answer /health", str(raised.exception))
+        proc.send_signal.assert_called()
+        self.assertIsNone(engine._proc)
 
 
 class EngineSurfaceTest(unittest.TestCase):
