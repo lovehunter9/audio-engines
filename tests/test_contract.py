@@ -710,6 +710,19 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertEqual(response.json()["models"][0]["name"], "test-model")
         self.assertEqual(response.json()["data"][0]["id"], "test-model")
 
+    def test_models_lists_the_card_name_and_the_chart_name(self):
+        from wrapper.contract import with_model_aliases
+
+        payload = {
+            "models": [{"name": "OpenBMB/VoxCPM2", "model": "OpenBMB/VoxCPM2"}],
+            "data": [{"id": "OpenBMB/VoxCPM2"}],
+        }
+        out = with_model_aliases(payload, "OpenBMB/VoxCPM2", "openbmb/VoxCPM2")
+        self.assertEqual([row["id"] for row in out["data"]],
+                         ["OpenBMB/VoxCPM2", "openbmb/VoxCPM2"])
+        self.assertEqual([row["name"] for row in out["models"]],
+                         ["OpenBMB/VoxCPM2", "openbmb/VoxCPM2"])
+
     def test_engine_spec_has_the_versioned_contract_shape(self):
         spec = self.client.get("/api/engine-spec").json()
 

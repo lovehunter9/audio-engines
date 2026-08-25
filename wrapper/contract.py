@@ -215,38 +215,56 @@ def models_payload(model_name, capabilities, description="", repo=None, module="
         "parameter_size": _parameter_size(model_name, repo),
         "quantization_level": quantization or "",
     }
-    return {
-        "models": [
-            {
-                "name": model_name,
-                "model": model_name,
-                "modified_at": modified,
-                "size": size,
-                "digest": "",
-                "type": "model",
-                "description": description,
-                "tags": [],
-                "capabilities": capabilities,
-                "parameters": "",
-                "details": details,
-            }
-        ],
-        "object": "list",
-        "data": [
-            {
-                "id": model_name,
-                "object": "model",
-                "created": int(mtime),
-                "owned_by": owner,
-                "meta": {
-                    "family": family,
-                    "format": fmt,
-                    "size": size,
-                    "sample_rate": sample_rate or SAMPLE_RATE,
-                },
-            }
-        ],
+    data_item = {
+        "id": model_name,
+        "object": "model",
+        "created": int(mtime),
+        "owned_by": owner,
+        "meta": {
+            "family": family,
+            "format": fmt,
+            "size": size,
+            "sample_rate": sample_rate or SAMPLE_RATE,
+        },
     }
+    model_item = {
+        "name": model_name,
+        "model": model_name,
+        "modified_at": modified,
+        "size": size,
+        "digest": "",
+        "type": "model",
+        "description": description,
+        "tags": [],
+        "capabilities": capabilities,
+        "parameters": "",
+        "details": details,
+    }
+    return {
+        "models": [model_item],
+        "object": "list",
+        "data": [data_item],
+    }
+
+
+def with_model_aliases(payload, *names):
+    """List the card name and the chart MODEL_NAME when they differ.
+
+    llm-init v1.5 exact-matches data[].id to the card. Callers still use the
+    chart id. One row per distinct name, card name first.
+    """
+    ids = []
+    for n in names:
+        n = (n or "").strip()
+        if n and n not in ids:
+            ids.append(n)
+    if len(ids) <= 1:
+        return payload
+    proto_data = payload["data"][0]
+    proto_model = payload["models"][0]
+    payload["data"] = [{**proto_data, "id": n} for n in ids]
+    payload["models"] = [{**proto_model, "name": n, "model": n} for n in ids]
+    return payload
 
 
 # Routes register() always mounts, reported so the self-report covers the engine's whole data plane, not just its capabilities.
@@ -300,11 +318,13 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
             raise HTTPException(status_code=503, detail=_err() or "model not loaded yet")
         from .runtime import _served_name
 
-        return models_payload(_served_name(model_name), capabilities, description=app.title,
-                              repo=repo, module=module, model_format=model_format,
-                              quantization=quantization,
+        served = _served_name(model_name)
+        env_name = (os.environ.get("MODEL_NAME") or "").strip()
+        payload = models_payload(served, capabilities, description=app.title, repo=repo,
+                              module=module, model_format=model_format, quantization=quantization,
                               sample_rate=sample_rate() if callable(sample_rate) else sample_rate,
                               family=family() if callable(family) else family)
+        return with_model_aliases(payload, served, env_name, model_name)
 
     @app.get("/api/engine-spec")
     def engine_spec():

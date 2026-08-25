@@ -8,17 +8,21 @@ import uvicorn
 from . import watchdog
 
 def _served_name(fallback):
-    # llm-init v1.5 requires GET /v1/models data[].id to equal the model card
-    # name exactly. A chart MODEL_NAME that only differs in case (openbmb vs
-    # OpenBMB) makes the engine look ready while the data plane stays 503.
+    # llm-init v1.5 matches data[].id to the on-disk card name exactly, and
+    # the card outlives the chart. Chart MODEL_NAME stays the public id;
+    # this only changes what /v1/models advertises.
     path = os.environ.get("MODEL_SPEC_PATH") or "/run/llm-init/model-spec.json"
     try:
         with open(path, encoding="utf-8") as f:
             name = (json.load(f) or {}).get("name")
         if isinstance(name, str) and name.strip():
             return name.strip()
-    except Exception:
-        pass
+        logging.getLogger("audio-runtime").warning(
+            "model-spec %s has no name, advertising %s", path, fallback)
+    except Exception as exc:
+        logging.getLogger("audio-runtime").warning(
+            "could not read model-spec %s (%s); advertising %s",
+            path, exc, fallback)
     return fallback
 
 
