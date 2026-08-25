@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import threading
@@ -6,10 +7,24 @@ import uvicorn
 
 from . import watchdog
 
+def _served_name(fallback):
+    # llm-init v1.5 requires GET /v1/models data[].id to equal the model card
+    # name exactly. A chart MODEL_NAME that only differs in case (openbmb vs
+    # OpenBMB) makes the engine look ready while the data plane stays 503.
+    path = os.environ.get("MODEL_SPEC_PATH") or "/run/llm-init/model-spec.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            name = (json.load(f) or {}).get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    except Exception:
+        pass
+    return fallback
+
 
 class Runtime:
     def __init__(self, default_model, default_repo=None, **state):
-        self.model_name = os.environ.get("MODEL_NAME", default_model)
+        self.model_name = _served_name(os.environ.get("MODEL_NAME", default_model))
         # MODEL_SOURCE may list several repos; the first is what this engine serves. A segment can
         # also carry llm-init's inline flags (--include / --subdir / --revision), which a
         # single-file GGUF out of a many-model repo needs, so the repo is only the first token.

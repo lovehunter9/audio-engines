@@ -253,6 +253,21 @@ class RuntimeHelperTest(unittest.TestCase):
         engine.state.update(ready=True)
         self.assertTrue(engine.state["ready"])
 
+    def test_runtime_advertises_the_llm_init_card_name(self):
+        from wrapper.runtime import Runtime
+
+        with tempfile.TemporaryDirectory() as tmp:
+            card = os.path.join(tmp, "model-spec.json")
+            with open(card, "w", encoding="utf-8") as f:
+                json.dump({"name": "OpenBMB/VoxCPM2", "mode": "audio"}, f)
+            with mock.patch.dict(
+                os.environ,
+                {"MODEL_NAME": "openbmb/VoxCPM2", "MODEL_SPEC_PATH": card},
+                clear=False,
+            ):
+                engine = Runtime("default-name")
+        self.assertEqual(engine.model_name, "OpenBMB/VoxCPM2")
+
     def test_runtime_preserves_background_and_blocking_startup_axes(self):
         from wrapper.runtime import Runtime
 

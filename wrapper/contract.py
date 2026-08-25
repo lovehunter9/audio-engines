@@ -298,8 +298,11 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     def models():
         if not is_ready():
             raise HTTPException(status_code=503, detail=_err() or "model not loaded yet")
-        return models_payload(model_name, capabilities, description=app.title, repo=repo,
-                              module=module, model_format=model_format, quantization=quantization,
+        from .runtime import _served_name
+
+        return models_payload(_served_name(model_name), capabilities, description=app.title,
+                              repo=repo, module=module, model_format=model_format,
+                              quantization=quantization,
                               sample_rate=sample_rate() if callable(sample_rate) else sample_rate,
                               family=family() if callable(family) else family)
 
