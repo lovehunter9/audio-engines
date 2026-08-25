@@ -13,7 +13,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-vad")
 
-_runtime = Runtime("silero-v5", model=None, get_ts=None)
+_runtime = Runtime(model=None, get_ts=None)
 MODEL_NAME = _runtime.model_name
 SR = 16000
 

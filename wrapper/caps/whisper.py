@@ -19,7 +19,6 @@ from ..runtime import Runtime
 log = logging.getLogger("audio-whisper")
 
 _runtime = Runtime(
-    "Systran/faster-whisper-large-v3",
     model=None,
     pipeline=None,
     device=None,

@@ -8,13 +8,13 @@ from . import watchdog
 
 
 class Runtime:
-    def __init__(self, default_model, default_repo=None, **state):
-        self.model_name = os.environ.get("MODEL_NAME", default_model)
+    def __init__(self, **state):
+        # Chart MODEL_NAME / MODEL_SOURCE only. Empty env stays empty: this process never
+        # invents an id or a repo (e.g. Qwen3-TTS CustomVoice, Voxtral-4B-TTS, etc.).
+        self.model_name = (os.environ.get("MODEL_NAME") or "").strip()
         # MODEL_SOURCE may list several repos; the first is what this engine serves.
         source = (os.environ.get("MODEL_SOURCE", "").split(",")[0] or "").strip()
-        self.model_repo = (
-            source[5:] if source.startswith("hf://") else (source or default_repo or self.model_name)
-        )
+        self.model_repo = source[5:] if source.startswith("hf://") else source
         self.port = int(os.environ.get("ENGINE_PORT", "8000"))
         self.log_level = os.environ.get("LOG_LEVEL", "info").lower()
         logging.basicConfig(

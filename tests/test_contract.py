@@ -174,7 +174,7 @@ class RuntimeHelperTest(unittest.TestCase):
             },
             clear=False,
         ):
-            engine = Runtime("default-name", default_repo="default/repo", model=None)
+            engine = Runtime(model=None)
 
         self.assertEqual(engine.model_name, "served-name")
         self.assertEqual(engine.model_repo, "org/repo")
@@ -184,11 +184,35 @@ class RuntimeHelperTest(unittest.TestCase):
         engine.state.update(ready=True)
         self.assertTrue(engine.state["ready"])
 
+    def test_runtime_does_not_invent_a_name_or_repo(self):
+        from wrapper.runtime import Runtime
+
+        with mock.patch.dict(
+            os.environ,
+            {"MODEL_NAME": "", "MODEL_SOURCE": ""},
+            clear=False,
+        ):
+            engine = Runtime()
+        self.assertEqual(engine.model_name, "")
+        self.assertEqual(engine.model_repo, "")
+
+    def test_runtime_does_not_treat_model_name_as_a_repo(self):
+        from wrapper.runtime import Runtime
+
+        with mock.patch.dict(
+            os.environ,
+            {"MODEL_NAME": "chart-model", "MODEL_SOURCE": ""},
+            clear=False,
+        ):
+            engine = Runtime()
+        self.assertEqual(engine.model_name, "chart-model")
+        self.assertEqual(engine.model_repo, "")
+
     def test_runtime_preserves_background_and_blocking_startup_axes(self):
         from wrapper.runtime import Runtime
 
         events = []
-        background = Runtime("background")
+        background = Runtime()
         app = object()
 
         class FakeThread:
@@ -236,7 +260,7 @@ class RuntimeHelperTest(unittest.TestCase):
         )
 
         events.clear()
-        blocking = Runtime("blocking")
+        blocking = Runtime()
         with (
             mock.patch(
                 "wrapper.runtime.watchdog.arm",
@@ -280,15 +304,11 @@ class RuntimeHelperTest(unittest.TestCase):
             "align": {
                 "supports": ["align"],
                 "watchdog": "Qwen3-ForcedAligner",
-                "model": "Qwen/Qwen3-ForcedAligner-0.6B",
-                "repo": "Qwen/Qwen3-ForcedAligner-0.6B",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
             },
             "diar": {
                 "supports": ["diar"],
                 "watchdog": "pyannote pipeline",
-                "model": "pyannote-community-1",
-                "repo": "pyannote-community-1",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -301,16 +321,12 @@ class RuntimeHelperTest(unittest.TestCase):
             "diar_stream": {
                 "supports": ["diar_stream"],
                 "watchdog": "streaming sortformer",
-                "model": "diar-streaming-sortformer",
-                "repo": "nvidia/diar_streaming_sortformer_4spk-v2.1",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
                 "disable_ws_ping": True,
             },
             "embed": {
                 "supports": ["speaker_embed"],
                 "watchdog": "pyannote embedding",
-                "model": "pyannote-embedding",
-                "repo": "pyannote-embedding",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -322,8 +338,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "enhance": {
                 "supports": ["enhance"],
                 "watchdog": "speechbrain enhancement",
-                "model": "mtl-mimic-voicebank",
-                "repo": "mtl-mimic-voicebank",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -335,8 +349,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "stt_stream": {
                 "supports": ["stt", "stt_stream"],
                 "watchdog": "qwen-asr vLLM",
-                "model": "Qwen/Qwen3-ASR-1.7B",
-                "repo": "Qwen/Qwen3-ASR-1.7B",
                 "state": {"ready": False, "error": None, "asr": None},
                 "load_on_main": True,
                 "disable_ws_ping": True,
@@ -344,15 +356,11 @@ class RuntimeHelperTest(unittest.TestCase):
             "vad": {
                 "supports": ["vad"],
                 "watchdog": "silero-vad",
-                "model": "silero-v5",
-                "repo": "silero-v5",
                 "state": {"ready": False, "error": None, "model": None, "get_ts": None},
             },
             "whisper": {
                 "supports": ["stt"],
                 "watchdog": "faster-whisper",
-                "model": "Systran/faster-whisper-large-v3",
-                "repo": "Systran/faster-whisper-large-v3",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -369,8 +377,8 @@ class RuntimeHelperTest(unittest.TestCase):
                 with mock.patch.dict(
                     os.environ,
                     {
-                        "MODEL_NAME": expected["model"],
-                        "MODEL_SOURCE": "",
+                        "MODEL_NAME": "chart-model",
+                        "MODEL_SOURCE": "hf://org/weights",
                         "ENGINE_PORT": "8000",
                         "LOG_LEVEL": "info",
                     },
@@ -381,8 +389,8 @@ class RuntimeHelperTest(unittest.TestCase):
                     )
                     self.assertTrue(callable(module.build_app))
                     self.assertTrue(callable(module.run))
-                    self.assertEqual(module.MODEL_NAME, expected["model"])
-                    self.assertEqual(module._runtime.model_repo, expected["repo"])
+                    self.assertEqual(module.MODEL_NAME, "chart-model")
+                    self.assertEqual(module._runtime.model_repo, "org/weights")
                     self.assertEqual(module._runtime.port, 8000)
                     self.assertEqual(module._runtime.log_level, "info")
                     self.assertEqual(module._state, expected["state"])

@@ -30,8 +30,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-tts")
 
-_runtime = Runtime("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-                   model=None, speakers=[], custom_voice=False)
+_runtime = Runtime(model=None, speakers=[], custom_voice=False)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
@@ -375,8 +374,9 @@ def build_app(supports):
     def _ref_from_payload(payload):
         """ref_audio arrives as a data: URL; anything else is the caller's own fetch to make.
 
-        One instance holds one checkpoint and the two are not interchangeable: CustomVoice has
-        preset speakers and cannot clone, Base clones and has no presets. Refusing here beats
+        One instance holds one checkpoint and the two kinds are not interchangeable: a
+        preset-voice checkpoint (e.g. Qwen3-TTS CustomVoice etc.) cannot clone; a clone
+        checkpoint (e.g. Qwen3-TTS Base etc.) has no presets. Refusing here beats
         letting the model fail deep inside generation with something unreadable.
         """
         ref = payload.get("ref_audio")

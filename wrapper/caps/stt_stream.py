@@ -1,4 +1,5 @@
-# Qwen3-ASR on one in-process vLLM load, serving BOTH offline stt and WebSocket stt_stream.
+# Streaming ASR on one in-process vLLM load (e.g. Qwen3-ASR etc.), serving BOTH offline stt
+# and WebSocket stt_stream.
 import os
 import json
 import asyncio
@@ -19,7 +20,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-stt-stream")
 
-_runtime = Runtime("Qwen/Qwen3-ASR-1.7B", asr=None)
+_runtime = Runtime(asr=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 PORT = _runtime.port
