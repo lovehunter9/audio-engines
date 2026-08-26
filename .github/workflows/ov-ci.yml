@@ -1,0 +1,45 @@
+# ov CI: triggers only; the build is the shared build-image.yml.
+name: ov-ci
+
+on:
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
+  push:
+    tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/ov/**'
+      - '.github/workflows/ov-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: ov
+      repo: audio-ov
+      # Intel GPU (iGPU and Arc) is x86_64; there is no arm64 OpenVINO GPU plugin we would ship.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
