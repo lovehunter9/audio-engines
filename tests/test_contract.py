@@ -553,6 +553,52 @@ class RuntimeHelperTest(unittest.TestCase):
                 )
 
 
+class OpenVINOModeTest(unittest.TestCase):
+    """Intel is an install-time choice (AUDIO_BASE=ov + OLARES_GPU_MODE), never a CUDA fallback."""
+
+    def test_qwen_base_is_not_openvino(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen"}, clear=False):
+            self.assertFalse(q._is_ov())
+
+    def test_ov_base_is_openvino(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False):
+            self.assertTrue(q._is_ov())
+
+    def test_intel_modes_select_gpu_device_without_probing_cuda(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "OV_DEVICE", ""):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel",
+                                              "REQUIRED_GPU_MEMORY": "0"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu",
+                                              "REQUIRED_GPU_MEMORY": "12Gi"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia",
+                                              "REQUIRED_GPU_MEMORY": "0"}, clear=False):
+                self.assertEqual(q._ov_device(), "CPU")
+
+    def test_device_flag_overrides_mode(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "OV_DEVICE", "GPU.1"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU.1")
+
+    def test_ov_base_implements_stt_pair_not_align(self):
+        self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream"])
+        self.assertIsNone(catalog.module_of("ov", "align"))
+        self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
+
+    def test_nvidia_mode_does_not_flip_cuda_metrics_to_dri(self):
+        text = gpu.gpu_metrics_text()
+        self.assertIn("gpu_present 0", text)
+
+
 class SharedHelperTest(unittest.TestCase):
     def test_audioio_import_does_not_require_numpy(self):
         sys.modules.pop("wrapper.audioio", None)

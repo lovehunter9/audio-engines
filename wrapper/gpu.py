@@ -101,12 +101,18 @@ def gpu_metrics_text(nvml_fallback=False):
                 util = 0.0
     except Exception:
         present = 0
-    if not present and nvml_fallback:
-        # torch is absent or saw no device; ask NVML before reporting zeros.
-        stats = _nvml_stats()
-        if stats is not None:
-            present, slice_scoped = 1, False
-            used, total, util = stats
+    if not present:
+        # ov has no CUDA and must not ask NVML: on a mixed node that would report the
+        # NVIDIA card. /dev/dri means the chart mounted the Intel device; used/total
+        # stay 0 — unified memory is not a CUDA slice.
+        if (os.environ.get("AUDIO_BASE") or "").strip() == "ov":
+            present = 1 if os.path.exists("/dev/dri") else 0
+        elif nvml_fallback:
+            # torch is absent or saw no device; ask NVML before reporting zeros.
+            stats = _nvml_stats()
+            if stats is not None:
+                present, slice_scoped = 1, False
+                used, total, util = stats
     lines = []
 
     def g(name, help_, val):

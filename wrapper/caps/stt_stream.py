@@ -109,6 +109,10 @@ def repetition_request(args):
 
 
 REPETITION_ON, REPETITION_OVERRIDE, _REP_NOTE = repetition_request(_args)
+# OpenVINO base (`AUDIO_BASE=ov`) only. Claimed here so a leftover `--device` is not a silent typo
+# on the Intel image; the qwen/vLLM load never reads these.
+OV_DEVICE = _args.text("--device", "")
+OV_MAX_NEW_TOKENS = _args.count("--max-new-tokens", 256)
 # 🔴 Every flag has to be READ before this line: warn_unclaimed reports whatever is not yet
 # claimed. Seen once: a flag read below this line was honoured and reported discarded at once.
 _args.warn_unclaimed(log)
@@ -136,6 +140,38 @@ _repset_said = []
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
 _gpu = threading.Lock()
+
+# Qwen3-ASR on OpenVINO wants English names; WS/start often sends ISO 639-1.
+_OV_LANG = {
+    "en": "English", "zh": "Chinese", "yue": "Chinese", "ja": "Japanese",
+    "ko": "Korean", "de": "German", "fr": "French",
+    "english": "English", "chinese": "Chinese", "japanese": "Japanese",
+    "korean": "Korean", "german": "German", "french": "French",
+}
+
+
+def _is_ov():
+    """The ov image bakes AUDIO_BASE=ov. Never infer Intel from visible hardware."""
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "ov"
+
+
+def _ov_device():
+    if OV_DEVICE:
+        return OV_DEVICE
+    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+    if mode.startswith("intel"):
+        return "GPU"
+    gpu_raw = (os.environ.get("REQUIRED_GPU_MEMORY") or "").strip()
+    if gpu_raw in ("", "0"):
+        return "CPU"
+    return "GPU"
+
+
+def _ov_language(raw):
+    if not raw:
+        return None
+    key = str(raw).strip()
+    return _OV_LANG.get(key.lower(), key)
 
 
 def _gated(fn, *a):
@@ -166,6 +202,102 @@ def _patch_max_input(seconds):
     if patched:
         _p("patched qwen-asr MAX_ASR_INPUT_SECONDS -> %ds in %s"
            % (int(seconds), ", ".join(patched)))
+
+
+def _looks_like_ov_ir(path):
+    if not path or not os.path.isdir(path):
+        return False
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return False
+    return any(n.endswith(".xml") for n in names)
+
+
+def _resolve_hf_dir(repo):
+    if os.path.isdir(repo):
+        return repo
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id=repo, local_files_only=True)
+
+
+def _ensure_ov_ir(src):
+    """ASRPipeline wants a converted OpenVINO directory, not the raw HF checkpoint.
+
+    Prefer an `openvino/` subdir (what the chart can ship) or xml already in src;
+    otherwise export once next to the snapshot so the next start skips this.
+    """
+    nested = os.path.join(src, "openvino")
+    if _looks_like_ov_ir(src):
+        return src
+    if _looks_like_ov_ir(nested):
+        return nested
+    dest = nested
+    _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
+    os.makedirs(dest, exist_ok=True)
+    import subprocess
+    import sys
+
+    cmd = [
+        "optimum-cli", "export", "openvino",
+        "--model", src,
+        "--trust-remote-code",
+        dest,
+    ]
+    _p("running: %s" % " ".join(cmd))
+    subprocess.check_call(cmd)
+    if not _looks_like_ov_ir(dest):
+        raise RuntimeError("optimum-cli export finished but %s has no .xml" % dest)
+    return dest
+
+
+def _load_ov():
+    _p("importing openvino_genai (device=%s) ..." % _ov_device())
+    import openvino_genai as ov_genai
+
+    src = _resolve_hf_dir(MODEL_REPO)
+    model_dir = _ensure_ov_ir(src)
+    device = _ov_device()
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache")
+    os.makedirs(cache, exist_ok=True)
+    _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
+    pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
+    _state["asr"] = pipe
+    _state["backend"] = "openvino"
+    _warmup()
+    _state["ready"] = True
+    _p("engine READY: %s (openvino %s)" % (MODEL_REPO, device))
+    log.info("openvino-genai ASR loaded: %s device=%s", MODEL_REPO, device)
+
+
+def _ov_result_text(result):
+    texts = getattr(result, "texts", None)
+    if texts:
+        return (texts[0] or "").strip()
+    t = getattr(result, "text", None)
+    if t:
+        return str(t).strip()
+    return (str(result) if result is not None else "").strip()
+
+
+def _ov_result_language(result, fallback=None):
+    langs = getattr(result, "languages", None)
+    if langs:
+        return langs[0] or fallback
+    return fallback
+
+
+def _ov_generate(audio, language=None, streamer=None):
+    asr = _state["asr"]
+    raw = audio.astype("float32").reshape(-1).tolist()
+    kw = {"max_new_tokens": OV_MAX_NEW_TOKENS}
+    lang = _ov_language(language)
+    if lang:
+        kw["language"] = lang
+    if streamer is not None:
+        kw["streamer"] = streamer
+    return asr.generate(raw, **kw)
 
 
 def _load_blocking():
@@ -1066,6 +1198,8 @@ def _text_and_language(r):
 
 def _offline_transcribe(audio, language=None, context=""):
     # Native offline transcription on the same load; max_tokens is raised then restored.
+    if _is_ov():
+        return _ov_result_text(_ov_generate(audio, language=language))
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", _MISSING) if sp is not None else _MISSING
@@ -1098,6 +1232,9 @@ def _offline_transcribe(audio, language=None, context=""):
 
 
 def _offline_transcribe_many(clips, language=None, context=""):
+    # OpenVINO GenAI has no transformers batch generate; keep the caller's grouping but run serially.
+    if _is_ov():
+        return [_offline_transcribe(c, language=language, context=context) for c in clips]
     # qwen-asr's transcribe() takes a list and hands the whole list to the engine in one generate().
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
@@ -1343,6 +1480,119 @@ def _batching_report(how, span_count, planned, calls, splits, refusals, replans,
     return line
 
 
+async def _ws_openvino(ws: WebSocket):
+    """OpenVINO output-side streaming: buffer PCM until stop, then token-stream partials.
+
+    Must not emit `partial` while the client is still sending audio — that would be the
+    fake live path we refuse. Decoder tokens after the utterance are the advertised stream.
+    """
+    import numpy as np
+
+    await ws.accept()
+    if not _state["ready"]:
+        await ws.send_text(json.dumps({"type": "error",
+                                       "detail": _state["error"] or "model not ready"}))
+        await ws.close()
+        return
+    sample_rate = 16000
+    language = None
+    pending = np.zeros((0,), dtype="float32")
+    total = 0
+    await ws.send_text(json.dumps({"type": "ready"}))
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text is not None:
+                try:
+                    obj = json.loads(text)
+                except Exception:
+                    obj = {}
+                t = obj.get("type")
+                if t == "start":
+                    language = obj.get("language") or None
+                    sample_rate = int(obj.get("sample_rate") or 16000)
+                    continue
+                if t in ("stop", "done", "finish"):
+                    break
+                continue
+            data = msg.get("bytes")
+            if not data:
+                continue
+            seg = resample_linear(pcm16_to_float32(data), sample_rate)
+            pending = np.concatenate([pending, seg]) if pending.size else seg
+            total += int(seg.shape[0])
+        if pending.size:
+            loop = asyncio.get_running_loop()
+            acc = [""]
+            out_q = asyncio.Queue()
+
+            def streamer(subword):
+                piece = subword if isinstance(subword, str) else str(subword)
+                acc[0] += piece
+                loop.call_soon_threadsafe(out_q.put_nowait, acc[0])
+                try:
+                    import openvino_genai as ov_genai
+                    return ov_genai.StreamingStatus.RUNNING
+                except Exception:
+                    return False
+
+            def work():
+                try:
+                    result = _ov_generate(pending, language=language, streamer=streamer)
+                    loop.call_soon_threadsafe(out_q.put_nowait, ("done", result))
+                except Exception as e:
+                    loop.call_soon_threadsafe(out_q.put_nowait, ("error", e))
+
+            async with _infer_lock:
+                worker = asyncio.create_task(asyncio.to_thread(_gated, work))
+                result = None
+                try:
+                    while True:
+                        item = await out_q.get()
+                        if isinstance(item, tuple) and item[0] == "done":
+                            result = item[1]
+                            break
+                        if isinstance(item, tuple) and item[0] == "error":
+                            raise item[1]
+                        await ws.send_text(json.dumps({
+                            "type": "partial",
+                            "text": item,
+                            "language": _ov_language(language),
+                        }))
+                finally:
+                    await worker
+            final_text = acc[0] or _ov_result_text(result)
+            lang = _ov_result_language(result, _ov_language(language))
+            if not acc[0] and final_text:
+                await ws.send_text(json.dumps({
+                    "type": "partial", "text": final_text, "language": lang,
+                }))
+            await ws.send_text(json.dumps({
+                "type": "final", "text": final_text, "language": lang,
+            }))
+        else:
+            await ws.send_text(json.dumps({
+                "type": "final", "text": "", "language": _ov_language(language),
+            }))
+        await ws.send_text(json.dumps({
+            "type": "closed",
+            "audio_seconds": round(total / 16000.0, 3),
+        }))
+        await ws.close()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.exception("openvino stream error: %s", e)
+        try:
+            await ws.send_text(json.dumps({"type": "error", "detail": str(e)}))
+            await ws.close()
+        except Exception:
+            pass
+
+
 def build_app(supports):
     has_stt = "stt" in supports
     has_stream = "stt_stream" in supports
@@ -1521,6 +1771,9 @@ def build_app(supports):
     if has_stream:
         @app.websocket("/v1/audio/stream")
         async def stream(ws: WebSocket):
+            if _is_ov():
+                await _ws_openvino(ws)
+                return
             import numpy as np
 
             await ws.accept()
@@ -1648,11 +1901,12 @@ def build_app(supports):
 
 
 def run(supports):
-    _p("stt_stream starting; model=%s port=%s supports=%s" % (MODEL_REPO, PORT, supports))
+    _p("stt_stream starting; model=%s port=%s supports=%s ov=%s" % (
+        MODEL_REPO, PORT, supports, _is_ov()))
 
     def load():
         try:
-            _load_blocking()
+            (_load_ov if _is_ov() else _load_blocking)()
         except Exception as e:
             _state["error"] = hfgate.explain(MODEL_REPO, e)
             _p("engine load FAILED: %s" % e)
@@ -1664,11 +1918,13 @@ def run(supports):
         return app
 
     # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
+    # First OpenVINO start may export IR; allow the same window faster-whisper uses for CT2.
     _runtime.serve(
         supports,
         load,
         build,
-        "qwen-asr",
+        "openvino-genai ASR" if _is_ov() else "qwen-asr",
         load_on_main=True,
         disable_ws_ping=True,
+        **({"timeout_s": 5400} if _is_ov() else {}),
     )

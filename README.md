@@ -218,6 +218,7 @@ passes. For the same reason the build's final import check must go **through**
 | Base | Image | Capabilities | Engine / runtime | Status |
 |---|---|---|---|---|
 | `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr transformers; one package, two loads | in progress |
+| `ov` | `beclab/audio-ov` | `stt`, `stt_stream` | OpenVINO GenAI `ASRPipeline` (Intel iGPU / Arc, amd64) | in progress |
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
@@ -230,8 +231,9 @@ passes. For the same reason the build's final import check must go **through**
 | `firered` | `beclab/audio-firered` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
 | `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
 
-`stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
-which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
+`stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
+OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
+capability alone.
 Within a base, capabilities that need DIFFERENT models (each of the four
 pyannote caps, and Qwen ASR vs Align) are separate clones — the wrapper
 serves the first match and says so in the log.
@@ -438,6 +440,19 @@ grant this container was given, which from downstream is indistinguishable from
 a cost model that is simply wrong. A deployment that wants to be more careful
 says so by declaring a smaller `REQUIRED_GPU_MEMORY`; one that really does
 own more of the card says so through the platform's grant.
+
+**`ov`.** Intel iGPU and discrete Arc share this image. There is no vLLM on it:
+`stt_stream.py` branches on `AUDIO_BASE=ov` and loads `openvino_genai.ASRPipeline`
+on device `GPU` (or `--device` / CPU when the quota is 0). Converted IR is
+preferred (`openvino/` next to the HF snapshot); a missing IR is exported once
+with `optimum-cli` and reused. `stt_stream` keeps the same WebSocket contract
+(`partial` / `final`) but **does not transcribe until the client stops** —
+OpenVINO streams decoder tokens after the utterance, which is the Intel
+tradeoff against vLLM's incremental encoder cache. Do not emit live partials
+while audio is still arriving. amd64 only: Intel GPU is x86_64, and CI passes a
+single-arch `slices` like `crispasr`. Align stays on the `qwen` base.
+The CUDA `qwen` batching measurement above does not apply here: OpenVINO runs
+spans serially.
 
 **`fasterwhisper`.** Arch-selected deps (`base-amd64` / `base-arm64`):
 
