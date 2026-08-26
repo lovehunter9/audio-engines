@@ -25,11 +25,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # No CUDA torch. optimum[openvino] may pull a CPU torch; that is only for first-start IR export.
 # Do not `pip install --upgrade pip`: Ubuntu's pip has no RECORD file and the upgrade aborts the build.
+# Qwen3-ASR export: GenAI's documented combo is transformers 4.57.6 + qwen-asr (registers
+# model_type qwen3_asr). A floating transformers cannot load the local snapshot, and
+# qwen-asr's vllm extra is NOT installed.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
         openvino-genai \
         "optimum[openvino]" \
-        transformers \
+        "transformers==4.57.6" \
+        "qwen-asr==0.0.6" \
         huggingface_hub \
         librosa \
         soundfile \
@@ -38,8 +42,10 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         python-multipart \
         websockets \
         numpy \
-    && python3 -c "import openvino, openvino_genai, optimum, transformers, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+    && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 print('openvino', openvino.__version__); \
-print('openvino_genai', getattr(openvino_genai, '__version__', 'ok'))"
+print('openvino_genai', getattr(openvino_genai, '__version__', 'ok')); \
+print('transformers', transformers.__version__); \
+print('qwen_asr', 'ok')"
 
 LABEL org.opencontainers.image.title="audio-ov-deps"
