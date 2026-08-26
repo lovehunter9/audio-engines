@@ -76,7 +76,8 @@ _MOUNTS = {
         ("POST", "/v1/audio/vad", "Voice activity detection (speech segments)", True),
     ],
     ("diar", "diar"): [
-        ("POST", "/v1/audio/diarization", "Speaker diarization (who spoke when)", True),
+        ("POST", "/v1/audio/diarization",
+         "Speaker diarization (who spoke when; exclusive=1 for non-overlapping turns)", True),
     ],
     ("embed", "speaker_embed"): [
         ("POST", "/v1/audio/embeddings", "Speaker embedding (one vector per clip)", True),

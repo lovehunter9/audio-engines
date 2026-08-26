@@ -252,7 +252,25 @@ diarization stages default to `batch_size=1`, and segmentation slides a 10 s
 window at a 1 s hop, so a 3 h clip becomes ~12 000 tiny forward passes with the
 GPU idle in between — hence `--segmentation-batch-size` / `--embedding-batch-size`
 (`auto` sizes them to `REQUIRED_GPU_MEMORY`, 1 on CPU) and the one-way fallback to
-1 on CUDA OOM. `enhance` windows long clips (120 s, shrinking to 60 or 30 on a
+1 on CUDA OOM.
+
+`diar` takes three more knobs per request, because which answer is the right one
+depends on what the caller does with it. `exclusive=1` returns pyannote 4's
+non-overlapping diarization: a caller who cuts the audio along these turns and
+transcribes each piece otherwise sends the overlapping seconds twice and gets the
+same words back twice. `min_duration_off` (a pause shorter than this is filled
+rather than ending the turn) and `clustering_threshold` (higher clusters less
+eagerly, so fewer speakers) are hyper-parameters the pipeline reads off itself
+mid-run, so they are set on it for the length of one job and put back after —
+which is sound only because the task runner runs one job at a time. The same two
+can be pinned image-wide with `--min-duration-off` / `--clustering-threshold`, and
+`--exclusive` moves the default. The response echoes all three, a pipeline default
+included, and says `exclusive: false` when the build has no non-overlapping output
+to give. `speaker_centroids` rides along when the clustering's rows can be named
+with confidence; it is for looking at, not for matching against `speaker_embed`
+vectors, which come from a different model in a different space.
+
+`enhance` windows long clips (120 s, shrinking to 60 or 30 on a
 small slice) with an overlap-add crossfade and can answer `format=wav|flac|ogg`,
 degrading to FLAC then WAV if libsndfile lacks the codec.
 
