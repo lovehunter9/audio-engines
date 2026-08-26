@@ -382,6 +382,18 @@ def t_diar_speakrs():
         check("diar_speakrs sends 0 when a caller really asked for 0",
               sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
 
+        # The engine holds the whole clip decoded, so an unbounded upload is an OOM kill, which
+        # reaches the caller as a dropped connection rather than as something it can act on.
+        ds.MAX_AUDIO_SECONDS = 1.0
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs refuses audio longer than it can hold",
+              r.status_code == 413 and "memory" in r.json()["detail"],
+              (r.status_code, r.json()))
+        r = c.post("/v1/audio/diarization", files=WAV, data={"async": "1"})
+        check("diar_speakrs refuses it before a task exists, not inside one",
+              r.status_code == 413, (r.status_code, r.text[:120]))
+        ds.MAX_AUDIO_SECONDS = 14400.0
+
         sent.clear()
         doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
         check("diar_speakrs passes exclusive through and echoes what ran",

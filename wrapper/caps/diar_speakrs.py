@@ -5,9 +5,9 @@
 # list, engine spec, task API, ENGINE_ARGS -- and hands only the inference across.
 #
 # Why a pipe and a file path, not a socket and a request body: the upload is already spilled to a
-# temp file by the time a job runs, and both processes see the same filesystem, so passing the path
-# copies nothing. A three-hour clip is hundreds of megabytes; moving those bytes across a socket
-# would be the single most expensive thing this engine does, and it would buy nothing.
+# temp file by the time a job runs, and both processes see the same filesystem, so the path moves
+# no audio. This removes one copy of a hundreds-of-megabytes clip, not the memory it needs -- the
+# engine still holds the whole thing decoded, which is what MAX_AUDIO_SECONDS below bounds.
 import json
 import logging
 import os
@@ -60,6 +60,13 @@ CLUSTERING_THRESHOLD = _args.text("--clustering-threshold")
 MIN_DURATION_OFF = _args.text("--min-duration-off")
 MIN_DURATION_ON = _args.text("--min-duration-on")
 EXCLUSIVE = _args.switch("--exclusive", False)
+# speakrs takes the whole clip as one resident f32 buffer -- run(audio: &[f32]) -- so memory grows
+# with duration and nothing streams: an hour is 230 MB, three hours 690 MB, on top of the model.
+# Passing the file path instead of the bytes saved one copy, not the buffer itself. Unbounded, a
+# long enough upload gets the container OOM-killed, which reaches the caller as a dropped
+# connection rather than an error it can act on. Four hours is past any real meeting; a deployment
+# that knows its own memory ceiling can move it.
+MAX_AUDIO_SECONDS = _args.number("--max-audio-seconds", 14400)
 _args.warn_unclaimed(log)
 
 # Wire name -> (child field, converter). Kept in one place so the request path, the ENGINE_ARGS
@@ -247,11 +254,21 @@ def build_app(supports):
                             "clustering_threshold": clustering_threshold})
         data = await file.read()
         path = await _to_thread(spill, data, file.filename)
+        # Read off the header, not a decode: this cap never holds samples, the child does. None is
+        # a real answer -- a container this cannot probe may still be one the engine reads -- so it
+        # passes rather than being refused, and bills as "not measured".
+        seconds = await _to_thread(probe_seconds, path)
+        if seconds is not None and seconds > MAX_AUDIO_SECONDS:
+            unlink(path)
+            raise HTTPException(status_code=413,
+                                detail="audio is %.0fs; this engine holds the whole clip in memory "
+                                       "and accepts at most %.0fs" % (seconds, MAX_AUDIO_SECONDS))
+        if seconds is None:
+            log.warning("could not read the duration of %s: it is neither billed nor length-checked",
+                        file.filename)
 
         def _work(ctx):
-            # Metered off the file header rather than a decode: this cap never holds samples, the
-            # child does. None is a real answer and bills as "not measured".
-            ctx.meter(input_seconds=probe_seconds(path))
+            ctx.meter(input_seconds=seconds)
             # Two stages is all the progress there is. speakrs exposes no callback inside a run,
             # and splitting the clip to fake one would change the answer -- its clustering is over
             # the whole recording, so chunks would not agree on who SPEAKER_00 is.
