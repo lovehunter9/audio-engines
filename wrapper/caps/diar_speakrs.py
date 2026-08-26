@@ -80,6 +80,38 @@ TUNABLES = {
 _state = _runtime.state
 
 
+def _duration(path):
+    """Seconds, preferring the header readers and falling back to ffprobe.
+
+    The two disagree by construction, and that gap is the whole reason for the fallback:
+    probe_seconds reads through soundfile and the stdlib wave module, while the engine decodes
+    through ffmpeg. A container the first pair cannot parse may be one the engine reads happily,
+    and that is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
+    demuxers, so what it can measure is what the engine can decode.
+
+    Local rather than in audioio because it is the only cap that needs it: every other one decodes
+    the clip itself and knows the length from the samples.
+
+    None survives as an answer. ffprobe may be absent from an image, and a file neither reader can
+    measure is one the engine almost certainly cannot decode either -- it fails on its own, before
+    any memory is spent.
+    """
+    seconds = probe_seconds(path)
+    if seconds is not None:
+        return seconds
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", path],
+            capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            return round(float(out.stdout.strip()), 3)
+        log.info("ffprobe could not measure %s: %s", path, (out.stderr or "").strip()[:200])
+    except (OSError, ValueError, subprocess.SubprocessError) as e:
+        log.info("ffprobe unusable (%s); duration stays unknown", e)
+    return None
+
+
 class _Child:
     """The speakrs engine process, and the one-job-at-a-time protocol spoken to it.
 
@@ -257,7 +289,7 @@ def build_app(supports):
         # Read off the header, not a decode: this cap never holds samples, the child does. None is
         # a real answer -- a container this cannot probe may still be one the engine reads -- so it
         # passes rather than being refused, and bills as "not measured".
-        seconds = await _to_thread(probe_seconds, path)
+        seconds = await _to_thread(_duration, path)
         if seconds is not None and seconds > MAX_AUDIO_SECONDS:
             unlink(path)
             raise HTTPException(status_code=413,
