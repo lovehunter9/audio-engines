@@ -2999,6 +2999,58 @@ def batch_over_cap(c, q, calls):
     check("the request was split at the cap, not sent whole", calls == [3, 3, 1], calls)
 
 
+def t_ov():
+    """OpenVINO base: same HTTP/WS contract, generate() only after the client stops."""
+    import json
+    from fastapi.testclient import TestClient
+    from wrapper.caps import stt_stream as q
+
+    class Pipe:
+        def __init__(self):
+            self.calls = []
+
+        def generate(self, raw, streamer=None, **kw):
+            self.calls.append({"n": len(raw), "kw": kw, "has_streamer": streamer is not None})
+            if streamer:
+                streamer("hello")
+                streamer(" world")
+            return types.SimpleNamespace(texts=["hello world"], languages=["English"])
+
+    os.environ["AUDIO_BASE"] = "ov"
+    pipe = Pipe()
+    q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
+    q._state.update(ready=True, asr=pipe, error=None)
+    pcm = b"\x00\x00" * (SR // 10)
+    with TestClient(q.build_app(["stt", "stt_stream"])) as c:
+        spec = c.get("/api/engine-spec").json()
+        check("ov base does not advertise align",
+              not [e for e in spec["endpoints"] if e.get("capability") == "align"])
+        check("ov still advertises the WS stream",
+              ("WS", "/v1/audio/stream") in mounted(c))
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "ov stt", meters=("input",))
+        pipe.calls.clear()
+        with c.websocket_connect("/v1/audio/stream") as ws:
+            ready = json.loads(ws.receive_text())
+            check("ov stream ready", ready.get("type") == "ready", ready)
+            ws.send_bytes(pcm)
+            ws.send_bytes(pcm)
+            check("ov did not transcribe while audio was still arriving",
+                  pipe.calls == [])
+            ws.send_text(json.dumps({"type": "stop"}))
+            kinds = []
+            while True:
+                msg = json.loads(ws.receive_text())
+                kinds.append(msg["type"])
+                if msg["type"] in ("closed", "error"):
+                    break
+        check("ov generate ran once after stop", len(pipe.calls) == 1, pipe.calls)
+        check("ov generate used a streamer",
+              pipe.calls and pipe.calls[0]["has_streamer"])
+        check("ov stream token-streamed after stop",
+              "partial" in kinds and "final" in kinds and "closed" in kinds, kinds)
+        check("ov stream did not error", "error" not in kinds, kinds)
+
+
 class FakeTTS:
     """Stands in for FasterQwen3TTS. The model object is the seam; everything above it is wiring."""
 
@@ -5374,6 +5426,7 @@ def main():
                            ("align", t_align, "qwen"),
                            ("whisper (fasterwhisper)", t_whisper, "fasterwhisper"),
                            ("qwen", t_qwen, "qwen"),
+                           ("ov", t_ov, "ov"),
                            ("tts", t_tts, "qwen3tts"),
                            ("tts clone", t_tts_clone, "qwen3tts"),
                            ("tts design", t_tts_design, "qwen3tts"),

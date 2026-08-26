@@ -7,6 +7,11 @@ BASES = {
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
     ],
+    # Intel iGPU / Arc: OpenVINO GenAI ASRPipeline. Same image for both Olares modes;
+    # stt_stream is decoder-token streaming after the utterance, not vLLM incremental audio.
+    "ov": [
+        (("stt", "stt_stream"), "stt_stream"),
+    ],
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],
