@@ -19,7 +19,7 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .. import tasks
 from ..gpu import mount_metrics
-from ..contract import register, EngineArgs
+from ..contract import register, EngineArgs, cache_dir
 from ..audioio import probe_seconds, spill, unlink
 from ..runtime import Runtime
 
@@ -27,6 +27,33 @@ log = logging.getLogger("audio-diar-speakrs")
 
 # The engine binary baked into the image; it speaks the line protocol described in _Child below.
 ENGINE_BIN = os.environ.get("SPEAKRS_ENGINE_BIN") or "/usr/local/bin/speakrs-engine"
+
+
+def _models_dir(repo):
+    """The directory holding this repo's weights, resolved out of the shared HF cache layout.
+
+    llm-init downloads through huggingface_hub, which stores a repo as
+    models--<owner>--<name>/snapshots/<revision>/ rather than at a path anyone can predict. The
+    engine is Rust and has no huggingface_hub to resolve that for it, so the resolution happens
+    here, where the rest of this repo's cache knowledge already lives.
+
+    Newest revision wins when several are present: a re-download leaves the old one behind, and
+    the one just fetched is the one llm-init is waiting on.
+    """
+    root = cache_dir(repo)
+    snapshots = os.path.join(root, "snapshots")
+    try:
+        revisions = [os.path.join(snapshots, r) for r in os.listdir(snapshots)]
+        revisions = [r for r in revisions if os.path.isdir(r)]
+        if revisions:
+            return max(revisions, key=os.path.getmtime)
+    except OSError:
+        pass
+    # No snapshots directory: either the weights were placed flat (a hand-built image, the
+    # benchmark box) or they are not there at all. The engine reports the missing file by name,
+    # which is a better error than one invented here from a directory listing.
+    log.info("no HF snapshot under %s; passing the directory itself to the engine", root)
+    return root
 
 _runtime = Runtime("speakrs-community-1", pipeline=None, device="cpu", params={})
 MODEL_NAME = _runtime.model_name
@@ -195,7 +222,8 @@ class _Child:
         return reply
 
 
-_child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE])
+_child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE,
+                 "--models-dir", _models_dir(MODEL_REPO)])
 
 
 def _seed():

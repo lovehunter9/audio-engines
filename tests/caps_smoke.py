@@ -330,6 +330,35 @@ def t_diar():
               r.status_code == 400, (r.status_code, r.text[:120]))
 
 
+def t_diar_speakrs_models_dir():
+    import shutil
+    import tempfile
+    from wrapper.caps import diar_speakrs as ds
+
+    root = tempfile.mkdtemp(prefix="hfcache-")
+    try:
+        os.environ["HF_HUB_CACHE"] = root
+        repo = "avencera/speakrs-models"
+        snaps = os.path.join(root, "models--avencera--speakrs-models", "snapshots")
+        # The engine is Rust and has no huggingface_hub to resolve this layout for it.
+        for name, when in (("older", 1000000), ("newer", 2000000)):
+            d = os.path.join(snaps, name)
+            os.makedirs(d)
+            os.utime(d, (when, when))
+        check("diar_speakrs resolves the HF snapshot directory",
+              ds._models_dir(repo) == os.path.join(snaps, "newer"), ds._models_dir(repo))
+
+        # A re-download leaves the previous revision in place; the fresh one is the one llm-init
+        # signalled on, so picking the older would load weights nobody asked for.
+        shutil.rmtree(snaps)
+        flat = os.path.join(root, "models--avencera--speakrs-models")
+        check("diar_speakrs falls back to the repo directory when there are no snapshots",
+              ds._models_dir(repo) == flat, ds._models_dir(repo))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        os.environ.pop("HF_HUB_CACHE", None)
+
+
 def t_diar_speakrs():
     from fastapi.testclient import TestClient
     from wrapper.caps import diar_speakrs as ds
@@ -1388,7 +1417,8 @@ def main():
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
                            ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
-                           ("diar_speakrs", t_diar_speakrs, "speakrs")):
+                           ("diar_speakrs", t_diar_speakrs, "speakrs"),
+                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

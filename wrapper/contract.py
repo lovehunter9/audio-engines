@@ -159,7 +159,8 @@ class EngineArgs:
             log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
 
 
-def _cache_dir(repo):
+def cache_dir(repo):
+    """Where the shared HF cache keeps this repo. Public because more than one module needs it."""
     cache = (os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
              or "/cache/hf/hub")
     return os.path.join(cache, "models--" + repo.replace("/", "--"))
@@ -170,7 +171,7 @@ def _disk(repo):
     if repo in _disk_facts:
         return _disk_facts[repo]
     size, mtime, exts = 0, 0.0, set()
-    for root, _dirs, files in os.walk(_cache_dir(repo)):
+    for root, _dirs, files in os.walk(cache_dir(repo)):
         for name in files:
             try:
                 st = os.lstat(os.path.join(root, name))
