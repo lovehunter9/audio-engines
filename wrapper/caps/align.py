@@ -1,4 +1,4 @@
-# Forced alignment via Qwen3-ForcedAligner: a model of its own, hence always its own instance.
+# Forced alignment (e.g. Qwen3-ForcedAligner etc.): its own checkpoint, hence always its own instance.
 import os
 import tempfile
 import logging
@@ -16,7 +16,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-align")
 
-_runtime = Runtime("Qwen/Qwen3-ForcedAligner-0.6B", model=None, device="cpu")
+_runtime = Runtime(model=None, device="cpu")
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

@@ -1,4 +1,4 @@
-# Sound effects from text: Dasheng-AudioGen in this process, the wrapper is the only server.
+# Sound effects from text (e.g. Dasheng-AudioGen etc.): in this process, the wrapper is the only server.
 #
 # A flow-matching diffusion transformer, not an LLM. There is no KV cache, no autoregression and
 # no child engine process — one AutoModel with trust_remote_code, plus the two models its config
@@ -35,7 +35,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-sound-fx")
 
-_runtime = Runtime("mispeech/Dasheng-AudioGen", model=None, dtype=None)
+_runtime = Runtime(model=None, dtype=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

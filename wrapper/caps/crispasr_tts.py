@@ -1,4 +1,4 @@
-"""Text to speech through CrispASR ggml: Voxtral-4B-TTS in this process, no child engine."""
+"""Text to speech through CrispASR ggml (e.g. Voxtral-4B-TTS etc.): in this process, no child engine."""
 import asyncio
 import base64
 import io
@@ -23,8 +23,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-crispasr-tts")
 
-_runtime = Runtime("mistralai/Voxtral-4B-TTS-2603", default_repo="cstr/voxtral-4b-tts-GGUF",
-                   session=None, speakers=[], out_sr=0, quant="", voice_set="")
+_runtime = Runtime(session=None, speakers=[], out_sr=0, quant="", voice_set="")
 MODEL_NAME = _runtime.model_name
 # MODEL_SOURCE may carry llm-init flags after the repo (`--include a.gguf`); those are not a hub id.
 MODEL_REPO = (_runtime.model_repo.split() or [""])[0]

@@ -16,8 +16,6 @@ from ..runtime import Runtime
 log = logging.getLogger("audio-diar-stream")
 
 _runtime = Runtime(
-    "diar-streaming-sortformer",
-    default_repo="nvidia/diar_streaming_sortformer_4spk-v2.1",
     model=None,
     device="cpu",
 )

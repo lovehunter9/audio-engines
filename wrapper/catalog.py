@@ -19,7 +19,8 @@ BASES = {
     "nemo": [
         (("diar_stream",), "diar_stream"),
     ],
-    # Qwen3-TTS in-process: CustomVoice weights serve tts, Base weights serve tts_clone.
+    # Qwen3-TTS in-process: which routes a checkpoint can honour is read off the weights
+    # (e.g. CustomVoice -> tts, Base -> tts_clone, VoiceDesign -> tts, etc.).
     "qwen3tts": [
         (("tts", "tts_clone"), "tts"),
     ],
