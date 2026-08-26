@@ -345,6 +345,19 @@ def t_diar_speakrs_models_dir():
             d = os.path.join(snaps, name)
             os.makedirs(d)
             os.utime(d, (when, when))
+        # llm-init writes the resolved path for engines that share its run directory. Guessing
+        # when we have been told is how the two answers drift apart.
+        told_dir = tempfile.mkdtemp(prefix="rundir-")
+        try:
+            with open(os.path.join(told_dir, "model_path"), "w") as f:
+                f.write("/somewhere/llm-init/decided\n")
+            ds.RUN_DIR = told_dir
+            check("diar_speakrs prefers the path llm-init wrote over the cache layout",
+                  ds._models_dir(repo) == "/somewhere/llm-init/decided", ds._models_dir(repo))
+        finally:
+            shutil.rmtree(told_dir, ignore_errors=True)
+            ds.RUN_DIR = "/nonexistent-run-dir"
+
         check("diar_speakrs resolves the HF snapshot directory",
               ds._models_dir(repo) == os.path.join(snaps, "newer"), ds._models_dir(repo))
 

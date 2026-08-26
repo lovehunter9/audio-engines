@@ -29,8 +29,16 @@ log = logging.getLogger("audio-diar-speakrs")
 ENGINE_BIN = os.environ.get("SPEAKRS_ENGINE_BIN") or "/usr/local/bin/speakrs-engine"
 
 
+# llm-init writes the resolved model path here for engines that share its run directory
+# (RUN_DIR/model_path, one absolute line, written atomically). The audio engine deployments do
+# not mount that directory -- their pod carries the HF cache and nothing else -- so this is a
+# preference, not a dependency: when the file is there it is authoritative and no guessing is
+# needed, and when it is not, the cache layout below answers.
+RUN_DIR = os.environ.get("RUN_DIR") or "/run/llm-init"
+
+
 def _models_dir(repo):
-    """The directory holding this repo's weights, resolved out of the shared HF cache layout.
+    """The directory holding this repo's weights.
 
     llm-init downloads through huggingface_hub, which stores a repo as
     models--<owner>--<name>/snapshots/<revision>/ rather than at a path anyone can predict. The
@@ -40,6 +48,15 @@ def _models_dir(repo):
     Newest revision wins when several are present: a re-download leaves the old one behind, and
     the one just fetched is the one llm-init is waiting on.
     """
+    told = os.path.join(RUN_DIR, "model_path")
+    try:
+        with open(told) as f:
+            path = f.read().strip()
+        if path:
+            log.info("llm-init resolved the model path for us: %s", path)
+            return path
+    except OSError:
+        pass
     root = cache_dir(repo)
     snapshots = os.path.join(root, "snapshots")
     try:
