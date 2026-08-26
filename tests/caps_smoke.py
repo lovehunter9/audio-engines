@@ -330,6 +330,83 @@ def t_diar():
               r.status_code == 400, (r.status_code, r.text[:120]))
 
 
+def t_diar_speakrs():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import diar_speakrs as ds
+
+    sent = []
+
+    def fake_run(payload):
+        sent.append(payload)
+        return {"ok": True, "device": "cuda",
+                "segments": [[0.0, 1.5, "SPEAKER_00"], [1.5, 3.0, "SPEAKER_01"]]}
+
+    ds._child.run = fake_run
+    ds._state.update(ready=True, error=None, device="cuda", params={})
+    with TestClient(ds.build_app(["diar"])) as c:
+        advertises_tasks(c, "diar_speakrs")
+        doc = both_ways(c, "/v1/audio/diarization", WAV, {}, "diar_speakrs",
+                        meters=("input",))
+        # both_ways hands back the task document; the diarization itself is its result.
+        body = doc["result"]
+        check("diar_speakrs names the speakers it found",
+              body["num_speakers"] == 2 and body["speakers"] == ["SPEAKER_00", "SPEAKER_01"],
+              (body["num_speakers"], body["speakers"]))
+        check("diar_speakrs reports the device the engine ran on",
+              body["device"] == "cuda", body["device"])
+
+        # The whole reason this engine cannot stand in for pyannote everywhere. Accepting the
+        # constraint and quietly ignoring it would leave a caller unable to tell that it was
+        # dropped, so the only honest answer is a 400 naming the parameters it refused.
+        for field in ("num_speakers", "min_speakers", "max_speakers"):
+            r = c.post("/v1/audio/diarization", files=WAV, data={field: "3"})
+            check("diar_speakrs refuses %s rather than ignoring it" % field,
+                  r.status_code == 400 and field in r.json()["detail"],
+                  (r.status_code, r.json()))
+
+        # Seconds on the wire, frames to the engine: every other engine in this repo states
+        # durations in seconds, and speakrs states them in frames.
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV, data={"min_duration_off": "0.5"})
+        check("diar_speakrs converts seconds to frames for the engine",
+              sent[-1]["min_duration_off_frames"] == 30, sent[-1]["min_duration_off_frames"])
+
+        # 🔴 Unset and zero must stay different: speakrs' fast modes default this filter to 3
+        # frames, so sending 0 for "the caller said nothing" would silently switch it off.
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs sends null, not 0, for a knob nobody set",
+              sent[-1]["min_duration_off_frames"] is None, sent[-1]["min_duration_off_frames"])
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV, data={"min_duration_off": "0"})
+        check("diar_speakrs sends 0 when a caller really asked for 0",
+              sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
+
+        sent.clear()
+        doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
+        check("diar_speakrs passes exclusive through and echoes what ran",
+              sent[-1]["exclusive"] is True and doc["exclusive"] is True,
+              (sent[-1]["exclusive"], doc["exclusive"]))
+
+        # A dead child must read as "not ready", never as an empty result: zero segments is a
+        # legitimate answer for silent audio, so it can never double as an error.
+        def dead(_payload):
+            raise RuntimeError("engine process exited with code 1")
+
+        ds._child.run = dead
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs fails the job when the engine is gone",
+              r.status_code == 500, (r.status_code, r.text[:120]))
+
+    ds._child.run = fake_run
+    ds._state.update(ready=False, error="engine failed to load the model")
+    with TestClient(ds.build_app(["diar"])) as c:
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs 503s while the engine is loading",
+              r.status_code == 503 and "load" in r.json()["detail"],
+              (r.status_code, r.json()))
+
+
 def t_embed():
     from fastapi.testclient import TestClient
     from wrapper.caps import embed
@@ -1273,7 +1350,8 @@ def main():
                            ("sound_fx not ready", t_sound_fx_not_ready, "dasheng"),
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
-                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx")):
+                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
+                           ("diar_speakrs", t_diar_speakrs, "speakrs")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:
