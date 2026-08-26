@@ -234,14 +234,21 @@ def _ensure_ov_ir(src):
     if _looks_like_ov_ir(nested):
         return nested
     dest = nested
+    if os.path.isdir(dest) and not _looks_like_ov_ir(dest):
+        import shutil
+        _p("removing incomplete export dir %s" % dest)
+        shutil.rmtree(dest)
     _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
     os.makedirs(dest, exist_ok=True)
     import subprocess
     import sys
 
+    # Local snapshots cannot infer the HF pipeline task; without this,
+    # optimum-cli raises RuntimeError: Cannot infer the task from a local directory.
     cmd = [
         "optimum-cli", "export", "openvino",
         "--model", src,
+        "--task", "automatic-speech-recognition",
         "--trust-remote-code",
         dest,
     ]
