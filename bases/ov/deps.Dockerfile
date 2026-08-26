@@ -24,8 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 # No CUDA torch. optimum[openvino] may pull a CPU torch; that is only for first-start IR export.
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
-    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+# Do not `pip install --upgrade pip`: Ubuntu's pip has no RECORD file and the upgrade aborts the build.
+RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
         openvino-genai \
         "optimum[openvino]" \
