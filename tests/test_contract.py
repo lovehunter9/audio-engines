@@ -295,6 +295,7 @@ class RuntimeHelperTest(unittest.TestCase):
                     "pipeline": None,
                     "device": "cpu",
                     "batch1": False,
+                    "params": {},
                 },
             },
             "diar_stream": {

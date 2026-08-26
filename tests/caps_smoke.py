@@ -6,6 +6,7 @@ wiring (form fields, dispatch, progress, result shape), which is exactly where a
     python tests/caps_smoke.py        # needs fastapi, httpx, numpy, python-multipart
 """
 import base64
+import copy
 import io
 import os
 import sys
@@ -202,24 +203,57 @@ def t_diar():
     from wrapper.caps import diar
 
     class Ann:
+        def __init__(self, *spans):
+            self.spans = spans
+
         def itertracks(self, yield_label=False):
-            yield Seg(0.0, 1.5), None, "SPEAKER_00"
-            yield Seg(1.5, 3.0), None, "SPEAKER_01"
+            for start, end, spk in self.spans:
+                yield Seg(start, end), None, spk
 
-    seen = {"hook": 0}
+    CLEAN = Ann((0.0, 1.5, "SPEAKER_00"), (1.5, 3.0, "SPEAKER_01"))
+    OVERLAP = Ann((0.0, 2.0, "SPEAKER_00"), (1.5, 3.0, "SPEAKER_01"))
 
-    def pipe(_inp, hook=None, **kw):
-        for i in range(4):
+    class Out:
+        """What pyannote 4 hands back: two diarizations and the clustering's centroids."""
+
+        def __init__(self, exclusive=True, centroids=((0.1, 0.2), (0.3, 0.4))):
+            self.speaker_diarization = OVERLAP
+            if exclusive:
+                self.exclusive_speaker_diarization = CLEAN
+            if centroids is not None:
+                self.speaker_embeddings = centroids
+
+    seen = {"hook": 0, "at_call": None}
+
+    class Pipe:
+        """A pipeline whose hyper-parameters can be read and written, as pyannote's can."""
+
+        def __init__(self):
+            self.out = None  # None = the v3 shape, a bare Annotation
+            self.params = {"segmentation": {"min_duration_off": 0.0},
+                           "clustering": {"threshold": 0.6, "method": "centroid"}}
+
+        def parameters(self, instantiated=False):
+            return self.params
+
+        def instantiate(self, params):
+            self.params = params
+
+        def __call__(self, _inp, hook=None, **kw):
+            seen["at_call"] = copy.deepcopy(self.params)
+            for i in range(4):
+                if hook:
+                    seen["hook"] += 1
+                    hook("segmentation", None, total=4, completed=i + 1)
+                time.sleep(0.05)
             if hook:
-                seen["hook"] += 1
-                hook("segmentation", None, total=4, completed=i + 1)
-            time.sleep(0.05)
-        if hook:
-            hook("embeddings", None, total=2, completed=1)
-        return Ann()
+                hook("embeddings", None, total=2, completed=1)
+            return CLEAN if self.out is None else self.out
 
+    pipe = Pipe()
     diar.decode = lambda *a, **k: (Wav(), SR)
     diar._state.update(ready=True, pipeline=pipe, device="cpu")
+    diar._seed(pipe)
     with TestClient(diar.build_app(["diar"])) as c:
         advertises_tasks(c, "diar")
         doc = both_ways(c, "/v1/audio/diarization", WAV, {"num_speakers": "2"}, "diar",
@@ -245,6 +279,55 @@ def t_diar():
               and (mid["progress"].get("total") or 0) == 4,
               (seen["hook"], mid.get("progress")))
         poll(c, r.json()["task"]["id"])
+
+        pipe.out = Out()
+        doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
+        check("exclusive=1 answers with the turns that do not overlap",
+              doc.get("exclusive") is True and doc["segments"][0]["end"] == 1.5, doc.get("segments"))
+        doc = c.post("/v1/audio/diarization", files=WAV).json()
+        check("without exclusive the overlapping turns stand",
+              doc.get("exclusive") is False and doc["segments"][0]["end"] == 2.0,
+              doc.get("segments"))
+        check("centroids come back keyed by the speaker they belong to",
+              sorted(doc.get("speaker_centroids") or {}) == ["SPEAKER_00", "SPEAKER_01"],
+              doc.get("speaker_centroids"))
+
+        pipe.out = Out(exclusive=False)
+        doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
+        check("a build without exclusive diarization says so rather than failing",
+              doc.get("exclusive") is False and doc["num_segments"] == 2, doc.get("exclusive"))
+
+        # A cluster that produced no turn shifts every label after it, so the rows can no
+        # longer be named; and a NaN would leave the response unparseable to a strict client.
+        for label, centroids in (("a centroid with no turns", ((0.1,), (0.2,), (0.3,))),
+                                 ("a non-finite centroid", ((float("nan"), 0.2), (0.3, 0.4)))):
+            pipe.out = Out(centroids=centroids)
+            doc = c.post("/v1/audio/diarization", files=WAV).json()
+            check("%s drops the centroids rather than mislabelling them" % label,
+                  "speaker_centroids" not in doc, doc.get("speaker_centroids"))
+
+        pipe.out = Out()
+        base = copy.deepcopy(diar._state["params"])
+        doc = c.post("/v1/audio/diarization", files=WAV,
+                     data={"min_duration_off": "0.5", "clustering_threshold": "0.8"}).json()
+        check("a request's hyper-parameters are in force while it runs",
+              seen["at_call"]["segmentation"]["min_duration_off"] == 0.5
+              and seen["at_call"]["clustering"]["threshold"] == 0.8, seen["at_call"])
+        check("and the response says which values ran",
+              doc.get("min_duration_off") == 0.5 and doc.get("clustering_threshold") == 0.8, doc)
+        check("the pipeline is left as it was found", pipe.params == base, pipe.params)
+        doc = c.post("/v1/audio/diarization", files=WAV).json()
+        check("so the next request sees the pipeline's own values",
+              doc.get("min_duration_off") == 0.0 and doc.get("clustering_threshold") == 0.6, doc)
+        r = c.post("/v1/audio/diarization", files=WAV, data={"clustering_threshold": "high"})
+        check("an unparsable hyper-parameter is a 400, not a job that fails later",
+              r.status_code == 400, (r.status_code, r.text[:120]))
+
+        pipe.params = {"segmentation": {"min_duration_off": 0.0}}
+        diar._seed(pipe)
+        r = c.post("/v1/audio/diarization", files=WAV, data={"clustering_threshold": "0.8"})
+        check("a knob this pipeline does not have is refused up front",
+              r.status_code == 400, (r.status_code, r.text[:120]))
 
 
 def t_embed():
