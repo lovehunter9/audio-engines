@@ -26,7 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libze1 \
         ocl-icd-libopencl1 \
         clinfo \
-    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /tmp/neo && cd /tmp/neo \
     && curl -fsSL -O "https://github.com/intel/intel-graphics-compiler/releases/download/${IGC_TAG}/intel-igc-core-2_${IGC_DEB}_amd64.deb" \
     && curl -fsSL -O "https://github.com/intel/intel-graphics-compiler/releases/download/${IGC_TAG}/intel-igc-opencl-2_${IGC_DEB}_amd64.deb" \
