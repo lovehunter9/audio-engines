@@ -204,14 +204,43 @@ def _patch_max_input(seconds):
            % (int(seconds), ", ".join(patched)))
 
 
-def _looks_like_ov_ir(path):
-    if not path or not os.path.isdir(path):
-        return False
+def _xml_has_input(path, name, limit=1048576):
+    """True if an OpenVINO IR lists `name` in the first `limit` bytes (graph inputs sit there)."""
     try:
-        names = os.listdir(path)
+        with open(path, "rb") as f:
+            head = f.read(limit)
     except OSError:
         return False
-    return any(n.endswith(".xml") for n in names)
+    return name.encode("ascii") in head
+
+
+def _looks_like_ov_ir(path):
+    """GenAI's Qwen3ASRDecoder compiles openvino_decoder_model.xml and sets beam_idx.
+
+    Any .xml is not enough: `--task automatic-speech-recognition` (no -with-past)
+    writes a Whisper-style stateless decoder. ASRPipeline then 500s with
+    'Port for tensor name beam_idx was not found.'
+    """
+    if not path or not os.path.isdir(path):
+        return False
+    enc = os.path.join(path, "openvino_encoder_model.xml")
+    dec = os.path.join(path, "openvino_decoder_model.xml")
+    if not (os.path.isfile(enc) and os.path.isfile(dec)):
+        return False
+    return _xml_has_input(dec, "beam_idx")
+
+
+def _ov_export_cmd(src, dest):
+    # Local snapshots cannot infer the HF pipeline task. Hub `auto` then
+    # upgrades ASR to `-with-past` (stateful decoder, beam_idx in OpenVINO
+    # state). Passing the task without that suffix skips the upgrade.
+    return [
+        "optimum-cli", "export", "openvino",
+        "--model", src,
+        "--task", "automatic-speech-recognition-with-past",
+        "--trust-remote-code",
+        dest,
+    ]
 
 
 def _resolve_hf_dir(repo):
@@ -227,6 +256,7 @@ def _ensure_ov_ir(src):
 
     Prefer an `openvino/` subdir (what the chart can ship) or xml already in src;
     otherwise export once next to the snapshot so the next start skips this.
+    A previous start that exported the stateless decoder is treated as missing.
     """
     nested = os.path.join(src, "openvino")
     if _looks_like_ov_ir(src):
@@ -236,26 +266,21 @@ def _ensure_ov_ir(src):
     dest = nested
     if os.path.isdir(dest) and not _looks_like_ov_ir(dest):
         import shutil
-        _p("removing incomplete export dir %s" % dest)
+        _p("removing unusable export dir %s (need encoder+decoder with beam_idx)" % dest)
         shutil.rmtree(dest)
     _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
     os.makedirs(dest, exist_ok=True)
     import subprocess
-    import sys
 
-    # Local snapshots cannot infer the HF pipeline task; without this,
-    # optimum-cli raises RuntimeError: Cannot infer the task from a local directory.
-    cmd = [
-        "optimum-cli", "export", "openvino",
-        "--model", src,
-        "--task", "automatic-speech-recognition",
-        "--trust-remote-code",
-        dest,
-    ]
+    cmd = _ov_export_cmd(src, dest)
     _p("running: %s" % " ".join(cmd))
     subprocess.check_call(cmd)
     if not _looks_like_ov_ir(dest):
-        raise RuntimeError("optimum-cli export finished but %s has no .xml" % dest)
+        raise RuntimeError(
+            "optimum-cli export finished but %s is not a GenAI ASR IR "
+            "(need openvino_encoder_model.xml + openvino_decoder_model.xml with beam_idx)"
+            % dest
+        )
     return dest
 
 
@@ -1206,7 +1231,9 @@ def _text_and_language(r):
 def _offline_transcribe(audio, language=None, context=""):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     if _is_ov():
-        return _ov_result_text(_ov_generate(audio, language=language))
+        # context/glossary is a Qwen CUDA generate() argument; OV ASRPipeline has no hook.
+        result = _ov_generate(audio, language=language)
+        return _ov_result_text(result), _ov_result_language(result, language)
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", _MISSING) if sp is not None else _MISSING
