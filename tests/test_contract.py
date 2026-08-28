@@ -584,6 +584,85 @@ class OpenVINOModeTest(unittest.TestCase):
         text = gpu.gpu_metrics_text()
         self.assertIn("gpu_present 0", text)
 
+    def test_looks_like_ov_ir_rejects_stateless_whisper_decoder(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(q._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+            self.assertFalse(q._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/><layer name=\"input_ids\"/></net>")
+            self.assertTrue(q._looks_like_ov_ir(td))
+
+    def test_ov_export_cmd_uses_with_past(self):
+        from wrapper.caps import stt_stream as q
+
+        cmd = q._ov_export_cmd("/src", "/dest")
+        self.assertEqual(cmd[cmd.index("--task") + 1],
+                         "automatic-speech-recognition-with-past")
+        self.assertNotIn("automatic-speech-recognition", cmd)
+
+    def test_ensure_ov_ir_drops_stateless_cache_and_reexports(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as src:
+            nested = os.path.join(src, "openvino")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(nested, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+
+            def fake_export(cmd, *a, **k):
+                dest = cmd[-1]
+                os.makedirs(dest, exist_ok=True)
+                with open(os.path.join(dest, "openvino_encoder_model.xml"), "w") as f:
+                    f.write("<net/>")
+                with open(os.path.join(dest, "openvino_decoder_model.xml"), "w") as f:
+                    f.write("<net><layer name=\"beam_idx\"/></net>")
+
+            with mock.patch("subprocess.check_call", side_effect=fake_export) as cc:
+                out = q._ensure_ov_ir(src)
+            self.assertEqual(out, nested)
+            argv = cc.call_args[0][0]
+            self.assertEqual(argv[argv.index("--task") + 1],
+                             "automatic-speech-recognition-with-past")
+            self.assertTrue(q._looks_like_ov_ir(out))
+
+    def test_ensure_ov_ir_skips_export_when_beam_idx_ir_exists(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as src:
+            nested = os.path.join(src, "openvino")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(nested, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/></net>")
+            with mock.patch("subprocess.check_call") as cc:
+                self.assertEqual(q._ensure_ov_ir(src), nested)
+            cc.assert_not_called()
+
+    def test_ov_warmup_failure_fails_load(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "_is_ov", return_value=True):
+            with mock.patch.object(q, "_offline_transcribe", side_effect=RuntimeError("beam_idx")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    q._warmup()
+        self.assertIn("openvino warmup failed", str(ctx.exception))
+
+    def test_vllm_warmup_failure_does_not_block_ready(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "_is_ov", return_value=False):
+            with mock.patch.object(q, "_offline_transcribe", side_effect=RuntimeError("cold")):
+                q._warmup()
+
 
 class SharedHelperTest(unittest.TestCase):
     def test_audioio_import_does_not_require_numpy(self):
