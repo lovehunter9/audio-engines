@@ -201,6 +201,8 @@ passes. For the same reason the build's final import check must go **through**
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
+| `firered` | `beclab/audio-firered` | `tts`, `tts_clone` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
+| `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
@@ -355,6 +357,20 @@ in a preset voice. And the binding exposes whole-utterance synthesis only, so
 `stream=1` is sentence-scoped, which is why this base mounts no WebSocket route.
 Output is watermarked: `synthesize()` marks its audio and the unmarked variant
 needs an explicit EU AI Act Art. 50 attestation, which is deliberately not given.
+
+**`firered` / `breeze`.** Two bases, one HTTP surface (`wrapper/caps/tts_el.py`).
+Boss requirement is one llm-init instance that lists voices, clones, designs, and
+speaks — ElevenLabs `voice_id` first (`GET /v1/voices`, `POST /v1/voices/add`,
+`POST /v1/text-to-voice/design` then create, `POST /v1/text-to-speech/{voice_id}`),
+with OpenAI `/v1/audio/speech` kept as aliases. Neither model ships a preset
+catalog: premade ids are design prompts that freeze a sample onto the instance
+PVC the first time they are spoken, then replay through clone. FireRed loads
+**Instruct only** (`FireRedTTS3Instruct`); Base is a second 8.5 GiB checkpoint
+that cannot stay resident and is `--exclude`d from `MODEL_SOURCE`. Breeze is the
+single 3B. Both images clone upstream at a pinned SHA (same `.pth` trick as
+`soulx`) and run official PyTorch in-process. `flash_attn` is not built: Instruct
+accepts SDPA. Clone always needs the reference transcript (`description` /
+`ref_text`).
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy
