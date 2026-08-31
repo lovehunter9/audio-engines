@@ -1286,6 +1286,141 @@ def t_crispasr_not_ready():
             check("crispasr %s says why" % path, "missing" in r.text, r.text[:120])
 
 
+class FakeELBackend:
+    sample_rate = 24000
+
+    def __init__(self):
+        self.calls = []
+
+    def presets(self):
+        return [{"voice_id": "p1", "name": "Preset One", "category": "premade",
+                 "instruction": "A clear young female voice.",
+                 "sample_text": "Hello there friend.",
+                 "description": "test preset"}]
+
+    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        self.calls.append(("clone", text, prompt_text))
+        n = max(2400, len(text) * 120)
+        return np.zeros(n, dtype="float32"), 24000
+
+    def design(self, instruction, text, **kw):
+        self.calls.append(("design", instruction, text))
+        n = max(2400, len(text) * 120)
+        return np.zeros(n, dtype="float32"), 24000, {"plan": "ok"}
+
+
+def t_firered_triplet_pad():
+    from wrapper.caps.firered import as_tts_triplet
+
+    check("2-tuple becomes a triplet", as_tts_triplet(("a", 24000)) == ("a", 24000, None))
+    check("triplet is left alone", as_tts_triplet(("a", 24000, "x")) == ("a", 24000, "x"))
+
+
+def t_tts_el(module_name="firered"):
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    fake_soundfile()
+    backend = FakeELBackend()
+    root = tempfile.mkdtemp(prefix="el-voices-")
+    store = tts_el.VoiceStore(root, backend.presets())
+    tts_el.install(backend, store=store)
+    build = __import__("wrapper.caps.%s" % module_name, fromlist=["build_app"]).build_app
+    wav = wav_of(0.4)
+
+    with TestClient(build(["tts", "tts_clone"])) as c:
+        advertises_tasks(c, module_name)
+        spec_paths = mounted(c)
+        check("%s advertises ElevenLabs list/design/speak" % module_name,
+              ("GET", "/v1/voices") in spec_paths
+              and ("POST", "/v1/text-to-voice/design") in spec_paths
+              and ("POST", "/v1/text-to-speech/{voice_id}") in spec_paths
+              and ("POST", "/v1/voices/add") in spec_paths,
+              sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
+        listed = c.get("/v1/voices").json()["voices"]
+        check("%s lists premade voices before they are frozen" % module_name,
+              listed and listed[0]["voice_id"] == "p1" and listed[0]["category"] == "premade",
+              listed)
+        check("%s OpenAI voices alias uses id" % module_name,
+              c.get("/v1/audio/voices").json()["voices"][0]["id"] == "p1")
+        r = c.post("/v1/text-to-speech/p1", json={"text": "hello from eleven"})
+        check("%s speaks a premade voice_id" % module_name, r.status_code == 200,
+              (r.status_code, r.text[:120]))
+        check("%s first premade speak froze a design sample" % module_name,
+              any(call[0] == "design" for call in backend.calls)
+              and any(call[0] == "clone" for call in backend.calls),
+              backend.calls)
+        r2 = c.post("/v1/audio/speech", json={"input": "hello again", "voice": "p1"})
+        check("%s OpenAI alias speaks the same voice_id" % module_name, r2.status_code == 200,
+              r2.status_code)
+        preview = c.post("/v1/text-to-voice/design",
+                         json={"voice_description": "A raspy pirate", "text": "Ahoy there"})
+        check("%s design returns a generated_voice_id" % module_name, preview.status_code == 200,
+              (preview.status_code, preview.text[:160]))
+        gid = (preview.json().get("previews") or [{}])[0].get("generated_voice_id")
+        created = c.post("/v1/text-to-voice",
+                         json={"generated_voice_id": gid, "voice_name": "Pirate"})
+        check("%s persist design yields a voice_id" % module_name,
+              created.status_code == 200 and created.json().get("voice_id"),
+              created.text[:160])
+        add = c.post("/v1/voices/add",
+                     data={"name": "Me", "description": "this is the transcript"},
+                     files={"file": ("r.wav", wav, "audio/wav")})
+        check("%s clone add returns voice_id" % module_name,
+              add.status_code == 200 and add.json().get("voice_id"),
+              (add.status_code, add.text[:160]))
+        vid = add.json().get("voice_id")
+        check("%s advertises delete and edit" % module_name,
+              ("DELETE", "/v1/voices/{voice_id}") in spec_paths
+              and ("POST", "/v1/voices/{voice_id}/edit") in spec_paths,
+              sorted(p[1] for p in spec_paths if "voices" in p[1]))
+        edited = c.post("/v1/voices/%s/edit" % vid, data={"name": "Renamed"})
+        check("%s edit returns ok" % module_name,
+              edited.status_code == 200 and edited.json().get("status") == "ok",
+              (edited.status_code, edited.text[:160]))
+        check("%s edit updates GET" % module_name,
+              c.get("/v1/voices/%s" % vid).json().get("name") == "Renamed")
+        check("%s edit unknown is 404" % module_name,
+              c.post("/v1/voices/nobody/edit", data={"name": "X"}).status_code == 404)
+        check("%s edit premade is 400" % module_name,
+              c.post("/v1/voices/p1/edit", data={"name": "Nope"}).status_code == 400)
+        deleted = c.delete("/v1/voices/%s" % vid)
+        check("%s delete clone returns ok" % module_name,
+              deleted.status_code == 200 and deleted.json().get("status") == "ok",
+              (deleted.status_code, deleted.text[:160]))
+        check("%s deleted voice is gone" % module_name,
+              c.get("/v1/voices/%s" % vid).status_code == 404)
+        check("%s delete premade is 400" % module_name,
+              c.delete("/v1/voices/p1").status_code == 400)
+        check("%s delete unknown is 404" % module_name,
+              c.delete("/v1/voices/nobody").status_code == 404)
+        check("%s clone without a transcript is a 400" % module_name,
+              c.post("/v1/voices/add", data={"name": "Nope"},
+                     files={"file": ("r.wav", wav, "audio/wav")}).status_code == 400)
+        check("%s empty text is a 400" % module_name,
+              c.post("/v1/text-to-speech/p1", json={"text": "  "}).status_code == 400)
+        check("%s unknown voice_id is a 404" % module_name,
+              c.post("/v1/text-to-speech/nobody", json={"text": "hi"}).status_code == 404)
+        check("%s stream rejects async=1" % module_name,
+              c.post("/v1/text-to-speech/p1/stream?async=1",
+                     json={"text": "later"}).status_code == 400)
+        async_r = c.post("/v1/text-to-speech/p1?async=1", json={"text": "later"})
+        check("%s async 202" % module_name, async_r.status_code == 202, async_r.text[:120])
+        if async_r.status_code == 202:
+            doc = poll(c, async_r.json()["task"]["id"])
+            check("%s async task succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            contract(c, doc, module_name)
+
+    tts_el._state.update(ready=False, error="weights are missing", backend=None, store=None)
+    with TestClient(build(["tts", "tts_clone"])) as c:
+        r = c.get("/v1/voices")
+        check("%s list is 503 while loading" % module_name, r.status_code == 503
+              and "weights are missing" in r.text, r.text[:100])
+
+
 def t_engine_args():
     # Every knob is a flag in ENGINE_ARGS now, so this parser is the one gate they all pass through.
     from wrapper.contract import EngineArgs
@@ -1339,7 +1474,10 @@ def main():
                            ("sound_fx not ready", t_sound_fx_not_ready, "dasheng"),
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
-                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx")):
+                           ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
+                           ("firered elevenlabs", lambda: t_tts_el("firered"), "firered"),
+                           ("breeze elevenlabs", lambda: t_tts_el("breeze"), "breeze"),
+                           ("firered triplet pad", t_firered_triplet_pad, "firered")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

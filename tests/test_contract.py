@@ -62,6 +62,32 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     },
 }
 
+_EL_TTS_ROUTES = (
+    ("GET", "/v1/voices", False),
+    ("GET", "/v1/voices/{voice_id}", False),
+    ("DELETE", "/v1/voices/{voice_id}", False),
+    ("POST", "/v1/voices/{voice_id}/edit", False),
+    ("POST", "/v1/text-to-voice/design", True),
+    ("POST", "/v1/text-to-voice", True),
+    ("POST", "/v1/text-to-speech/{voice_id}", True),
+    ("POST", "/v1/text-to-speech/{voice_id}/stream", False),
+    ("GET", "/v1/audio/voices", False),
+    ("POST", "/v1/audio/speech", True),
+)
+_EL_CLONE_ROUTES = (
+    ("POST", "/v1/voices/add", True),
+    ("POST", "/v1/audio/speech/clone", True),
+)
+for _el_mod in ("firered", "breeze"):
+    for _method, _path, _async in _EL_TTS_ROUTES:
+        EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts", _method, _path)] = {
+            "async_supported": _async,
+        }
+    for _method, _path, _async in _EL_CLONE_ROUTES:
+        EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
+            "async_supported": _async,
+        }
+
 TASK_PATHS = {
     "/v1/tasks",
     "/v1/tasks/{id}",
@@ -134,6 +160,12 @@ class CatalogContractTest(unittest.TestCase):
                 metadata = {"async_supported": endpoint["async_supported"]}
                 actual_metadata[key] = metadata
         self.assertEqual(actual_metadata, EXPECTED_CAPABILITY_ENDPOINTS)
+
+    def test_el_instance_does_not_advertise_the_same_route_twice(self):
+        for module in ("firered", "breeze"):
+            rows = catalog.endpoints(module, ["tts", "tts_clone"])
+            keys = [(row["method"], row["path"]) for row in rows]
+            self.assertEqual(keys, list(dict.fromkeys(keys)), module)
 
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}
@@ -665,6 +697,17 @@ class EngineSurfaceTest(unittest.TestCase):
 
         self.assertEqual(samples, expected)
         self.assertEqual(type_declarations, {f"# TYPE {name} gauge" for name in expected})
+
+
+class BreezeAttnFallbackTest(unittest.TestCase):
+    def test_flash_rewritten_to_requested(self):
+        from wrapper.caps.breeze import _fallback_attn
+
+        self.assertEqual(_fallback_attn("eager", "flash_attention_2"), "eager")
+        self.assertEqual(_fallback_attn("sdpa", "flash_attention_3"), "sdpa")
+        self.assertEqual(_fallback_attn("eager", "eager"), "eager")
+        self.assertEqual(_fallback_attn("eager", None), "eager")
+        self.assertEqual(_fallback_attn("", "flash_attention_2"), "eager")
 
 
 if __name__ == "__main__":
