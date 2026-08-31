@@ -13,7 +13,7 @@
 # engine image by digest puts the engine's identity inside the hashed file, so rebuilding the
 # engine forces a new line here, which forces a new deps tag. The chain holds without anyone
 # remembering to bump anything.
-ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+ARG ENGINE_IMAGE=docker.io/olareshzy/speakrs-engine@sha256:e1c62272114b6f67e1ff91932228cca1fb68afc80235dbc2fac029532a54cd0a
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
@@ -22,8 +22,14 @@ ARG DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv libsndfile1 libcudnn9-cuda-12 ca-certificates; \
+        python3 python3-pip python3-venv libsndfile1 libcudnn9-cuda-12 ca-certificates \
+        ffmpeg; \
     rm -rf /var/lib/apt/lists/*
+
+# ffmpeg is the engine's decoder, not a convenience: speakrs takes 16 kHz mono f32 and the Rust
+# side shells out to convert, so without it every diarization fails at the first request with
+# "could not run ffmpeg" -- while the model loads, /v1/models answers 200 and every contract and
+# capability check passes. Nothing short of sending audio finds it.
 
 # The shell only serves HTTP, reads a file header for billing, and reads NVML. Everything that
 # touches audio samples or the model happens in the engine process.
@@ -34,6 +40,10 @@ COPY --from=engine /usr/local/bin/speakrs-engine /usr/local/bin/speakrs-engine
 # ONNX Runtime's CUDA provider libraries travel with the engine that dlopen's them, so the two can
 # never be a version apart.
 COPY --from=engine /usr/local/lib/onnxruntime/ /usr/local/lib/onnxruntime/
+# ort's load-dynamic dlopen's libonnxruntime.so by an explicit search list -- the binary's own
+# directory, the cwd, and cargo target dirs -- and never consults the ldconfig cache. ldconfig
+# alone therefore left the engine unable to find a library sitting right there.
+ENV ORT_DYLIB_PATH=/usr/local/lib/onnxruntime/libonnxruntime.so
 RUN ldconfig /usr/local/lib/onnxruntime && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 # Import-check the shell's deps, and prove the engine binary is the right architecture and runs.
