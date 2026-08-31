@@ -48,8 +48,13 @@ RUN ldconfig /usr/local/lib/onnxruntime && ln -sf "$(command -v python3)" /usr/l
 
 # Import-check the shell's deps, and prove the engine binary is the right architecture and runs.
 # A wrong-arch copy survives build and push and only shows up as "exec format error" in a pod.
+# ffmpeg is checked here and not left to a probe on purpose: a shell-out dependency shows up in
+# no import, no requirements file and no health endpoint, so the first thing that notices is a
+# request carrying audio -- long after the image shipped and the engine reported itself ready.
 RUN python3 -c "import fastapi, uvicorn, multipart, soundfile, pynvml; \
     print('soundfile', soundfile.__libsndfile_version__)" \
+    && ffmpeg -version | head -1 \
+    && ffprobe -version | head -1 \
     && /usr/local/bin/speakrs-engine --version
 
 LABEL org.opencontainers.image.title="audio-speakrs-deps"
