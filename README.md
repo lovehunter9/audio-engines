@@ -201,8 +201,8 @@ passes. For the same reason the build's final import check must go **through**
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
-| `firered` | `beclab/audio-firered` | `tts`, `tts_clone` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
-| `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
+| `firered` | `beclab/audio-firered` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
+| `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
