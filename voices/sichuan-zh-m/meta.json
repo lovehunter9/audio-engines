@@ -1,0 +1,13 @@
+{
+  "voice_id": "sichuan-zh-m",
+  "name": "四川男 / Sichuan Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的四川话说话，声音爽朗，语速中等。",
+  "sample_text": "今天这条路有点堵，我们晚点再出发。",
+  "description": "四川话成年男声，爽朗。Adult male, Sichuan dialect, easygoing.",
+  "labels": {
+    "language": "zh",
+    "accent": "sichuan",
+    "gender": "male"
+  }
+}

@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import hfgate
 from .. import tasks
-from ..audioio import seconds
+from ..audioio import decode, probe_seconds, seconds, wav_seconds
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
 from ..runtime import Runtime
@@ -31,6 +31,8 @@ VOICE_DIR = Path(str(_args.text("--voice-dir", "/data/voices") or "/data/voices"
 N_TIMESTEPS = int(_args.number("--n-timesteps", 10))
 INFERENCE_CFG = _args.number("--inference-cfg", 2.0)
 DESIGN_CFG = _args.number("--design-cfg", 1.2)
+# FireRed generate_tts/design is machine-gun; acoustic_edit 0.5–2.0 step 0.1, chart default 0.7. Breeze ignores this.
+SPEAK_SPEED = _args.number("--speak-speed", 0.7)
 CFG_SCALE = _args.number("--cfg-scale", 1.0)
 SEED = int(_args.number("--seed", 42))
 ATTN = str(_args.text("--attn-implementation", "") or "")
@@ -38,6 +40,19 @@ DEFAULT_PREVIEW = str(_args.text("--preview-text", "") or "")
 USE_WETEXT = _args.switch("--use-wetext", True)
 USE_LLM_TN = _args.switch("--use-llm-tn", False)
 FAST_ALL = _args.switch("--fast-all", False)
+# 0 = off (FireRed). Breeze Chart turns these on to match BreezeBlue's product gates.
+REF_MIN_SECONDS = _args.number("--ref-min-seconds", 0)
+REF_MAX_SECONDS = _args.number("--ref-max-seconds", 0)
+REF_MAX_MB = _args.number("--ref-max-mb", 0)
+DESIGN_MIN_CHARS = int(_args.number("--design-min-chars", 0))
+DESIGN_MAX_CHARS = int(_args.number("--design-max-chars", 0))
+# Official infer.py. Breeze reads these; FireRed ignores them.
+MAX_NEW_TOKENS = int(_args.number("--max-new-tokens", 1500) or 1500)
+MAX_SEQ_LEN = int(_args.number("--max-seq-len", 2048) or 2048)
+if MAX_NEW_TOKENS <= 0:
+    MAX_NEW_TOKENS = 1500
+if MAX_SEQ_LEN <= 0:
+    MAX_SEQ_LEN = 2048
 
 # Official code pins flash_attention_2; this image has no flash_attn, so rewrite those requests.
 _FLASH_IMPLS = ("flash_attention_2", "flash_attention_3")
@@ -168,6 +183,116 @@ def _new_id(prefix):
     return "%s%s" % (prefix, uuid.uuid4().hex[:20])
 
 
+def voices_root():
+    """Repo `voices/` in checkout; `/app/voices` once append-image copies it."""
+    return Path(__file__).resolve().parents[2] / "voices"
+
+
+def builtin_voices_dir(module=None):
+    """One shared card tree. `module` is reserved; ids are not engine-prefixed."""
+    root = voices_root()
+    return root if root.is_dir() else None
+
+
+def load_voice_cards(root, category=None):
+    """Read `<dir>/<voice_id>/meta.json` cards. Same shape at repo and at --voice-dir."""
+    root = Path(root) if root else None
+    if root is None or not root.is_dir():
+        return []
+    cards = []
+    for child in sorted(root.iterdir()):
+        meta_path = child / "meta.json"
+        if not child.is_dir() or child.name == "pending" or not meta_path.is_file():
+            continue
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        meta.setdefault("voice_id", child.name)
+        if category and meta.get("category") != category:
+            continue
+        cards.append(meta)
+    return cards
+
+
+def builtin_presets(module):
+    src = builtin_voices_dir(module)
+    return load_voice_cards(src, category="premade") if src else []
+
+
+def premade_cards(backend, module=None):
+    """Model-native voices first, then our shared pack if the backend wants it."""
+    rows, seen = [], set()
+    native = getattr(backend, "native_presets", None)
+    for card in list(native() if callable(native) else []) or []:
+        if not isinstance(card, dict):
+            continue
+        vid = str(card.get("voice_id") or "").strip()
+        if not vid or vid in seen:
+            continue
+        seen.add(vid)
+        rows.append(dict(card))
+    if backend is None or bool(getattr(backend, "uses_shared_pack", True)):
+        for card in builtin_presets(module):
+            vid = str(card.get("voice_id") or "").strip()
+            if not vid or vid in seen:
+                continue
+            seen.add(vid)
+            rows.append(dict(card))
+    return rows
+
+
+def _premade_dir(path):
+    """True only for a premade card. Cloned / designed / unknown dirs stay."""
+    path = Path(path)
+    if not path.is_dir() or path.name == "pending":
+        return False
+    meta_path = path / "meta.json"
+    if not meta_path.is_file():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(meta, dict) and meta.get("category") == "premade"
+
+
+def seed_builtins(module, dest, backend=None, cards=None):
+    """Wipe every premade card, then plant native voices plus our pack; clones stay."""
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    (dest / "pending").mkdir(parents=True, exist_ok=True)
+    for child in list(dest.iterdir()):
+        if _premade_dir(child):
+            shutil.rmtree(child)
+    if cards is None:
+        cards = premade_cards(backend, module)
+    pack = builtin_voices_dir(module)
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        vid = str(card.get("voice_id") or "").strip()
+        if not vid:
+            continue
+        target = dest / vid
+        if target.exists():
+            continue
+        src = pack / vid if pack is not None else None
+        if src is not None and src.is_dir() and (src / "meta.json").is_file():
+            shutil.copytree(src, target)
+            continue
+        meta = dict(card)
+        meta.setdefault("category", "premade")
+        meta["voice_id"] = vid
+        target.mkdir(parents=True, exist_ok=True)
+        (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+    planted = {c["voice_id"]: c for c in load_voice_cards(dest, category="premade")}
+    return [planted[c["voice_id"]] for c in cards
+            if isinstance(c, dict) and c.get("voice_id") in planted]
+
+
 class VoiceStore:
     """PVC-backed voice library. Premade slots come from the backend; clones/designs are files."""
 
@@ -208,8 +333,23 @@ class VoiceStore:
         meta["frozen"] = True
         if extra:
             meta["extra"] = extra
+            if extra.get("plan"):
+                meta["plan"] = extra["plan"]
         self._write(vid, meta, wav_bytes=_wav_bytes(audio, sr), transcript=transcript)
         return meta
+
+    def remember_plan(self, vid, plan):
+        """Keep the official 12-item voice plan without replacing the frozen wav."""
+        if not plan:
+            return
+        meta = self.get(vid)
+        if meta is None:
+            return
+        extra = dict(meta.get("extra") or {})
+        extra["plan"] = plan
+        meta["plan"] = plan
+        meta["extra"] = extra
+        self._write(vid, meta)
 
     def add_clone(self, name, wav_bytes, transcript, description=""):
         vid = _new_id("clone")
@@ -239,10 +379,16 @@ class VoiceStore:
         vid = _new_id("des")
         wav = (pending / "prompt.wav").read_bytes()
         transcript = (pending / "prompt.txt").read_text() if (pending / "prompt.txt").is_file() else ""
+        extra = doc.get("extra") or {}
+        plan = extra.get("plan")
         meta = {"voice_id": vid, "name": name or vid, "category": "generated",
                 "description": description or doc.get("instruction") or "",
                 "instruction": doc.get("instruction") or "", "frozen": True,
                 "generated_voice_id": generated_voice_id}
+        if extra:
+            meta["extra"] = extra
+        if plan:
+            meta["plan"] = plan
         self._write(vid, meta, wav_bytes=wav, transcript=transcript)
         return meta
 
@@ -348,11 +494,83 @@ def _public_voice(meta):
     }
 
 
+def _check_ref_audio(data):
+    """Product gates from ENGINE_ARGS. 0 means off. Reject, do not trim."""
+    raw = bytes(data or b"")
+    if REF_MAX_MB > 0 and len(raw) > REF_MAX_MB * 1024 * 1024:
+        raise HTTPException(
+            status_code=400,
+            detail="reference audio is %.1f MiB; --ref-max-mb is %g" % (
+                len(raw) / (1024 * 1024), REF_MAX_MB))
+    if REF_MIN_SECONDS <= 0 and REF_MAX_SECONDS <= 0:
+        return
+    dur = wav_seconds(raw)
+    if dur is None:
+        dur = probe_seconds(raw)
+    if dur is None:
+        raise HTTPException(status_code=400,
+                            detail="could not read reference audio duration")
+    if REF_MIN_SECONDS > 0 and dur < REF_MIN_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail="reference audio is %ss; --ref-min-seconds is %g" % (dur, REF_MIN_SECONDS))
+    if REF_MAX_SECONDS > 0 and dur > REF_MAX_SECONDS:
+        raise HTTPException(
+            status_code=400,
+            detail="reference audio is %ss; --ref-max-seconds is %g" % (dur, REF_MAX_SECONDS))
+
+
+def _check_design_text(instruction):
+    text = (instruction or "").strip()
+    n = len(text)
+    if DESIGN_MIN_CHARS > 0 and n < DESIGN_MIN_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail="voice_description is %d characters; --design-min-chars is %d" % (
+                n, DESIGN_MIN_CHARS))
+    if DESIGN_MAX_CHARS > 0 and n > DESIGN_MAX_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail="voice_description is %d characters; --design-max-chars is %d" % (
+                n, DESIGN_MAX_CHARS))
+
+
+def _as_prompt_wav(data):
+    """Upload bytes → real PCM WAV. add used to store mp4 as prompt.wav."""
+    raw = bytes(data or b"")
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
+        return raw
+    import numpy as np
+    try:
+        import soundfile as sf
+        audio, sr = sf.read(io.BytesIO(raw), always_2d=False)
+        audio = np.asarray(audio, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        return _wav_bytes(audio, int(sr))
+    except Exception:
+        pass
+    try:
+        wav, sr = decode(raw)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=_explain(e)) from e
+    audio = wav.detach().cpu().float().numpy() if hasattr(wav, "detach") else np.asarray(wav, dtype="float32")
+    if audio.ndim == 2:
+        audio = audio.mean(axis=0) if audio.shape[0] <= 8 else audio.mean(axis=-1)
+    return _wav_bytes(audio, int(sr))
+
+
 def _load_prompt_wav(path):
     import numpy as np
-    import soundfile as sf
-
-    audio, sr = sf.read(str(path), always_2d=False)
+    try:
+        import soundfile as sf
+        audio, sr = sf.read(str(path), always_2d=False)
+    except Exception:
+        wav, sr = decode(str(path))
+        audio = wav.detach().cpu().float().numpy() if hasattr(wav, "detach") else np.asarray(wav, dtype="float32")
+        if audio.ndim == 2:
+            audio = audio.mean(axis=0) if audio.shape[0] <= 8 else audio.mean(axis=-1)
+        return np.asarray(audio, dtype="float32").reshape(-1), int(sr)
     audio = np.asarray(audio, dtype="float32")
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
@@ -388,15 +606,32 @@ def _preview_text(instruction):
     return "Welcome aboard. Your journey begins now."
 
 
-def _speak_voice(vid, text):
+def _design_instruction(meta):
+    """Prefer the saved 12-item plan. Re-planning from the short blurb drops 口音."""
+    meta = meta or {}
+    plan = meta.get("plan") or (meta.get("extra") or {}).get("plan") or ""
+    return (plan or meta.get("instruction") or "").strip()
+
+
+def _speak_voice(vid, text, instruction=None):
     backend = _backend()
-    _meta, wav_path, transcript = _ensure_frozen(vid)
+    meta, wav_path, transcript = _ensure_frozen(vid)
+    # FireRed design-speak wants the 12-item plan; Breeze Voice Direction wants the stored instruction.
+    if getattr(backend, "prefer_design_speak", False):
+        speak_as = (instruction or _design_instruction(meta) or "").strip()
+        if speak_as:
+            with _gen_lock:
+                audio, sr, extra = backend.design(speak_as, text)
+            if extra and extra.get("plan") and not (meta or {}).get("plan"):
+                _store().remember_plan(vid, extra["plan"])
+            return audio, sr
+    speak_as = (instruction or (meta or {}).get("instruction") or "").strip()
     prompt, sr = _load_prompt_wav(wav_path)
     with _gen_lock:
-        return backend.clone(text, prompt, sr, transcript or text)
+        return backend.clone(text, prompt, sr, transcript or text, instruction=speak_as)
 
 
-def _speak_ref(text, wav_bytes, transcript):
+def _speak_ref(text, wav_bytes, transcript, instruction=None):
     import soundfile as sf
 
     backend = _backend()
@@ -407,7 +642,8 @@ def _speak_ref(text, wav_bytes, transcript):
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     with _gen_lock:
-        return backend.clone(text, audio, int(sr), transcript or "")
+        return backend.clone(text, audio, int(sr), transcript or "",
+                             instruction=(instruction or "").strip())
 
 
 def _speak_design(instruction, text):
@@ -441,7 +677,8 @@ def build_app(supports, module=None):
     app = FastAPI(title="audio-tts (%s, ElevenLabs shape)" % module)
     mount_metrics(app)
     register(app, model_name=MODEL_NAME, module=module, served=supports, repo=repo_id(),
-             is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True,
+             is_ready=lambda: _state["ready"], error=lambda: _state["error"],
+             task_api=True, task_legacy=False,
              sample_rate=_state.get("sample_rate") or 24000)
     _args.warn_unclaimed(log)
 
@@ -479,10 +716,12 @@ def build_app(supports, module=None):
                 if not ref_text:
                     raise HTTPException(status_code=400,
                                         detail="ref_text (the exact transcript of the reference) is required")
-                audio, sr = _speak_ref(text, data, ref_text)
+                _check_ref_audio(data)
+                audio, sr = _speak_ref(text, data, ref_text, instruction=instructions)
             elif voice:
-                audio, sr = _speak_voice(voice, text)
+                audio, sr = _speak_voice(voice, text, instruction=instructions)
             elif instructions:
+                _check_design_text(instructions)
                 audio, sr = _speak_design(instructions, text)
             else:
                 voices = _store().list()
@@ -539,21 +778,16 @@ def build_app(supports, module=None):
                 uploads.append(file)
             wav_bytes = None
             if uploads:
-                wav_bytes = await uploads[0].read()
-                if not wav_bytes:
+                raw = await uploads[0].read()
+                if not raw:
                     raise HTTPException(status_code=400, detail="reference audio is empty")
+                _check_ref_audio(raw)
+                wav_bytes = _as_prompt_wav(raw)
             transcript = (ref_text or description or "").strip() or None
             _store().edit(voice_id, name=name.strip(),
                           description=None if description is None else description,
                           labels=parsed_labels, wav_bytes=wav_bytes, transcript=transcript)
             return {"status": "ok"}
-
-        @app.get("/v1/audio/voices")
-        def list_voices_openai():
-            _require_ready()
-            return {"model": MODEL_NAME,
-                    "voices": [{"id": m["voice_id"], "name": m.get("name") or m["voice_id"]}
-                               for m in _store().list()]}
 
         @app.post("/v1/text-to-voice/design")
         async def design_preview(request: Request):
@@ -566,6 +800,7 @@ def build_app(supports, module=None):
                               or "").strip()
             if not instruction:
                 raise HTTPException(status_code=400, detail="voice_description is required")
+            _check_design_text(instruction)
             text = str(payload.get("text") or "").strip() or _preview_text(instruction)
             async_ = request.query_params.get("async")
 
@@ -583,6 +818,7 @@ def build_app(supports, module=None):
                         "media_type": "audio/wav",
                         "duration_secs": round(len(_to_mono(audio)) / float(sr), 3),
                         "language": None,
+                        "plan": (extra or {}).get("plan"),
                     }]
                 }
 
@@ -631,16 +867,6 @@ def build_app(supports, module=None):
             return await _synthesize_payload(payload, request.query_params.get("async"),
                                              default_fmt="mp3")
 
-        @app.post("/v1/audio/speech")
-        async def openai_speech(request: Request):
-            try:
-                payload = dict(await request.json())
-            except Exception:
-                raise HTTPException(status_code=400,
-                                    detail="body must be JSON in the OpenAI /v1/audio/speech shape")
-            return await _synthesize_payload(payload, request.query_params.get("async"),
-                                             default_fmt="wav")
-
     if has_clone:
         @app.post("/v1/voices/add")
         async def add_voice(name: str = Form(...),
@@ -658,6 +884,7 @@ def build_app(supports, module=None):
             data = await uploads[0].read()
             if not data:
                 raise HTTPException(status_code=400, detail="reference audio is empty")
+            _check_ref_audio(data)
             transcript = (ref_text or description or "").strip()
             if labels.strip().startswith("{"):
                 try:
@@ -668,28 +895,8 @@ def build_app(supports, module=None):
             if not transcript:
                 raise HTTPException(status_code=400,
                                     detail="description or ref_text must be the exact transcript of the reference")
-            meta = _store().add_clone(name, data, transcript, description=description)
+            meta = _store().add_clone(name, _as_prompt_wav(data), transcript, description=description)
             return {"voice_id": meta["voice_id"]}
-
-        @app.post("/v1/audio/speech/clone")
-        async def clone_speak(file: UploadFile = File(...),
-                              text: str = Form(..., alias="input"),
-                              ref_text: str = Form(default=""),
-                              description: str = Form(default=""),
-                              fmt: str = Form(default="wav", alias="response_format"),
-                              async_: str = Form(default=None, alias="async")):
-            _require_ready()
-            data = await file.read()
-            if not data:
-                raise HTTPException(status_code=400, detail="file (the reference audio) is empty")
-            transcript = (ref_text or description or "").strip()
-            if not transcript:
-                raise HTTPException(status_code=400,
-                                    detail="ref_text (the exact transcript of the reference) is required")
-            payload = {"input": text, "response_format": fmt,
-                       "ref_audio": "data:audio/wav;base64,%s" % base64.b64encode(data).decode("ascii"),
-                       "ref_text": transcript}
-            return await _synthesize_payload(payload, async_, default_fmt="wav")
 
     return app
 
@@ -718,7 +925,10 @@ def _ref_bytes(ref):
 def install(backend, store=None, sample_rate=24000):
     """Tests and a completed load both land here so the HTTP surface never imports the model."""
     _state["backend"] = backend
-    _state["store"] = store or VoiceStore(VOICE_DIR, list(backend.presets() or []))
+    if store is None:
+        cards = seed_builtins(_MODULE["name"], VOICE_DIR, backend=backend)
+        store = VoiceStore(VOICE_DIR, cards or list(backend.presets() or []))
+    _state["store"] = store
     _state["sample_rate"] = int(getattr(backend, "sample_rate", None) or sample_rate)
     _state["ready"] = True
     _state["error"] = None

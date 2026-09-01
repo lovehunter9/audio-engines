@@ -97,7 +97,8 @@ the `async-tasks` tag and `Task` schema are the contract's stable locating terms
 `wrapper/tasks.py` is this engine's implementation of it, with `kind: "audio"`.
 
 The paths this engine shipped first, `/v1/audio/tasks*`, stay mounted as aliases of
-the same runner and are advertised as `deprecated` in `/api/engine-spec`.
+the same runner and are advertised as `deprecated` in `/api/engine-spec`, except
+on FireRed and Breeze: those two only mount `/v1/tasks`.
 
 `GET /v1/tasks` takes the contract's `?status=` and `?limit=` (default 100, finished
 tasks are the only ones a limit drops, `truncated: true` when it did).
@@ -361,8 +362,9 @@ needs an explicit EU AI Act Art. 50 attestation, which is deliberately not given
 **`firered` / `breeze`.** Two bases, one HTTP surface (`wrapper/caps/tts_el.py`).
 Boss requirement is one llm-init instance that lists voices, clones, designs, and
 speaks — ElevenLabs `voice_id` first (`GET /v1/voices`, `POST /v1/voices/add`,
-`POST /v1/text-to-voice/design` then create, `POST /v1/text-to-speech/{voice_id}`),
-with OpenAI `/v1/audio/speech` kept as aliases. Neither model ships a preset
+`POST /v1/text-to-voice/design` then create, `POST /v1/text-to-speech/{voice_id}`).
+OpenAI `/v1/audio/*` aliases and `/v1/audio/tasks` are not mounted on these two.
+Long jobs use `async=1` + `/v1/tasks`. Neither model ships a preset
 catalog: premade ids are design prompts that freeze a sample onto the instance
 PVC the first time they are spoken, then replay through clone. FireRed loads
 **Instruct only** (`FireRedTTS3Instruct`); Base is a second 8.5 GiB checkpoint

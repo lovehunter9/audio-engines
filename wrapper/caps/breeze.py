@@ -15,26 +15,6 @@ def _rewrite_flash_attn(requested):
     tts_el.rewrite_flash_attn(requested)
 
 
-PRESETS = [
-    {"voice_id": "br2-warm-zh-f", "name": "Warm ZH Female", "category": "premade",
-     "instruction": "一位温柔自信的年轻女性，声音清晰，语气亲切，表达轻快而富有感染力。",
-     "sample_text": "欢迎来到今晚的故事时间，让我们一起开始吧。",
-     "description": "Young female, warm, clear Chinese."},
-    {"voice_id": "br2-calm-zh-m", "name": "Calm ZH Male", "category": "premade",
-     "instruction": "一位沉稳的成年男性，声音干净，语速从容。",
-     "sample_text": "各位同事，我们开始今天的会议。",
-     "description": "Adult male, calm Chinese."},
-    {"voice_id": "br2-clear-en-f", "name": "Clear EN Female", "category": "premade",
-     "instruction": "A warm, thoughtful young woman with a clear voice and a calm, reflective delivery.",
-     "sample_text": "Welcome aboard. Your journey begins now.",
-     "description": "Young female, clear English."},
-    {"voice_id": "br2-warm-en-m", "name": "Warm EN Male", "category": "premade",
-     "instruction": "A warm adult male narrator, calm and confident.",
-     "sample_text": "It is good to hear your voice again after all this time.",
-     "description": "Adult male narrator, warm English."},
-]
-
-
 def _collect(audio):
     import numpy as np
 
@@ -46,6 +26,7 @@ def _collect(audio):
 
 class BreezeBackend:
     sample_rate = 24000
+    uses_shared_pack = True
 
     def __init__(self, runtime, tokenizer, audio_tokenizer, model):
         self.runtime = runtime
@@ -56,8 +37,11 @@ class BreezeBackend:
         if sr:
             self.sample_rate = int(sr)
 
+    def native_presets(self):
+        return []
+
     def presets(self):
-        return list(PRESETS)
+        return tts_el.premade_cards(self, "breeze")
 
     def _generate(self, text, instruction, ref_path=None, ref_text=None, cfg=None):
         from breeze_infer.runtime import set_all_seeds
@@ -94,18 +78,23 @@ class BreezeBackend:
         import numpy as np
         return np.concatenate(chunks), self.sample_rate
 
-    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **_kw):
+    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         import soundfile as sf
         import tempfile
 
+        # Voice Direction: ref + transcript + instruction at CFG 4; bare clone keeps CFG 1.
+        direction = str(kw.get("instruction") or "").strip()
+        if direction:
+            instruction, cfg = direction, tts_el.DESIGN_CFG
+        else:
+            instruction, cfg = "Speak clearly and naturally.", tts_el.CFG_SCALE
         wav = _collect(prompt_audio)
         with tempfile.NamedTemporaryFile(prefix="breeze-ref-", suffix=".wav", delete=False) as fh:
             path = fh.name
         try:
             sf.write(path, wav, int(prompt_sr), format="WAV", subtype="PCM_16")
-            return self._generate(text, "Speak clearly and naturally.",
-                                  ref_path=path, ref_text=prompt_text,
-                                  cfg=tts_el.CFG_SCALE)
+            return self._generate(text, instruction,
+                                  ref_path=path, ref_text=prompt_text, cfg=cfg)
         finally:
             try:
                 os.unlink(path)
@@ -130,8 +119,8 @@ def _load():
     )
     update_generation_config_for_breeze(model)
     config = FastStreamingConfig(
-        max_new_tokens=1500,
-        max_seq_len=2048,
+        max_new_tokens=int(tts_el.MAX_NEW_TOKENS),
+        max_seq_len=int(tts_el.MAX_SEQ_LEN),
         fast_all=tts_el.FAST_ALL,
         repetition_penalty=1.1,
     )

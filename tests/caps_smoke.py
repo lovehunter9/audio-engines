@@ -90,7 +90,7 @@ def poll(c, tid, timeout=20):
     return {"status": "timeout"}
 
 
-def contract(c, doc, label):
+def contract(c, doc, label, legacy=True):
     """What every engine behind llm-init must answer, not just this one."""
     check("%s doc is object=task kind=audio" % label,
           doc.get("object") == "task" and doc.get("kind") == "audio",
@@ -99,13 +99,20 @@ def contract(c, doc, label):
           doc.get("poll") == "%s/%s" % (TASKS, doc["id"])
           and doc.get("result_url") == "%s/%s/result" % (TASKS, doc["id"]),
           (doc.get("poll"), doc.get("result_url")))
-    alias = c.get("%s/%s" % (LEGACY, doc["id"])).json()
-    check("%s the legacy alias answers the same task" % label, alias == doc, alias.get("id"))
+    if legacy:
+        alias = c.get("%s/%s" % (LEGACY, doc["id"])).json()
+        check("%s the legacy alias answers the same task" % label, alias == doc, alias.get("id"))
+    else:
+        check("%s does not mount the legacy task alias" % label,
+              c.get("%s/%s" % (LEGACY, doc["id"])).status_code == 404)
     cap = (c.get(TASKS).json() or {}).get("capacity") or {}
     check("%s the list reports queue capacity" % label,
           set(cap) == {"queued", "running", "limit", "accepting"} and cap["limit"] > 0, cap)
-    check("%s the legacy list alias agrees" % label,
-          c.get(LEGACY).json() == c.get(TASKS).json())
+    if legacy:
+        check("%s the legacy list alias agrees" % label,
+              c.get(LEGACY).json() == c.get(TASKS).json())
+    else:
+        check("%s the legacy list is gone" % label, c.get(LEGACY).status_code == 404)
     got = c.get(TASKS, params={"status": "succeeded"}).json()["data"]
     check("%s ?status= filters" % label,
           got and all(d["status"] == "succeeded" for d in got),
@@ -171,16 +178,23 @@ def mounted(c):
     return {(e["method"], e["path"]) for e in eps if e["available"]}
 
 
-def advertises_tasks(c, label):
+def advertises_tasks(c, label, legacy=True):
     paths = mounted(c)
     check("%s advertises the task API" % label,
-          ("GET", TASKS + "/{id}") in paths and ("GET", LEGACY + "/{id}") in paths,
-          sorted(p[1] for p in paths))
-    deprecated = {e["path"] for e in c.get("/api/engine-spec").json()["endpoints"]
-                  if e.get("deprecated")}
-    check("%s marks the legacy paths deprecated" % label,
-          deprecated == {LEGACY, LEGACY + "/{id}", LEGACY + "/{id}/result"},
-          sorted(deprecated))
+          ("GET", TASKS + "/{id}") in paths, sorted(p[1] for p in paths))
+    if legacy:
+        check("%s advertises the legacy task alias" % label,
+              ("GET", LEGACY + "/{id}") in paths, sorted(p[1] for p in paths))
+        deprecated = {e["path"] for e in c.get("/api/engine-spec").json()["endpoints"]
+                      if e.get("deprecated")}
+        check("%s marks the legacy paths deprecated" % label,
+              deprecated == {LEGACY, LEGACY + "/{id}", LEGACY + "/{id}/result"},
+              sorted(deprecated))
+    else:
+        check("%s does not advertise the legacy task alias" % label,
+              all(p != LEGACY and not str(p).startswith(LEGACY + "/")
+                  for _m, p in paths),
+              sorted(p[1] for p in paths))
 
 
 WAV = {"file": ("a.wav", b"RIFF0000WAVEfake", "audio/wav")}
@@ -1299,7 +1313,7 @@ class FakeELBackend:
                  "description": "test preset"}]
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
-        self.calls.append(("clone", text, prompt_text))
+        self.calls.append(("clone", text, prompt_text, kw.get("instruction")))
         n = max(2400, len(text) * 120)
         return np.zeros(n, dtype="float32"), 24000
 
@@ -1309,11 +1323,169 @@ class FakeELBackend:
         return np.zeros(n, dtype="float32"), 24000, {"plan": "ok"}
 
 
+def t_voice_cards():
+    import tempfile
+
+    from wrapper.caps import tts_el
+
+    fr = tts_el.builtin_presets("firered")
+    br = tts_el.builtin_presets("breeze")
+    ids = [c.get("voice_id") for c in fr]
+    langs = {(c.get("labels") or {}).get("language") for c in fr}
+    check("shared builtin pack is zh+en only",
+          len(fr) == 25 and len(set(ids)) == 25, ids)
+    check("no language outside zh/en", langs <= {"zh", "en"}, langs)
+    check("firered and breeze read the same cards",
+          [c.get("voice_id") for c in br] == ids, ids)
+    check("voice_id is a role slug, not an engine prefix",
+          ids and all(v and not v.startswith(("fr3-", "br2-")) for v in ids), ids)
+    check("cards are premade with an instruction",
+          all(c.get("category") == "premade" and c.get("instruction") for c in fr + br))
+    check("list name and description are bilingual",
+          all(" / " in (c.get("name") or "")
+              and any("\u4e00" <= ch <= "\u9fff" for ch in (c.get("description") or ""))
+              and any("a" <= ch.lower() <= "z" for ch in (c.get("description") or ""))
+              for c in fr),
+          [(c.get("voice_id"), c.get("name")) for c in fr])
+    dest = tempfile.mkdtemp(prefix="voices-seed-")
+    seeded = tts_el.seed_builtins("firered", dest)
+    check("seed copies shared cards onto the runtime dir", len(seeded) == len(fr))
+    kept = dest + "/warm-zh-f/prompt.txt"
+    open(kept, "w").write("keep me")
+    os.makedirs(dest + "/ja-f", exist_ok=True)
+    open(dest + "/ja-f/meta.json", "w").write(
+        '{"voice_id": "ja-f", "name": "old", "category": "premade"}')
+    tts_el.seed_builtins("firered", dest)
+    check("seed replaces premade with the current pack",
+          not os.path.isfile(kept) or open(kept).read() != "keep me")
+    check("seed drops a premade that left the pack", not os.path.isdir(dest + "/ja-f"))
+    for vid in ("fr3-warm-zh-f", "br2-clear-en-f"):
+        os.makedirs(dest + "/" + vid, exist_ok=True)
+        open(dest + "/" + vid + "/meta.json", "w").write(
+            '{"voice_id": "%s", "name": "old", "category": "premade"}' % vid)
+    leftover = dest + "/clone-keep/meta.json"
+    os.makedirs(dest + "/clone-keep", exist_ok=True)
+    open(leftover, "w").write('{"voice_id": "clone-keep", "name": "mine", "category": "cloned"}')
+    reused = dest + "/fr3-calm-zh-m/meta.json"
+    os.makedirs(dest + "/fr3-calm-zh-m", exist_ok=True)
+    open(reused, "w").write('{"voice_id": "fr3-calm-zh-m", "name": "mine", "category": "cloned"}')
+    tts_el.seed_builtins("firered", dest)
+    check("seed drops leftover premade ids",
+          not os.path.isdir(dest + "/fr3-warm-zh-f")
+          and not os.path.isdir(dest + "/br2-clear-en-f"))
+    check("seed does not drop a cloned card", open(leftover).read().find("clone-keep") >= 0)
+    check("seed does not drop a user card that reused an old id",
+          open(reused).read().find("cloned") >= 0)
+    from wrapper.caps.firered import FireRedBackend
+    backend_ids = [c["voice_id"] for c in FireRedBackend(None).presets()]
+    check("firered backend presets read the cards", backend_ids == ids, backend_ids)
+
+    class OnlyNative:
+        uses_shared_pack = False
+
+        def native_presets(self):
+            return [{"voice_id": "model-a", "name": "Model A", "category": "premade",
+                     "instruction": "native"}]
+
+    native_only = tempfile.mkdtemp(prefix="voices-native-")
+    planted = tts_el.seed_builtins("firered", native_only, backend=OnlyNative())
+    planted_ids = [c["voice_id"] for c in planted]
+    check("native-only backend does not take our pack",
+          planted_ids == ["model-a"], planted_ids)
+
+    class NativePlusOurs:
+        uses_shared_pack = True
+
+        def native_presets(self):
+            return [{"voice_id": "model-a", "name": "Model A", "category": "premade",
+                     "instruction": "native"}]
+
+    both = tempfile.mkdtemp(prefix="voices-both-")
+    planted = tts_el.seed_builtins("firered", both, backend=NativePlusOurs())
+    planted_ids = [c["voice_id"] for c in planted]
+    check("native plus our pack lists both",
+          planted_ids[0] == "model-a" and set(planted_ids) == set(["model-a"] + ids),
+          planted_ids)
+
+
 def t_firered_triplet_pad():
     from wrapper.caps.firered import as_tts_triplet
 
     check("2-tuple becomes a triplet", as_tts_triplet(("a", 24000)) == ("a", 24000, None))
     check("triplet is left alone", as_tts_triplet(("a", 24000, "x")) == ("a", 24000, "x"))
+
+
+def t_firered_design_instruction():
+    from wrapper.caps.tts_el import _design_instruction
+
+    check("plan beats the short blurb",
+          _design_instruction({"instruction": "年轻女声", "plan": "口音：四川话"})
+          == "口音：四川话")
+    check("extra.plan is enough",
+          _design_instruction({"instruction": "年轻女声", "extra": {"plan": "语速稍慢"}})
+          == "语速稍慢")
+    check("blurb is the fallback",
+          _design_instruction({"instruction": "年轻女声"}) == "年轻女声")
+
+
+def t_firered_speed_for():
+    from wrapper.caps.firered import clamp_speed, speed_for
+
+    check("clamp snaps to 0.1", clamp_speed(0.73) == 0.7)
+    check("clamp floors at 0.5", clamp_speed(0.1) == 0.5)
+    check("clamp caps at 2.0", clamp_speed(9) == 2.0)
+    check("default speak speed is below 1", speed_for("") < 1.0)
+    check("很慢 goes to 0.6 or slower", speed_for("语速很慢，带一点俏皮") <= 0.6)
+    check("very slow matches 很慢", speed_for("a very slow narrator") <= 0.6)
+    check("很快 skips the edit", speed_for("语速很快") == 1.0)
+
+
+def t_firered_design_speak():
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    class FakeFireRed(FakeELBackend):
+        prefer_design_speak = True
+
+    fake_soundfile()
+    backend = FakeFireRed()
+    root = tempfile.mkdtemp(prefix="el-voices-")
+    store = tts_el.VoiceStore(root, backend.presets())
+    tts_el.install(backend, store=store)
+    from wrapper.caps.firered import build_app
+
+    with TestClient(build_app(["tts", "tts_clone", "tts_design"])) as c:
+        r = c.post("/v1/text-to-speech/p1", json={"text": "hello from design speak"})
+        check("design-speak premade returns 200", r.status_code == 200, r.text[:120])
+        clones = [call for call in backend.calls if call[0] == "clone"]
+        designs = [call for call in backend.calls if call[0] == "design"]
+        check("design-speak never falls back to clone", clones == [], backend.calls)
+        check("freeze still designs a sample",
+              any(call[2] != "hello from design speak" for call in designs), designs)
+        check("speak redesigns with the user text",
+              any(call[2] == "hello from design speak" for call in designs), designs)
+        check("premade speak uses the frozen plan not the blurb",
+              any(call[0] == "design" and call[1] == "ok"
+                  and call[2] == "hello from design speak" for call in backend.calls),
+              backend.calls)
+        preview = c.post("/v1/text-to-voice/design",
+                         json={"voice_description": "A raspy pirate", "text": "Ahoy"})
+        check("design preview keeps a plan",
+              preview.status_code == 200
+              and (preview.json().get("previews") or [{}])[0].get("plan") == "ok",
+              preview.text[:160])
+        gid = (preview.json().get("previews") or [{}])[0].get("generated_voice_id")
+        created = c.post("/v1/text-to-voice",
+                         json={"generated_voice_id": gid, "voice_name": "Pirate"})
+        vid = created.json().get("voice_id")
+        backend.calls.clear()
+        spoken = c.post("/v1/text-to-speech/%s" % vid, json={"text": "more pirate"})
+        check("saved design speak returns 200", spoken.status_code == 200, spoken.text[:120])
+        check("saved design speak uses the frozen plan",
+              any(call[0] == "design" and call[1] == "ok" and call[2] == "more pirate"
+                  for call in backend.calls), backend.calls)
 
 
 def t_tts_el(module_name="firered"):
@@ -1331,7 +1503,7 @@ def t_tts_el(module_name="firered"):
     wav = wav_of(0.4)
 
     with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
-        advertises_tasks(c, module_name)
+        advertises_tasks(c, module_name, legacy=False)
         spec_paths = mounted(c)
         check("%s advertises ElevenLabs list/design/speak" % module_name,
               ("GET", "/v1/voices") in spec_paths
@@ -1339,12 +1511,17 @@ def t_tts_el(module_name="firered"):
               and ("POST", "/v1/text-to-speech/{voice_id}") in spec_paths
               and ("POST", "/v1/voices/add") in spec_paths,
               sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
+        check("%s does not advertise OpenAI speech aliases" % module_name,
+              ("GET", "/v1/audio/voices") not in spec_paths
+              and ("POST", "/v1/audio/speech") not in spec_paths
+              and ("POST", "/v1/audio/speech/clone") not in spec_paths,
+              sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
         listed = c.get("/v1/voices").json()["voices"]
         check("%s lists premade voices before they are frozen" % module_name,
               listed and listed[0]["voice_id"] == "p1" and listed[0]["category"] == "premade",
               listed)
-        check("%s OpenAI voices alias uses id" % module_name,
-              c.get("/v1/audio/voices").json()["voices"][0]["id"] == "p1")
+        check("%s OpenAI voices alias is gone" % module_name,
+              c.get("/v1/audio/voices").status_code == 404)
         r = c.post("/v1/text-to-speech/p1", json={"text": "hello from eleven"})
         check("%s speaks a premade voice_id" % module_name, r.status_code == 200,
               (r.status_code, r.text[:120]))
@@ -1352,8 +1529,13 @@ def t_tts_el(module_name="firered"):
               any(call[0] == "design" for call in backend.calls)
               and any(call[0] == "clone" for call in backend.calls),
               backend.calls)
+        if module_name == "breeze":
+            check("breeze premade speak keeps Voice Direction instruction",
+                  any(call[0] == "clone" and len(call) > 3
+                      and call[3] == "A clear young female voice."
+                      for call in backend.calls), backend.calls)
         r2 = c.post("/v1/audio/speech", json={"input": "hello again", "voice": "p1"})
-        check("%s OpenAI alias speaks the same voice_id" % module_name, r2.status_code == 200,
+        check("%s OpenAI speech alias is gone" % module_name, r2.status_code == 404,
               r2.status_code)
         preview = c.post("/v1/text-to-voice/design",
                          json={"voice_description": "A raspy pirate", "text": "Ahoy there"})
@@ -1412,13 +1594,83 @@ def t_tts_el(module_name="firered"):
             doc = poll(c, async_r.json()["task"]["id"])
             check("%s async task succeeded" % module_name, doc["status"] == "succeeded",
                   doc.get("status"))
-            contract(c, doc, module_name)
+            contract(c, doc, module_name, legacy=False)
 
     tts_el._state.update(ready=False, error="weights are missing", backend=None, store=None)
     with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
         r = c.get("/v1/voices")
         check("%s list is 503 while loading" % module_name, r.status_code == 503
               and "weights are missing" in r.text, r.text[:100])
+
+
+def t_tts_el_limits():
+    """Breeze Chart gates live in ENGINE_ARGS. 0 stays off so FireRed is unchanged."""
+    import importlib
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    was = os.environ.get("ENGINE_ARGS", "")
+    try:
+        os.environ["ENGINE_ARGS"] = (
+            "--cfg-scale 1 --design-cfg 4 --ref-min-seconds 3 --ref-max-seconds 30 "
+            "--ref-max-mb 5 --design-min-chars 3 --design-max-chars 500 "
+            "--max-new-tokens 1500 --max-seq-len 2048"
+        )
+        importlib.reload(tts_el)
+        check("tts_el reads Breeze product gates from ENGINE_ARGS",
+              tts_el.REF_MIN_SECONDS == 3 and tts_el.REF_MAX_SECONDS == 30
+              and tts_el.REF_MAX_MB == 5
+              and tts_el.DESIGN_MIN_CHARS == 3 and tts_el.DESIGN_MAX_CHARS == 500
+              and tts_el.MAX_NEW_TOKENS == 1500 and tts_el.MAX_SEQ_LEN == 2048,
+              (tts_el.REF_MIN_SECONDS, tts_el.REF_MAX_SECONDS, tts_el.MAX_SEQ_LEN))
+        fake_soundfile()
+        backend = FakeELBackend()
+        root = tempfile.mkdtemp(prefix="el-limits-")
+        tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
+        with TestClient(tts_el.build_app(["tts", "tts_clone", "tts_design"],
+                                         module="breeze")) as c:
+            add = lambda wav: c.post(
+                "/v1/voices/add",
+                data={"name": "Me", "description": "this is the transcript"},
+                files={"file": ("r.wav", wav, "audio/wav")})
+            short = add(wav_of(1))
+            check("clone shorter than --ref-min-seconds is 400",
+                  short.status_code == 400 and "ref-min-seconds" in short.text,
+                  (short.status_code, short.text[:160]))
+            mid = add(wav_of(10))
+            check("clone inside 3–30s is 200",
+                  mid.status_code == 200 and mid.json().get("voice_id"),
+                  (mid.status_code, mid.text[:160]))
+            long = add(wav_of(35))
+            check("clone longer than --ref-max-seconds is 400",
+                  long.status_code == 400 and "ref-max-seconds" in long.text,
+                  (long.status_code, long.text[:160]))
+            fat = add(b"RIFF" + b"\x00" * (6 * 1024 * 1024))
+            check("clone bigger than --ref-max-mb is 400",
+                  fat.status_code == 400 and "ref-max-mb" in fat.text,
+                  (fat.status_code, fat.text[:160]))
+            tiny = c.post("/v1/text-to-voice/design",
+                          json={"voice_description": "ab", "text": "Ahoy"})
+            check("design shorter than --design-min-chars is 400",
+                  tiny.status_code == 400 and "design-min-chars" in tiny.text,
+                  (tiny.status_code, tiny.text[:160]))
+            huge = c.post("/v1/text-to-voice/design",
+                          json={"voice_description": "x" * 501, "text": "Ahoy"})
+            check("design longer than --design-max-chars is 400",
+                  huge.status_code == 400 and "design-max-chars" in huge.text,
+                  (huge.status_code, huge.text[:160]))
+            ok = c.post("/v1/text-to-voice/design",
+                        json={"voice_description": "A raspy pirate", "text": "Ahoy"})
+            check("design inside 3–500 characters is 200",
+                  ok.status_code == 200, (ok.status_code, ok.text[:160]))
+    finally:
+        if was:
+            os.environ["ENGINE_ARGS"] = was
+        else:
+            os.environ.pop("ENGINE_ARGS", None)
+        importlib.reload(tts_el)
 
 
 def t_engine_args():
@@ -1477,7 +1729,12 @@ def main():
                            ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
                            ("firered elevenlabs", lambda: t_tts_el("firered"), "firered"),
                            ("breeze elevenlabs", lambda: t_tts_el("breeze"), "breeze"),
-                           ("firered triplet pad", t_firered_triplet_pad, "firered")):
+                           ("tts_el limits", t_tts_el_limits, "breeze"),
+                           ("voice cards", t_voice_cards, "firered"),
+                           ("firered triplet pad", t_firered_triplet_pad, "firered"),
+                           ("firered speed_for", t_firered_speed_for, "firered"),
+                           ("firered design instruction", t_firered_design_instruction, "firered"),
+                           ("firered design speak", t_firered_design_speak, "firered")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

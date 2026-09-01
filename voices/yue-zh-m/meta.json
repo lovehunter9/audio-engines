@@ -1,0 +1,13 @@
+{
+  "voice_id": "yue-zh-m",
+  "name": "粤语男 / Cantonese Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的粤语说话，声音稳实，语速中等。",
+  "sample_text": "今日条路有啲塞，我哋迟啲再出发。",
+  "description": "粤语成年男声，稳实。Adult male, Cantonese, steady.",
+  "labels": {
+    "language": "zh",
+    "accent": "yue",
+    "gender": "male"
+  }
+}

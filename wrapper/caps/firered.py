@@ -1,28 +1,16 @@
 # FireRedTTS3-Instruct in-process (clone + design + speak); Base is never loaded.
 import logging
+import re
 
 from . import tts_el
 
 log = logging.getLogger("audio-firered")
 
-PRESETS = [
-    {"voice_id": "fr3-warm-zh-f", "name": "Warm ZH Female", "category": "premade",
-     "instruction": "一个年轻女性的温柔嗓音，语速稍慢，带一点俏皮。",
-     "sample_text": "今天天气很好，我们一起去公园散步吧。",
-     "description": "Young female, warm, slightly playful, unhurried."},
-    {"voice_id": "fr3-calm-zh-m", "name": "Calm ZH Male", "category": "premade",
-     "instruction": "一位沉稳的中年男性，声音低沉清晰，语速中等。",
-     "sample_text": "各位同事，我们开始今天的会议。",
-     "description": "Adult male, low, clear, measured."},
-    {"voice_id": "fr3-clear-en-f", "name": "Clear EN Female", "category": "premade",
-     "instruction": "A clear young female voice, warm and measured, with a slight smile.",
-     "sample_text": "Welcome aboard. Your journey begins now.",
-     "description": "Young female, clear, warm English."},
-    {"voice_id": "fr3-warm-en-m", "name": "Warm EN Male", "category": "premade",
-     "instruction": "A warm adult male narrator, calm and confident.",
-     "sample_text": "It is good to hear your voice again after all this time.",
-     "description": "Adult male narrator, warm English."},
-]
+# Official generate_acoustic_edit: X in [0.5, 2.0], step 0.1.
+_SPEED_MIN = 0.5
+_SPEED_MAX = 2.0
+_SLOW_RE = re.compile(r"很慢|非常慢|缓慢|very\s+slow|extremely\s+slow", re.I)
+_FAST_RE = re.compile(r"很快|非常快|very\s+fast|extremely\s+fast", re.I)
 
 
 def _as_wave(audio, sr):
@@ -44,6 +32,22 @@ def _as_torch(audio):
     if t.ndim == 1:
         t = t.unsqueeze(0)
     return t
+
+
+def clamp_speed(x):
+    x = max(_SPEED_MIN, min(_SPEED_MAX, float(x)))
+    return round(x * 10.0) / 10.0
+
+
+def speed_for(instruction=""):
+    """Map a design instruction onto official acoustic-edit speed (0.5–2.0)."""
+    factor = clamp_speed(tts_el.SPEAK_SPEED)
+    text = instruction or ""
+    if _SLOW_RE.search(text):
+        return min(factor, 0.6)
+    if _FAST_RE.search(text):
+        return 1.0
+    return factor
 
 
 def as_tts_triplet(out):
@@ -70,6 +74,9 @@ def patch_backend_tts_triplet():
 
 class FireRedBackend:
     sample_rate = 24000
+    uses_shared_pack = True
+    # generate_tts never sees the design instruction; speak premade through generate_voice_design.
+    prefer_design_speak = True
 
     def __init__(self, model):
         self.model = model
@@ -77,31 +84,93 @@ class FireRedBackend:
         if sr:
             self.sample_rate = int(sr)
 
+    def native_presets(self):
+        return []
+
     def presets(self):
-        return list(PRESETS)
+        return tts_el.premade_cards(self, "firered")
 
-    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **_kw):
-        audio, sr, _ = as_tts_triplet(self.model.generate_tts(
-            prompt_text=prompt_text or "",
-            prompt_audio=_as_torch(prompt_audio),
-            prompt_audio_sr=int(prompt_sr),
-            text=text,
-            n_timesteps=int(tts_el.N_TIMESTEPS),
-            inference_cfg=float(tts_el.INFERENCE_CFG),
-            seed=int(tts_el.SEED),
-        ))
-        return _as_wave(audio, sr)
+    def _sentences(self, text):
+        """Official core splits at token_max_n=80 and runs wetext. Keep that."""
+        apply = getattr(self.model, "_apply_frontend", None)
+        if apply is None:
+            return [text]
+        _joined, _lang, sentences = apply(text)
+        return [s for s in (sentences or []) if s and str(s).strip()] or [text]
 
-    def design(self, instruction, text, **_kw):
-        audio, sr, plan = self.model.generate_voice_design(
-            instruction=instruction,
-            text=text,
+    def _join(self, waves, sr, fade_ms=50.0):
+        import numpy as np
+
+        if len(waves) == 1:
+            return waves[0], sr
+        try:
+            import torch
+            from fireredtts3.core import cross_fade
+
+            out = _as_torch(waves[0])
+            fade = int(fade_ms / 1000.0 * sr)
+            for wave in waves[1:]:
+                out = cross_fade(out, _as_torch(wave), fade)
+            return _as_wave(out, sr)
+        except Exception:
+            return np.concatenate([np.asarray(w, dtype="float32").reshape(-1) for w in waves]), sr
+
+    def _pace(self, audio, sr, instruction="", speed=None):
+        factor = clamp_speed(speed) if speed is not None else speed_for(instruction)
+        if abs(factor - 1.0) < 0.05:
+            return audio, sr
+        # Official example: "adjust the speed to 0.5x"; max_gen_steps is 400.
+        paced, out_sr = self.model.generate_acoustic_edit(
+            instruction="adjust the speed to {:.1f}x".format(factor),
+            audio_in=_as_torch(audio),
+            audio_in_sr=int(sr),
             n_timesteps=int(tts_el.N_TIMESTEPS),
-            inference_cfg=float(tts_el.DESIGN_CFG),
+            inference_cfg=1.2,
             seed=int(tts_el.SEED),
         )
-        wave, sr = _as_wave(audio, sr)
-        return wave, sr, {"plan": plan}
+        log.info("acoustic_edit speed %.1fx after synth", factor)
+        return _as_wave(paced, out_sr)
+
+    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        waves, sr_out = [], self.sample_rate
+        prompt = _as_torch(prompt_audio)
+        already = hasattr(self.model, "_apply_frontend")
+        for sent in self._sentences(text):
+            audio, sr, _ = as_tts_triplet(self.model.generate_tts(
+                prompt_text=prompt_text or "",
+                prompt_audio=prompt,
+                prompt_audio_sr=int(prompt_sr),
+                text=sent,
+                n_timesteps=int(tts_el.N_TIMESTEPS),
+                inference_cfg=float(tts_el.INFERENCE_CFG),
+                seed=int(tts_el.SEED),
+                **({"do_clean": False, "do_tn": False, "do_split": False} if already else {}),
+            ))
+            wave, sr_out = self._pace(*_as_wave(audio, sr), speed=kw.get("speed"))
+            waves.append(wave)
+        return self._join(waves, sr_out)
+
+    def design(self, instruction, text, **kw):
+        # Re-plan once, then feed that plan back so later sentences keep 口音 / 语速 / 音色.
+        speak_as = instruction
+        plan_out, waves, sr_out = None, [], self.sample_rate
+        already = hasattr(self.model, "_apply_frontend")
+        for sent in self._sentences(text):
+            audio, sr, seg_plan = self.model.generate_voice_design(
+                instruction=speak_as,
+                text=sent,
+                n_timesteps=int(tts_el.N_TIMESTEPS),
+                inference_cfg=float(tts_el.DESIGN_CFG),
+                seed=int(tts_el.SEED),
+                **({"do_clean": False, "do_tn": False, "do_split": False} if already else {}),
+            )
+            if seg_plan and plan_out is None:
+                plan_out = seg_plan
+                speak_as = seg_plan
+            wave, sr_out = self._pace(*_as_wave(audio, sr), instruction, speed=kw.get("speed"))
+            waves.append(wave)
+        wave, sr = self._join(waves, sr_out)
+        return wave, sr, {"plan": plan_out}
 
 
 def _load():

@@ -50,6 +50,10 @@ trap 'rm -rf "$stage"' EXIT
 
 mkdir -p "$stage/app"
 cp -R "$repo_root/wrapper" "$stage/app/wrapper"
+if [ -d "$repo_root/voices" ]; then
+  mkdir -p "$stage/app/voices"
+  cp -R "$repo_root/voices/." "$stage/app/voices/"
+fi
 find "$stage/app" -name '__pycache__' -type d -prune -exec rm -rf {} +
 paths="app"
 

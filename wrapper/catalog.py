@@ -36,8 +36,7 @@ BASES = {
     "crispasr": [
         (("tts",), "crispasr_tts"),
     ],
-    # FireRedTTS3-Instruct: one weight does preset (frozen design), clone, and design.
-    # tts_design is listed so MODEL_SUPPORTS may advertise it; HTTP still mounts under tts.
+    # FireRedTTS3-Instruct: one weight does preset, clone, and design; tts_design advertises, HTTP mounts under tts.
     "firered": [
         (("tts", "tts_clone", "tts_design"), "firered"),
     ],
@@ -136,7 +135,7 @@ _MOUNTS = {
          "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
         ("GET", "/v1/audio/voices", "List preset voices", False),
     ],
-    # ElevenLabs voice_id first; OpenAI /v1/audio/* kept as aliases.
+    # ElevenLabs voice_id + /v1/tasks only. No OpenAI /v1/audio/* aliases.
     ("firered", "tts"): [
         ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
         ("GET", "/v1/voices/{voice_id}", "Get one voice by id", False),
@@ -148,12 +147,6 @@ _MOUNTS = {
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Same as text-to-speech, streamed as the audio is produced", False),
-        ("GET", "/v1/audio/voices", "OpenAI-shaped alias of GET /v1/voices", False),
-        ("POST", "/v1/audio/speech",
-         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions still "
-         "designs once without saving when this process also serves tts; ref_audio "
-         "clones for this request only",
-         True),
     ],
     ("firered", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
@@ -164,9 +157,6 @@ _MOUNTS = {
     ("firered", "tts_clone"): [
         ("POST", "/v1/voices/add",
          "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
-        ("POST", "/v1/audio/speech/clone",
-         "One-shot clone+speak (multipart: file + input + ref_text); does not persist a voice_id",
-         True),
     ],
     ("breeze", "tts"): [
         ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
@@ -179,12 +169,6 @@ _MOUNTS = {
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Same as text-to-speech, streamed as the audio is produced", False),
-        ("GET", "/v1/audio/voices", "OpenAI-shaped alias of GET /v1/voices", False),
-        ("POST", "/v1/audio/speech",
-         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions still "
-         "designs once without saving when this process also serves tts; ref_audio "
-         "clones for this request only",
-         True),
     ],
     ("breeze", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
@@ -195,9 +179,6 @@ _MOUNTS = {
     ("breeze", "tts_clone"): [
         ("POST", "/v1/voices/add",
          "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
-        ("POST", "/v1/audio/speech/clone",
-         "One-shot clone+speak (multipart: file + input + ref_text); does not persist a voice_id",
-         True),
     ],
     # One endpoint: a script is already the unit of work, and the model has no streaming decode.
     ("tts_dialogue", "tts_dialogue"): [
