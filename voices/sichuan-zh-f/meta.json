@@ -1,0 +1,13 @@
+{
+  "voice_id": "sichuan-zh-f",
+  "name": "四川女 / Sichuan Female",
+  "category": "premade",
+  "instruction": "一位成年女性，用自然的四川话说话，声音亲切，语速中等。",
+  "sample_text": "今天天气很好，我们一起去公园散步吧。",
+  "description": "四川话成年女声，亲切。Adult female, Sichuan dialect, friendly.",
+  "labels": {
+    "language": "zh",
+    "accent": "sichuan",
+    "gender": "female"
+  }
+}

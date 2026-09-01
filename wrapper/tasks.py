@@ -38,15 +38,23 @@ _ROUTES = [
 INPUT_SECONDS_HEADER = "X-Audio-Input-Duration-Seconds"
 OUTPUT_SECONDS_HEADER = "X-Audio-Output-Duration-Seconds"
 
-# Advertised by /api/engine-spec next to the capability's own endpoints.
-ENDPOINTS = [
-    {"method": method, "path": TASKS_PATH + tail, "description": desc}
-    for method, tail, desc in _ROUTES
-] + [
-    {"method": method, "path": LEGACY_PATH + tail, "deprecated": True,
-     "description": "%s; alias of %s" % (desc, TASKS_PATH + tail)}
-    for method, tail, desc in _ROUTES
-]
+def advertised(legacy=True):
+    """Task routes this process will mount. FireRed / Breeze omit the /v1/audio/tasks alias."""
+    rows = [
+        {"method": method, "path": TASKS_PATH + tail, "description": desc}
+        for method, tail, desc in _ROUTES
+    ]
+    if legacy:
+        rows += [
+            {"method": method, "path": LEGACY_PATH + tail, "deprecated": True,
+             "description": "%s; alias of %s" % (desc, TASKS_PATH + tail)}
+            for method, tail, desc in _ROUTES
+        ]
+    return rows
+
+
+# Full set: what the engine can advertise. A process may mount a subset.
+ENDPOINTS = advertised()
 
 # Appended to a capability's own description so callers can discover the async mode.
 ASYNC_HINT = "async=1 -> 202 + task"
@@ -495,7 +503,7 @@ def _select(tasks, status, limit):
     return sorted(kept, key=lambda t: t.created), len(done) > room
 
 
-def mount(app):
+def mount(app, legacy=True):
     from fastapi import HTTPException
     from fastapi.responses import FileResponse, JSONResponse
 
@@ -549,8 +557,9 @@ def mount(app):
             return _dropped(t)
         return {"id": tid, "status": t.status, "canceling": True}
 
-    # One handler per route, reachable under both bases, so the alias can never drift.
-    for base in (TASKS_PATH, LEGACY_PATH):
+    # One handler per route. FireRed/Breeze pass legacy=False and only mount /v1/tasks.
+    bases = (TASKS_PATH, LEGACY_PATH) if legacy else (TASKS_PATH,)
+    for base in bases:
         app.get(base)(list_tasks)
         app.get(base + "/{tid}")(get_task)
         app.get(base + "/{tid}/result")(get_result)

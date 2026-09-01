@@ -1,0 +1,13 @@
+{
+  "voice_id": "beijing-zh-f",
+  "name": "北京女 / Beijing Female",
+  "category": "premade",
+  "instruction": "一位成年女性，用自然的北京话说话，带一点京腔，声音清脆，语速中等。",
+  "sample_text": "接下来为您播报今天的新闻摘要。",
+  "description": "北京话成年女声，带京腔。Adult female, Beijing dialect, crisp.",
+  "labels": {
+    "language": "zh",
+    "accent": "beijing",
+    "gender": "female"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "voice_id": "hunan-zh-f",
+  "name": "湖南女 / Hunan Female",
+  "category": "premade",
+  "instruction": "一位成年女性，用自然的湖南话说话，声音利落，语速中等。",
+  "sample_text": "今天天气很好，我们一起去公园散步吧。",
+  "description": "湖南话成年女声，利落。Adult female, Hunan dialect, brisk.",
+  "labels": {
+    "language": "zh",
+    "accent": "hunan",
+    "gender": "female"
+  }
+}

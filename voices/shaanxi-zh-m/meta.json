@@ -1,0 +1,13 @@
+{
+  "voice_id": "shaanxi-zh-m",
+  "name": "陕西男 / Shaanxi Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的陕西方言说话，声音厚重，语速中等。",
+  "sample_text": "各位同事，我们开始今天的会议。",
+  "description": "陕西方言成年男声，厚重。Adult male, Shaanxi dialect, deep.",
+  "labels": {
+    "language": "zh",
+    "accent": "shaanxi",
+    "gender": "male"
+  }
+}

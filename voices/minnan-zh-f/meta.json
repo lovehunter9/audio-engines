@@ -1,0 +1,13 @@
+{
+  "voice_id": "minnan-zh-f",
+  "name": "闽南女 / Minnan Female",
+  "category": "premade",
+  "instruction": "一位成年女性，用自然的闽南语说话，声音温软，语速中等。",
+  "sample_text": "今天天气很好，我们一起去公园散步吧。",
+  "description": "闽南语成年女声，温软。Adult female, Minnan / Hokkien, gentle.",
+  "labels": {
+    "language": "zh",
+    "accent": "minnan",
+    "gender": "female"
+  }
+}

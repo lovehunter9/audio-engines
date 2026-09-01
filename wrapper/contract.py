@@ -256,7 +256,8 @@ CONTRACT_ENDPOINTS = [
 
 
 def register(app, *, model_name, module, served, is_ready, error=None, task_api=False,
-             repo=None, model_format=None, quantization=None, sample_rate=None):
+             task_legacy=True, repo=None, model_format=None, quantization=None,
+             sample_rate=None):
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
@@ -277,8 +278,9 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     if task_api:
         from . import tasks
 
-        tasks.mount(app)
-        spec["endpoints"].extend(dict(e, available=True) for e in tasks.ENDPOINTS)
+        tasks.mount(app, legacy=task_legacy)
+        spec["endpoints"].extend(
+            dict(e, available=True) for e in tasks.advertised(legacy=task_legacy))
     for endpoint in spec["endpoints"]:
         endpoint.setdefault("async_supported", False)
 

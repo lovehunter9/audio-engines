@@ -1,0 +1,13 @@
+{
+  "voice_id": "dongbei-zh-f",
+  "name": "东北女 / Northeastern Female",
+  "category": "premade",
+  "instruction": "一位成年女性，用自然的东北话说话，声音干脆，带着笑意，语速中等。",
+  "sample_text": "今天天气很好，我们一起去公园散步吧。",
+  "description": "东北话成年女声，干脆。Adult female, Northeastern Mandarin, brisk.",
+  "labels": {
+    "language": "zh",
+    "accent": "dongbei",
+    "gender": "female"
+  }
+}

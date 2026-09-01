@@ -69,8 +69,6 @@ _EL_TTS_ROUTES = (
     ("POST", "/v1/voices/{voice_id}/edit", False),
     ("POST", "/v1/text-to-speech/{voice_id}", True),
     ("POST", "/v1/text-to-speech/{voice_id}/stream", False),
-    ("GET", "/v1/audio/voices", False),
-    ("POST", "/v1/audio/speech", True),
 )
 _EL_DESIGN_ROUTES = (
     ("POST", "/v1/text-to-voice/design", True),
@@ -78,7 +76,6 @@ _EL_DESIGN_ROUTES = (
 )
 _EL_CLONE_ROUTES = (
     ("POST", "/v1/voices/add", True),
-    ("POST", "/v1/audio/speech/clone", True),
 )
 for _el_mod in ("firered", "breeze"):
     for _method, _path, _async in _EL_TTS_ROUTES:

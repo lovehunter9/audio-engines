@@ -1,0 +1,13 @@
+{
+  "voice_id": "hunan-zh-m",
+  "name": "湖南男 / Hunan Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的湖南话说话，声音硬朗，语速中等。",
+  "sample_text": "今天这条路有点堵，我们晚点再出发。",
+  "description": "湖南话成年男声，硬朗。Adult male, Hunan dialect, firm.",
+  "labels": {
+    "language": "zh",
+    "accent": "hunan",
+    "gender": "male"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "voice_id": "beijing-zh-m",
+  "name": "北京男 / Beijing Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的北京话说话，带一点京腔，声音稳，语速中等。",
+  "sample_text": "各位同事，我们开始今天的会议。",
+  "description": "北京话成年男声，带京腔。Adult male, Beijing dialect, even.",
+  "labels": {
+    "language": "zh",
+    "accent": "beijing",
+    "gender": "male"
+  }
+}

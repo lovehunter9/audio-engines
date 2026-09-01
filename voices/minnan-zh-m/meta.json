@@ -1,0 +1,13 @@
+{
+  "voice_id": "minnan-zh-m",
+  "name": "闽南男 / Minnan Male",
+  "category": "premade",
+  "instruction": "一位成年男性，用自然的闽南语说话，声音厚实，语速中等。",
+  "sample_text": "今天这条路有点堵，我们晚点再出发。",
+  "description": "闽南语成年男声，厚实。Adult male, Minnan / Hokkien, solid.",
+  "labels": {
+    "language": "zh",
+    "accent": "minnan",
+    "gender": "male"
+  }
+}
