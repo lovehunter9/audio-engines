@@ -1330,7 +1330,7 @@ def t_tts_el(module_name="firered"):
     build = __import__("wrapper.caps.%s" % module_name, fromlist=["build_app"]).build_app
     wav = wav_of(0.4)
 
-    with TestClient(build(["tts", "tts_clone"])) as c:
+    with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
         advertises_tasks(c, module_name)
         spec_paths = mounted(c)
         check("%s advertises ElevenLabs list/design/speak" % module_name,
@@ -1415,7 +1415,7 @@ def t_tts_el(module_name="firered"):
             contract(c, doc, module_name)
 
     tts_el._state.update(ready=False, error="weights are missing", backend=None, store=None)
-    with TestClient(build(["tts", "tts_clone"])) as c:
+    with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
         r = c.get("/v1/voices")
         check("%s list is 503 while loading" % module_name, r.status_code == 503
               and "weights are missing" in r.text, r.text[:100])

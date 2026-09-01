@@ -37,12 +37,13 @@ BASES = {
         (("tts",), "crispasr_tts"),
     ],
     # FireRedTTS3-Instruct: one weight does preset (frozen design), clone, and design.
+    # tts_design is listed so MODEL_SUPPORTS may advertise it; HTTP still mounts under tts.
     "firered": [
-        (("tts", "tts_clone"), "firered"),
+        (("tts", "tts_clone", "tts_design"), "firered"),
     ],
     # Breeze TTS 2: the same three slots on one 3B checkpoint (zh/en).
     "breeze": [
-        (("tts", "tts_clone"), "breeze"),
+        (("tts", "tts_clone", "tts_design"), "breeze"),
     ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
@@ -143,19 +144,22 @@ _MOUNTS = {
          "Delete a cloned or designed voice; premade voices return 400", False),
         ("POST", "/v1/voices/{voice_id}/edit",
          "Edit a cloned or designed voice (multipart: name required); premade returns 400", False),
-        ("POST", "/v1/text-to-voice/design",
-         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
-        ("POST", "/v1/text-to-voice",
-         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
         ("POST", "/v1/text-to-speech/{voice_id}",
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Same as text-to-speech, streamed as the audio is produced", False),
         ("GET", "/v1/audio/voices", "OpenAI-shaped alias of GET /v1/voices", False),
         ("POST", "/v1/audio/speech",
-         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions designs "
-         "once without saving; ref_audio clones for this request only",
+         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions still "
+         "designs once without saving when this process also serves tts; ref_audio "
+         "clones for this request only",
          True),
+    ],
+    ("firered", "tts_design"): [
+        ("POST", "/v1/text-to-voice/design",
+         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
+        ("POST", "/v1/text-to-voice",
+         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
     ],
     ("firered", "tts_clone"): [
         ("POST", "/v1/voices/add",
@@ -171,19 +175,22 @@ _MOUNTS = {
          "Delete a cloned or designed voice; premade voices return 400", False),
         ("POST", "/v1/voices/{voice_id}/edit",
          "Edit a cloned or designed voice (multipart: name required); premade returns 400", False),
-        ("POST", "/v1/text-to-voice/design",
-         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
-        ("POST", "/v1/text-to-voice",
-         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
         ("POST", "/v1/text-to-speech/{voice_id}",
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Same as text-to-speech, streamed as the audio is produced", False),
         ("GET", "/v1/audio/voices", "OpenAI-shaped alias of GET /v1/voices", False),
         ("POST", "/v1/audio/speech",
-         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions designs "
-         "once without saving; ref_audio clones for this request only",
+         "OpenAI-shaped TTS: voice/voice_id speaks a stored voice; instructions still "
+         "designs once without saving when this process also serves tts; ref_audio "
+         "clones for this request only",
          True),
+    ],
+    ("breeze", "tts_design"): [
+        ("POST", "/v1/text-to-voice/design",
+         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
+        ("POST", "/v1/text-to-voice",
+         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
     ],
     ("breeze", "tts_clone"): [
         ("POST", "/v1/voices/add",
