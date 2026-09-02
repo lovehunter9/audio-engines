@@ -1,15 +1,17 @@
 # ElevenLabs-shaped TTS: list / design / clone / speak on voice_id; premade slots freeze a design sample on first speak.
 import base64
+import hashlib
 import io
 import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .. import hfgate
@@ -106,6 +108,8 @@ _FORMATS = {
     "opus": ("OGG", "OPUS", "audio/ogg"),
     "pcm": (None, None, "audio/L16"),
 }
+# Public FRP / LLM gateway resets around 10–25 MB (530). Speech mp3 stays under this.
+_EDGE_SAFE_BYTES = 6 * 1024 * 1024
 
 _state = _runtime.state
 _gen_lock = threading.Lock()
@@ -155,6 +159,37 @@ def _encode(audio, sr, fmt):
 
 def _wav_bytes(audio, sr):
     return _encode(audio, sr, "wav")
+
+
+def _encode_mp3_fit(audio, sr):
+    """Speech mp3 sized to fit the public hop. 64 kbps is the ceiling; longer clips drop further."""
+    dur = max(float(seconds(audio, sr) or 0.0), 0.25)
+    kbps = min(64, max(24, int(_EDGE_SAFE_BYTES * 8 / dur / 1000)))
+    pcm = _to_mono(audio).astype("<f4").tobytes()
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-nostdin",
+             "-f", "f32le", "-ar", str(int(sr)), "-ac", "1", "-i", "pipe:0",
+             "-b:a", "%dk" % kbps, "-f", "mp3", "pipe:1"],
+            input=pcm, capture_output=True, check=False)
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+        log.warning("ffmpeg mp3 fit rc=%s: %s", r.returncode, (r.stderr or b"")[-200:])
+    except OSError as e:
+        log.warning("ffmpeg mp3 fit missing: %s", e)
+    return _encode(audio, sr, "mp3")
+
+
+def _encode_edge(audio, sr, fmt):
+    """Encode `fmt`, but never hand the public hop a body over _EDGE_SAFE_BYTES."""
+    body = _encode(audio, sr, fmt)
+    if len(body) <= _EDGE_SAFE_BYTES:
+        return body, fmt
+    compact = _encode_mp3_fit(audio, sr)
+    if compact and len(compact) < len(body):
+        log.info("edge-safe %s %dB -> mp3 %dB", fmt, len(body), len(compact))
+        return compact, "mp3"
+    return body, fmt
 
 
 def _output_format(raw, default="mp3"):
@@ -244,6 +279,11 @@ def premade_cards(backend, module=None):
     return rows
 
 
+# Catalog fields only; identity is instruction (design) or prompt.wav+txt (clone).
+_CARD_KEYS = ("name", "description", "instruction", "sample_text", "labels", "source",
+              "transcript")
+
+
 def _premade_dir(path):
     """True only for a premade card. Cloned / designed / unknown dirs stay."""
     path = Path(path)
@@ -259,38 +299,151 @@ def _premade_dir(path):
     return isinstance(meta, dict) and meta.get("category") == "premade"
 
 
-def seed_builtins(module, dest, backend=None, cards=None):
-    """Wipe every premade card, then plant native voices plus our pack; clones stay."""
+def _read_json(path):
+    try:
+        doc = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _instruction_differs(want, have):
+    """Present on one side only, or both present and not equal."""
+    a, b = "instruction" in (want or {}), "instruction" in (have or {})
+    if a != b:
+        return True
+    return a and want["instruction"] != have["instruction"]
+
+
+def _norm_text(s):
+    return " ".join((s or "").replace("\r\n", "\n").split())
+
+
+def _read_text(path):
+    path = Path(path)
+    try:
+        return path.read_text() if path.is_file() else None
+    except OSError:
+        return None
+
+
+def _wav_fp(path):
+    path = Path(path) if path is not None else None
+    if path is None or not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _card_source(card, pack=None, vid=None):
+    """clone = factory ref wav+transcript; design = instruction freeze. Infer wav in pack."""
+    raw = str((card or {}).get("source") or "").strip().lower()
+    if raw in ("clone", "design"):
+        return raw
+    if pack is not None and vid and (Path(pack) / vid / "prompt.wav").is_file():
+        return "clone"
+    return "design"
+
+
+def _replant_needed(target, card, pack):
+    """Wipe only when the identity of that source kind changed."""
+    source = _card_source(card, pack, target.name)
+    have = _read_json(target / "meta.json") or {}
+    if source == "clone":
+        pack_root = Path(pack) / target.name if pack is not None else None
+        want_fp = _wav_fp(pack_root / "prompt.wav") if pack_root is not None else None
+        have_fp = _wav_fp(target / "prompt.wav")
+        want_t = _norm_text(
+            (_read_text(pack_root / "prompt.txt") if pack_root is not None else None)
+            or card.get("transcript") or "")
+        have_t = _norm_text(_read_text(target / "prompt.txt") or have.get("transcript") or "")
+        if want_fp is None:
+            return have.get("source") != "clone" or have_fp is not None
+        return want_fp != have_fp or want_t != have_t
+    return _instruction_differs(card, have)
+
+
+def _write_card(target, card, pack=None):
+    target.mkdir(parents=True, exist_ok=True)
+    meta = dict(card)
+    meta.setdefault("category", "premade")
+    meta.setdefault("source", _card_source(card, pack, target.name))
+    meta["voice_id"] = target.name
+    (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+
+
+def _plant(target, card, pack):
+    src = pack / target.name if pack is not None else None
+    if src is not None and src.is_dir() and (src / "meta.json").is_file():
+        shutil.copytree(src, target)
+        return
+    _write_card(target, card, pack)
+
+
+def _patch_card(target, want, pack=None):
+    """Copy catalog fields from the union card. Keep frozen / plan / wav."""
+    have = _read_json(target / "meta.json") or {}
+    for key in _CARD_KEYS:
+        if key in want:
+            have[key] = want[key]
+        elif key in have:
+            del have[key]
+    have["voice_id"] = target.name
+    have.setdefault("category", "premade")
+    have["source"] = _card_source(want, pack, target.name)
+    (target / "meta.json").write_text(json.dumps(have, ensure_ascii=False, indent=2))
+
+
+def seed_builtins(module, dest, backend=None, cards=None, pack=None):
+    """Reconcile premade cards with the current union. User clones / designs stay.
+
+    Two premade kinds, compared differently:
+
+    * design — identity is `instruction`. Change it → wipe (next speak redesigns).
+    * clone — identity is `prompt.wav` + `prompt.txt` (sha256 + normalized text).
+      Change the factory ref → wipe and copy the new pair. Changing name /
+      instruction (Voice Direction) only patches meta.
+
+    Kind is `source` on the card, or inferred from a wav in the pack.
+    """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     (dest / "pending").mkdir(parents=True, exist_ok=True)
-    for child in list(dest.iterdir()):
-        if _premade_dir(child):
-            shutil.rmtree(child)
     if cards is None:
         cards = premade_cards(backend, module)
-    pack = builtin_voices_dir(module)
-    for card in cards:
+    want = {}
+    for card in cards or []:
         if not isinstance(card, dict):
             continue
         vid = str(card.get("voice_id") or "").strip()
-        if not vid:
+        if vid:
+            want[vid] = card
+    if pack is None:
+        pack = builtin_voices_dir(module)
+    else:
+        pack = Path(pack)
+    for child in list(dest.iterdir()):
+        if not _premade_dir(child):
             continue
+        if child.name not in want:
+            shutil.rmtree(child)
+    for vid, card in want.items():
         target = dest / vid
-        if target.exists():
+        if target.exists() and not _premade_dir(target):
             continue
-        src = pack / vid if pack is not None else None
-        if src is not None and src.is_dir() and (src / "meta.json").is_file():
-            shutil.copytree(src, target)
+        if not target.exists():
+            _plant(target, card, pack)
             continue
-        meta = dict(card)
-        meta.setdefault("category", "premade")
-        meta["voice_id"] = vid
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
+        if _replant_needed(target, card, pack):
+            shutil.rmtree(target)
+            _plant(target, card, pack)
+            continue
+        _patch_card(target, card, pack)
     planted = {c["voice_id"]: c for c in load_voice_cards(dest, category="premade")}
-    return [planted[c["voice_id"]] for c in cards
-            if isinstance(c, dict) and c.get("voice_id") in planted]
+    return [planted[vid] for vid in want if vid in planted]
 
 
 class VoiceStore:
@@ -354,7 +507,7 @@ class VoiceStore:
     def add_clone(self, name, wav_bytes, transcript, description=""):
         vid = _new_id("clone")
         meta = {"voice_id": vid, "name": name or vid, "category": "cloned",
-                "description": description or "", "frozen": True}
+                "source": "clone", "description": description or "", "frozen": True}
         self._write(vid, meta, wav_bytes=wav_bytes, transcript=transcript)
         return meta
 
@@ -382,6 +535,7 @@ class VoiceStore:
         extra = doc.get("extra") or {}
         plan = extra.get("plan")
         meta = {"voice_id": vid, "name": name or vid, "category": "generated",
+                "source": "design",
                 "description": description or doc.get("instruction") or "",
                 "instruction": doc.get("instruction") or "", "frozen": True,
                 "generated_voice_id": generated_voice_id}
@@ -577,7 +731,7 @@ def _load_prompt_wav(path):
     return audio, int(sr)
 
 
-def _ensure_frozen(vid):
+def _ensure_frozen(vid, ctx=None):
     """Premade slots have no wav until first use: run design once and keep the sample."""
     store, backend = _store(), _backend()
     meta = store.get(vid)
@@ -586,12 +740,16 @@ def _ensure_frozen(vid):
     wav_path, transcript, _stored = store.prompt(vid)
     if wav_path is not None:
         return meta, wav_path, transcript
+    if (meta.get("source") or "").strip().lower() == "clone":
+        raise HTTPException(status_code=400,
+                            detail="premade clone voice %r is missing prompt.wav / prompt.txt"
+                            % vid)
     instruction = meta.get("instruction") or ""
     sample = meta.get("sample_text") or _preview_text(instruction)
     if not instruction:
         raise HTTPException(status_code=400,
                             detail="voice %r has no frozen sample and no design instruction" % vid)
-    audio, sr, extra = backend.design(instruction, sample)
+    audio, sr, extra = backend.design(instruction, sample, ctx=ctx)
     store.freeze(vid, audio, sr, sample, extra=extra)
     wav_path, transcript, _stored = store.prompt(vid)
     return store.get(vid), wav_path, transcript
@@ -613,25 +771,49 @@ def _design_instruction(meta):
     return (plan or meta.get("instruction") or "").strip()
 
 
-def _speak_voice(vid, text, instruction=None):
+def job_tick(ctx, done=None, total=None, stage="synthesize"):
+    """See a cancel between two units, and publish done/total when the job has pieces."""
+    if ctx is None:
+        return
+    ctx.checkpoint()
+    if done is not None and total is not None:
+        ctx.progress(stage=stage, done=int(done), total=int(total))
+
+
+def _design_identity(meta):
+    """True when the card's identity is an instruction / 12-item plan, not a factory wav."""
+    meta = meta or {}
+    src = str(meta.get("source") or "").strip().lower()
+    cat = str(meta.get("category") or "").strip().lower()
+    if src == "clone" or cat == "cloned":
+        return False
+    if src == "design" or cat == "generated":
+        return True
+    return cat == "premade"
+
+
+def _speak_voice(vid, text, instruction=None, ctx=None):
     backend = _backend()
-    meta, wav_path, transcript = _ensure_frozen(vid)
-    # FireRed design-speak wants the 12-item plan; Breeze Voice Direction wants the stored instruction.
-    if getattr(backend, "prefer_design_speak", False):
+    meta, wav_path, transcript = _ensure_frozen(vid, ctx=ctx)
+    # FireRed design-identity stays on generate_voice_design; Breeze factory blurbs are not Voice Direction.
+    if getattr(backend, "prefer_design_speak", False) and _design_identity(meta):
         speak_as = (instruction or _design_instruction(meta) or "").strip()
         if speak_as:
             with _gen_lock:
-                audio, sr, extra = backend.design(speak_as, text)
+                audio, sr, extra = backend.design(speak_as, text, ctx=ctx)
             if extra and extra.get("plan") and not (meta or {}).get("plan"):
                 _store().remember_plan(vid, extra["plan"])
             return audio, sr
-    speak_as = (instruction or (meta or {}).get("instruction") or "").strip()
+    speak_as = (instruction or "").strip()
+    if not speak_as and getattr(backend, "card_instruction_is_direction", True):
+        speak_as = ((meta or {}).get("instruction") or "").strip()
     prompt, sr = _load_prompt_wav(wav_path)
     with _gen_lock:
-        return backend.clone(text, prompt, sr, transcript or text, instruction=speak_as)
+        return backend.clone(text, prompt, sr, transcript or text,
+                             instruction=speak_as, ctx=ctx)
 
 
-def _speak_ref(text, wav_bytes, transcript, instruction=None):
+def _speak_ref(text, wav_bytes, transcript, instruction=None, ctx=None):
     import soundfile as sf
 
     backend = _backend()
@@ -643,13 +825,13 @@ def _speak_ref(text, wav_bytes, transcript, instruction=None):
         audio = audio.mean(axis=1)
     with _gen_lock:
         return backend.clone(text, audio, int(sr), transcript or "",
-                             instruction=(instruction or "").strip())
+                             instruction=(instruction or "").strip(), ctx=ctx)
 
 
-def _speak_design(instruction, text):
+def _speak_design(instruction, text, ctx=None):
     backend = _backend()
     with _gen_lock:
-        audio, sr, _extra = backend.design(instruction, text)
+        audio, sr, _extra = backend.design(instruction, text, ctx=ctx)
     return audio, sr
 
 
@@ -659,7 +841,7 @@ def _headers(fmt, sr):
 
 
 def _audio_response(audio, sr, fmt, stream=False):
-    body = _encode(audio, sr, fmt)
+    body, fmt = _encode_edge(audio, sr, fmt)
     mime = _FORMATS[fmt][2]
     headers = _headers(fmt, sr)
     if stream:
@@ -717,18 +899,18 @@ def build_app(supports, module=None):
                     raise HTTPException(status_code=400,
                                         detail="ref_text (the exact transcript of the reference) is required")
                 _check_ref_audio(data)
-                audio, sr = _speak_ref(text, data, ref_text, instruction=instructions)
+                audio, sr = _speak_ref(text, data, ref_text, instruction=instructions, ctx=ctx)
             elif voice:
-                audio, sr = _speak_voice(voice, text, instruction=instructions)
+                audio, sr = _speak_voice(voice, text, instruction=instructions, ctx=ctx)
             elif instructions:
                 _check_design_text(instructions)
-                audio, sr = _speak_design(instructions, text)
+                audio, sr = _speak_design(instructions, text, ctx=ctx)
             else:
                 voices = _store().list()
                 if not voices:
                     raise HTTPException(status_code=400,
                                         detail="voice_id is required (this instance has no voices yet)")
-                audio, sr = _speak_voice(voices[0]["voice_id"], text)
+                audio, sr = _speak_voice(voices[0]["voice_id"], text, ctx=ctx)
             ctx.meter(output_seconds=seconds(audio, sr))
             ctx.progress(ratio=1.0, stage="done")
             return _audio_response(audio, sr, fmt, stream=stream)
@@ -807,7 +989,7 @@ def build_app(supports, module=None):
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="design")
                 with _gen_lock:
-                    audio, sr, extra = _backend().design(instruction, text)
+                    audio, sr, extra = _backend().design(instruction, text, ctx=ctx)
                 gid, wav, sr = _store().put_preview(instruction, audio, sr, text, extra=extra)
                 ctx.meter(output_seconds=seconds(audio, sr))
                 ctx.progress(ratio=1.0, stage="done")
@@ -837,9 +1019,19 @@ def build_app(supports, module=None):
                 raise HTTPException(status_code=400, detail="generated_voice_id is required")
             if not name:
                 raise HTTPException(status_code=400, detail="voice_name is required")
-            meta = _store().promote_preview(gid, name,
-                                            str(payload.get("voice_description") or "").strip())
-            return _public_voice(meta)
+            desc = str(payload.get("voice_description") or "").strip()
+            async_ = request.query_params.get("async")
+
+            def _work(ctx):
+                ctx.progress(ratio=0.0, stage="save")
+                job_tick(ctx, 0, 1, stage="save")
+                meta = _store().promote_preview(gid, name, desc)
+                job_tick(ctx, 1, 1, stage="save")
+                ctx.progress(ratio=1.0, stage="done")
+                return _public_voice(meta)
+
+            return await tasks.dispatch(async_, "tts", MODEL_NAME, _work,
+                                        fail="persist designed voice failed")
 
         @app.post("/v1/text-to-speech/{voice_id}/stream")
         async def el_stream(voice_id: str, request: Request):
@@ -874,7 +1066,8 @@ def build_app(supports, module=None):
                             labels: str = Form(default=""),
                             ref_text: str = Form(default=""),
                             files: list[UploadFile] | None = File(default=None),
-                            file: UploadFile | None = File(default=None)):
+                            file: UploadFile | None = File(default=None),
+                            async_: str = Query(default=None, alias="async")):
             _require_ready()
             uploads = [u for u in (files or []) if u is not None]
             if file is not None:
@@ -895,8 +1088,18 @@ def build_app(supports, module=None):
             if not transcript:
                 raise HTTPException(status_code=400,
                                     detail="description or ref_text must be the exact transcript of the reference")
-            meta = _store().add_clone(name, _as_prompt_wav(data), transcript, description=description)
-            return {"voice_id": meta["voice_id"]}
+            wav = _as_prompt_wav(data)
+
+            def _work(ctx):
+                ctx.progress(ratio=0.0, stage="clone")
+                job_tick(ctx, 0, 1, stage="clone")
+                meta = _store().add_clone(name, wav, transcript, description=description)
+                job_tick(ctx, 1, 1, stage="clone")
+                ctx.progress(ratio=1.0, stage="done")
+                return {"voice_id": meta["voice_id"]}
+
+            return await tasks.dispatch(async_, "tts_clone", MODEL_NAME, _work,
+                                        fail="voice clone failed")
 
     return app
 

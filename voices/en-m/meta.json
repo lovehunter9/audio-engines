@@ -1,7 +1,8 @@
 {
-  "voice_id": "warm-en-m",
-  "name": "温暖男 / Warm Male",
+  "voice_id": "en-m",
+  "name": "英文男 / English Male",
   "category": "premade",
+  "source": "clone",
   "instruction": "A warm adult male narrator speaking English, calm and confident.",
   "sample_text": "It is good to hear your voice again after all this time.",
   "description": "英语成年男声，温暖、沉稳。Adult English male narrator, warm and calm.",
