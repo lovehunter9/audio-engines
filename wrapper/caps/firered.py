@@ -75,7 +75,7 @@ def patch_backend_tts_triplet():
 class FireRedBackend:
     sample_rate = 24000
     uses_shared_pack = True
-    # generate_tts never sees the design instruction; speak premade through generate_voice_design.
+    # generate_tts has no instruction; design-identity cards keep generate_voice_design + plan, clones speak the wav.
     prefer_design_speak = True
 
     def __init__(self, model):
@@ -132,10 +132,16 @@ class FireRedBackend:
         return _as_wave(paced, out_sr)
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
-        waves, sr_out = [], self.sample_rate
-        prompt = _as_torch(prompt_audio)
+        # Split here so cancel/progress land between sentences; one acoustic-edit on the join.
+        ctx = kw.get("ctx")
         already = hasattr(self.model, "_apply_frontend")
-        for sent in self._sentences(text):
+        sents = self._sentences(text)
+        total = len(sents)
+        prompt = _as_torch(prompt_audio)
+        waves, sr_out = [], self.sample_rate
+        extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
+        for i, sent in enumerate(sents):
+            tts_el.job_tick(ctx, i, total)
             audio, sr, _ = as_tts_triplet(self.model.generate_tts(
                 prompt_text=prompt_text or "",
                 prompt_audio=prompt,
@@ -144,32 +150,44 @@ class FireRedBackend:
                 n_timesteps=int(tts_el.N_TIMESTEPS),
                 inference_cfg=float(tts_el.INFERENCE_CFG),
                 seed=int(tts_el.SEED),
-                **({"do_clean": False, "do_tn": False, "do_split": False} if already else {}),
+                **extra,
             ))
-            wave, sr_out = self._pace(*_as_wave(audio, sr), speed=kw.get("speed"))
+            wave, sr_out = _as_wave(audio, sr)
             waves.append(wave)
-        return self._join(waves, sr_out)
+            tts_el.job_tick(ctx, i + 1, total)
+        tts_el.job_tick(ctx, total, total)
+        return self._pace(*self._join(waves, sr_out),
+                          instruction=str(kw.get("instruction") or ""),
+                          speed=kw.get("speed"))
 
     def design(self, instruction, text, **kw):
-        # Re-plan once, then feed that plan back so later sentences keep 口音 / 语速 / 音色.
+        # Re-plan once and reuse it so later sentences keep 口音 / 语速 / 音色; official design keeps the original blurb.
+        ctx = kw.get("ctx")
         speak_as = instruction
         plan_out, waves, sr_out = None, [], self.sample_rate
         already = hasattr(self.model, "_apply_frontend")
-        for sent in self._sentences(text):
+        sents = self._sentences(text)
+        total = len(sents)
+        extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
+        for i, sent in enumerate(sents):
+            tts_el.job_tick(ctx, i, total, stage="design")
             audio, sr, seg_plan = self.model.generate_voice_design(
                 instruction=speak_as,
                 text=sent,
                 n_timesteps=int(tts_el.N_TIMESTEPS),
                 inference_cfg=float(tts_el.DESIGN_CFG),
                 seed=int(tts_el.SEED),
-                **({"do_clean": False, "do_tn": False, "do_split": False} if already else {}),
+                **extra,
             )
             if seg_plan and plan_out is None:
                 plan_out = seg_plan
                 speak_as = seg_plan
-            wave, sr_out = self._pace(*_as_wave(audio, sr), instruction, speed=kw.get("speed"))
+            wave, sr_out = _as_wave(audio, sr)
             waves.append(wave)
+            tts_el.job_tick(ctx, i + 1, total, stage="design")
+        tts_el.job_tick(ctx, total, total, stage="design")
         wave, sr = self._join(waves, sr_out)
+        wave, sr = self._pace(wave, sr, instruction, speed=kw.get("speed"))
         return wave, sr, {"plan": plan_out}
 
 

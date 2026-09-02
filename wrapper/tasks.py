@@ -540,7 +540,10 @@ def mount(app, legacy=True):
             return JSONResponse(content=t.result, headers=t.meter_headers() or None)
         if not (t.result_path and os.path.isfile(t.result_path)):
             raise HTTPException(status_code=410, detail="the result was already dropped")
-        return FileResponse(t.result_path, media_type=t.content_type, headers=t.headers or None)
+        # gin strips Content-Length; close so a client that cannot see the size does not hang.
+        headers = dict(t.headers or {})
+        headers.setdefault("Connection", "close")
+        return FileResponse(t.result_path, media_type=t.content_type, headers=headers)
 
     def _dropped(t):
         _runner.forget(t)

@@ -1313,17 +1313,43 @@ class FakeELBackend:
                  "description": "test preset"}]
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        from wrapper.caps import tts_el
+
         self.calls.append(("clone", text, prompt_text, kw.get("instruction")))
+        tts_el.job_tick(kw.get("ctx"), 1, 1)
         n = max(2400, len(text) * 120)
         return np.zeros(n, dtype="float32"), 24000
 
     def design(self, instruction, text, **kw):
+        from wrapper.caps import tts_el
+
         self.calls.append(("design", instruction, text))
+        tts_el.job_tick(kw.get("ctx"), 1, 1, stage="design")
         n = max(2400, len(text) * 120)
         return np.zeros(n, dtype="float32"), 24000, {"plan": "ok"}
 
 
+class TickCtx:
+    """Stand-in for tasks.Context: count checkpoints, record progress, cancel on the Nth tick."""
+
+    def __init__(self, cancel_after=None):
+        self.n = 0
+        self.ticks = []
+        self.cancel_after = cancel_after
+
+    def checkpoint(self):
+        from wrapper.tasks import Cancelled
+
+        self.n += 1
+        if self.cancel_after is not None and self.n >= self.cancel_after:
+            raise Cancelled("canceled by client")
+
+    def progress(self, **kw):
+        self.ticks.append(kw)
+
+
 def t_voice_cards():
+    import json
     import tempfile
 
     from wrapper.caps import tts_el
@@ -1333,7 +1359,8 @@ def t_voice_cards():
     ids = [c.get("voice_id") for c in fr]
     langs = {(c.get("labels") or {}).get("language") for c in fr}
     check("shared builtin pack is zh+en only",
-          len(fr) == 25 and len(set(ids)) == 25, ids)
+          len(fr) == 4 and len(set(ids)) == 4
+          and set(ids) == {"zh-f", "zh-m", "en-f", "en-m"}, ids)
     check("no language outside zh/en", langs <= {"zh", "en"}, langs)
     check("firered and breeze read the same cards",
           [c.get("voice_id") for c in br] == ids, ids)
@@ -1350,14 +1377,29 @@ def t_voice_cards():
     dest = tempfile.mkdtemp(prefix="voices-seed-")
     seeded = tts_el.seed_builtins("firered", dest)
     check("seed copies shared cards onto the runtime dir", len(seeded) == len(fr))
-    kept = dest + "/warm-zh-f/prompt.txt"
-    open(kept, "w").write("keep me")
+    pack_card = next(c for c in fr if c.get("voice_id") == "zh-f")
+    check("clone pack plants factory wav and transcript",
+          os.path.isfile(dest + "/zh-f/prompt.wav")
+          and os.path.isfile(dest + "/zh-f/prompt.txt"))
+    factory_wav = open(dest + "/zh-f/prompt.wav", "rb").read()
+    meta_path = dest + "/zh-f/meta.json"
+    old = json.loads(open(meta_path).read())
+    old["name"] = "旧名"
+    old["description"] = "旧介绍"
+    old["instruction"] = "这是一条已废弃的设计词"
+    open(meta_path, "w").write(json.dumps(old, ensure_ascii=False))
     os.makedirs(dest + "/ja-f", exist_ok=True)
     open(dest + "/ja-f/meta.json", "w").write(
         '{"voice_id": "ja-f", "name": "old", "category": "premade"}')
     tts_el.seed_builtins("firered", dest)
-    check("seed replaces premade with the current pack",
-          not os.path.isfile(kept) or open(kept).read() != "keep me")
+    check("clone instruction change keeps the factory wav",
+          os.path.isfile(dest + "/zh-f/prompt.wav")
+          and open(dest + "/zh-f/prompt.wav", "rb").read() == factory_wav)
+    patched = json.loads(open(meta_path).read())
+    check("display fields follow the pack when the ref matches",
+          patched.get("name") == pack_card.get("name")
+          and patched.get("description") == pack_card.get("description")
+          and patched.get("instruction") == pack_card.get("instruction"))
     check("seed drops a premade that left the pack", not os.path.isdir(dest + "/ja-f"))
     for vid in ("fr3-warm-zh-f", "br2-clear-en-f"):
         os.makedirs(dest + "/" + vid, exist_ok=True)
@@ -1376,6 +1418,11 @@ def t_voice_cards():
     check("seed does not drop a cloned card", open(leftover).read().find("clone-keep") >= 0)
     check("seed does not drop a user card that reused an old id",
           open(reused).read().find("cloned") >= 0)
+    check("shared cards are factory clone",
+          all(c.get("source") == "clone" for c in fr)
+          and all(os.path.isfile(os.path.join(str(tts_el.voices_root()), c["voice_id"], "prompt.wav"))
+                  for c in fr),
+          [c.get("source") for c in fr])
     from wrapper.caps.firered import FireRedBackend
     backend_ids = [c["voice_id"] for c in FireRedBackend(None).presets()]
     check("firered backend presets read the cards", backend_ids == ids, backend_ids)
@@ -1408,6 +1455,256 @@ def t_voice_cards():
           planted_ids)
 
 
+def t_voice_cards_clone_seed():
+    """Clone premade identity is wav+transcript; instruction is Voice Direction only."""
+    import json
+    import tempfile
+
+    from wrapper.caps import tts_el
+
+    pack = tempfile.mkdtemp(prefix="pack-clone-")
+    dest = tempfile.mkdtemp(prefix="dest-clone-")
+    card = {"voice_id": "zh-f", "name": "中文女 / Chinese Female", "category": "premade",
+            "source": "clone", "instruction": "keep direction",
+            "description": "普通话女声。Mandarin female."}
+    os.makedirs(os.path.join(pack, "zh-f"))
+    open(os.path.join(pack, "zh-f", "meta.json"), "w").write(json.dumps(card, ensure_ascii=False))
+    open(os.path.join(pack, "zh-f", "prompt.wav"), "wb").write(b"RIFF" + b"A" * 80)
+    open(os.path.join(pack, "zh-f", "prompt.txt"), "w").write("今天天气很好")
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone seed plants wav and transcript",
+          open(os.path.join(dest, "zh-f", "prompt.txt")).read() == "今天天气很好"
+          and open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read().startswith(b"RIFF"))
+    card["instruction"] = "new direction"
+    card["name"] = "新名 / New"
+    open(os.path.join(pack, "zh-f", "meta.json"), "w").write(json.dumps(card, ensure_ascii=False))
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone instruction change keeps factory wav",
+          open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read() == b"RIFF" + b"A" * 80)
+    patched = json.loads(open(os.path.join(dest, "zh-f", "meta.json")).read())
+    check("clone instruction change patches display",
+          patched.get("name") == "新名 / New" and patched.get("instruction") == "new direction",
+          patched)
+    open(os.path.join(pack, "zh-f", "prompt.wav"), "wb").write(b"RIFF" + b"B" * 80)
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone wav change replants",
+          open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read() == b"RIFF" + b"B" * 80)
+    open(os.path.join(pack, "zh-f", "prompt.txt"), "w").write("换一句")
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone transcript change replants txt",
+          open(os.path.join(dest, "zh-f", "prompt.txt")).read() == "换一句")
+
+
+def t_breeze_split_speak():
+    from wrapper.caps import breeze
+
+    check("short chinese stays one piece",
+          breeze.split_speak("第一句。第二句！第三句？") == ["第一句。第二句！第三句？"])
+    check("short english stays one piece",
+          breeze.split_speak("Hello there. Next one!") == ["Hello there. Next one!"])
+    check("newlines always split",
+          breeze.split_speak("一行。\n二行。") == ["一行。", "二行。"])
+    tagged = breeze.split_speak("[笑] 欢迎来到今晚的故事时间，让我们一起开始吧。下一句。")
+    check("inline laugh stays in the line",
+          tagged == ["[笑] 欢迎来到今晚的故事时间，让我们一起开始吧。下一句。"], tagged)
+    en = breeze.split_speak("(laugh) Hello there. Next one.")
+    check("english laugh stays in the line",
+          en == ["(laugh) Hello there. Next one."], en)
+    check("short ellipsis stays one piece",
+          breeze.split_speak("Wait... Then this.") == ["Wait... Then this."])
+    limit = breeze.speak_limit()
+    zh = ("啊" * (limit - 2)) + "。下一句！"
+    zh_parts = breeze.split_speak(zh)
+    check("over-budget chinese cuts on 。！？",
+          len(zh_parts) == 2 and zh_parts[1] == "下一句！", zh_parts)
+    pad = ("alpha " * (limit // 6 + 4)).strip()
+    en_over = pad + " sees 3.14 exactly. Next one."
+    en_parts = breeze.split_speak(en_over)
+    check("english decimal is not a sentence cut",
+          any("3.14 exactly." in p for p in en_parts), en_parts)
+    check("english period plus space cuts when over budget",
+          any(p.strip() == "Next one." for p in en_parts), en_parts)
+    check("english title period is not a sentence cut",
+          breeze.split_speak(("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done.")
+          and any("Mr. Smith today." in p for p in breeze.split_speak(
+              ("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done.")),
+          breeze.split_speak(("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done."))
+    long = "一二，" * ((limit // 2) + 2)
+    parts = breeze.split_speak(long)
+    check("over-budget sentence splits on clauses",
+          len(parts) > 1 and all(len(p) <= limit for p in parts),
+          (limit, [len(p) for p in parts]))
+    thousands = ("word " * (limit // 5 + 3)).strip() + " costs 1,000 now, then more."
+    th_parts = breeze.split_speak(thousands)
+    check("english thousands comma is not a clause cut",
+          any("1,000 now," in p or "1,000 now, then more." in p for p in th_parts), th_parts)
+    blob = "啊" * (limit + 40)
+    check("unpunctuated over-budget stays one piece",
+          breeze.split_speak(blob) == [blob])
+
+
+def t_breeze_clone_slices():
+    fake_soundfile()
+    from wrapper.caps import tts_el
+    from wrapper.caps.breeze import BreezeBackend, speak_limit
+
+    be = BreezeBackend(None, None, None, None)
+    seen = []
+    cfgs = []
+
+    def gen(text, instruction, ref_path=None, ref_text=None, cfg=None, **kw):
+        seen.append(text)
+        cfgs.append(cfg)
+        return np.ones(2400, dtype="float32"), 24000
+
+    be._generate = gen
+    audio, sr = be.clone("第一句。第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("short clone stays one generate", seen == ["第一句。第二句。"], seen)
+    check("bare clone uses cfg scale 1", cfgs[-1] == tts_el.CFG_SCALE, cfgs)
+    seen.clear()
+    cfgs.clear()
+    audio, sr = be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("newline clone speaks each line once", seen == ["第一句。", "第二句。"], seen)
+    from wrapper.caps import breeze as breeze_cap
+    zh_gap = int(breeze_cap._PAUSE_MS_ZH / 1000.0 * 24000)
+    check("clone inserts a chinese pause between slices",
+          len(audio) == 2400 + 2400 + zh_gap and sr == 24000, (len(audio), zh_gap))
+    quiet = np.concatenate([
+        np.ones(1200, dtype="float32"),
+        np.full(400, 0.01, dtype="float32"),
+        np.zeros(800, dtype="float32"),
+    ])
+    mid = np.concatenate([np.ones(1600, dtype="float32"), np.zeros(4000, dtype="float32")])
+    joined, _ = breeze_cap._join([mid, quiet], 24000, pause_ms=0)
+    mid_kept = len(joined) - len(quiet)
+    check("middle slice drops trailing silence only",
+          1600 <= mid_kept <= 1600 + int(0.08 * 24000) + 2, mid_kept)
+    check("last slice keeps a quiet last syllable",
+          float(np.max(np.abs(joined[-1200:]))) >= 0.009, float(np.max(np.abs(joined[-1200:]))))
+    seen.clear()
+    cfgs.clear()
+    audio, sr = be.clone("Hello.\nNext.", np.zeros(2400, dtype="float32"), 24000, "ref")
+    en_gap = int(breeze_cap._PAUSE_MS_EN / 1000.0 * 24000)
+    check("clone inserts a shorter english pause",
+          len(audio) == 2400 + 2400 + en_gap, (len(audio), en_gap))
+    seen.clear()
+    cfgs.clear()
+    be.clone("短句。", np.zeros(2400, dtype="float32"), 24000, "ref",
+             instruction="说得慢一点")
+    check("request direction uses design cfg", cfgs[-1] == tts_el.DESIGN_CFG, cfgs)
+    seen.clear()
+    be.design("A warm voice.", "第一句。第二句。第三句。")
+    check("design stays one shot", seen == ["第一句。第二句。第三句。"], seen)
+    seen.clear()
+    try:
+        be.clone("啊" * (speak_limit() + 40), np.zeros(2400, dtype="float32"), 24000, "ref")
+        check("clone refuses unsplittable over-budget", False)
+    except ValueError as e:
+        check("clone refuse says too long", "too long" in str(e).lower()
+              and "max_seq_len=" in str(e), str(e)[:160])
+        check("clone did not generate the unsplittable piece", seen == [], seen)
+
+
+def t_tts_job_tick():
+    from wrapper.caps import tts_el
+    from wrapper.tasks import Cancelled
+
+    ctx = TickCtx()
+    tts_el.job_tick(None, 1, 2)
+    tts_el.job_tick(ctx, 1, 4)
+    check("tick publishes done/total",
+          ctx.ticks and ctx.ticks[-1].get("done") == 1 and ctx.ticks[-1].get("total") == 4,
+          ctx.ticks)
+    ctx2 = TickCtx(cancel_after=1)
+    try:
+        tts_el.job_tick(ctx2, 0, 2)
+        check("tick raises Cancelled", False)
+    except Cancelled:
+        check("tick raises Cancelled", True)
+
+
+def t_breeze_clone_cancel():
+    fake_soundfile()
+    from wrapper.caps.breeze import BreezeBackend
+    from wrapper.tasks import Cancelled
+
+    be = BreezeBackend(None, None, None, None)
+    seen = []
+
+    def gen(text, instruction, ref_path=None, ref_text=None, cfg=None, **kw):
+        seen.append(text)
+        return np.ones(80, dtype="float32"), 24000
+
+    be._generate = gen
+    ctx = TickCtx(cancel_after=3)
+    try:
+        be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref", ctx=ctx)
+        check("canceled breeze clone did not finish", False)
+    except Cancelled:
+        check("breeze clone stops after the current piece", seen == ["第一句。"], seen)
+    check("breeze clone published 1/2 before the next piece",
+          any(t.get("done") == 1 and t.get("total") == 2 for t in ctx.ticks), ctx.ticks)
+
+
+def t_firered_clone_cancel():
+    from wrapper.caps import firered
+    from wrapper.tasks import Cancelled
+
+    seen = []
+
+    class FakeModel:
+        def _apply_frontend(self, text):
+            parts, buf = [], ""
+            for ch in text:
+                buf += ch
+                if ch in "。！？!?":
+                    if buf.strip():
+                        parts.append(buf)
+                    buf = ""
+            if buf.strip():
+                parts.append(buf)
+            return text, "zh", parts or [text]
+
+        def generate_tts(self, **kw):
+            seen.append(("tts", kw.get("text")))
+            return np.ones(80, dtype="float32"), 24000
+
+        def generate_voice_design(self, **kw):
+            seen.append(("design", kw.get("text")))
+            return np.ones(80, dtype="float32"), 24000, "plan"
+
+    orig = firered._as_torch
+    firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+    try:
+        be = firered.FireRedBackend(FakeModel())
+        be._join = lambda waves, sr, fade_ms=50.0: (
+            np.concatenate([np.asarray(w, dtype="float32").reshape(-1) for w in waves]), sr)
+        be._pace = lambda audio, sr, instruction="", speed=None: (audio, sr)
+        ctx = TickCtx(cancel_after=3)
+        try:
+            be.clone("第一句。第二句。", np.zeros(80, dtype="float32"), 24000, "ref",
+                     ctx=ctx, speed=1.0)
+            check("canceled firered clone did not finish", False)
+        except Cancelled:
+            check("firered clone stops after the current sentence",
+                  seen == [("tts", "第一句。")], seen)
+        check("firered clone published 1/2 before the next sentence",
+              any(t.get("done") == 1 and t.get("total") == 2 for t in ctx.ticks), ctx.ticks)
+        seen.clear()
+        ctx2 = TickCtx(cancel_after=3)
+        try:
+            be.design("沉稳男声", "第一句。第二句。", ctx=ctx2, speed=1.0)
+            check("canceled firered design did not finish", False)
+        except Cancelled:
+            check("firered design stops after the current sentence",
+                  seen == [("design", "第一句。")], seen)
+        check("firered design published 1/2 before the next sentence",
+              any(t.get("done") == 1 and t.get("total") == 2 and t.get("stage") == "design"
+                  for t in ctx2.ticks), ctx2.ticks)
+    finally:
+        firered._as_torch = orig
+
+
 def t_firered_triplet_pad():
     from wrapper.caps.firered import as_tts_triplet
 
@@ -1416,7 +1713,7 @@ def t_firered_triplet_pad():
 
 
 def t_firered_design_instruction():
-    from wrapper.caps.tts_el import _design_instruction
+    from wrapper.caps.tts_el import _design_identity, _design_instruction
 
     check("plan beats the short blurb",
           _design_instruction({"instruction": "年轻女声", "plan": "口音：四川话"})
@@ -1426,6 +1723,14 @@ def t_firered_design_instruction():
           == "语速稍慢")
     check("blurb is the fallback",
           _design_instruction({"instruction": "年轻女声"}) == "年轻女声")
+    check("factory clone is not a design identity",
+          not _design_identity({"source": "clone", "category": "premade"}))
+    check("user clone is not a design identity",
+          not _design_identity({"category": "cloned"}))
+    check("generated card is a design identity",
+          _design_identity({"category": "generated", "source": "design"}))
+    check("legacy premade without source is a design identity",
+          _design_identity({"category": "premade", "instruction": "年轻女声"}))
 
 
 def t_firered_speed_for():
@@ -1487,6 +1792,34 @@ def t_firered_design_speak():
               any(call[0] == "design" and call[1] == "ok" and call[2] == "more pirate"
                   for call in backend.calls), backend.calls)
 
+    class FakeClonePack(FakeELBackend):
+        prefer_design_speak = True
+
+        def presets(self):
+            return [{"voice_id": "zh-f", "name": "中文女", "category": "premade",
+                     "source": "clone", "instruction": "语速稍慢",
+                     "description": "nav"}]
+
+    clone_be = FakeClonePack()
+    clone_root = tempfile.mkdtemp(prefix="el-voices-clone-")
+    os.makedirs(os.path.join(clone_root, "zh-f"), exist_ok=True)
+    open(os.path.join(clone_root, "zh-f", "meta.json"), "w").write(
+        '{"voice_id":"zh-f","name":"中文女","category":"premade","source":"clone",'
+        '"instruction":"语速稍慢"}')
+    open(os.path.join(clone_root, "zh-f", "prompt.wav"), "wb").write(wav_of(0.4))
+    open(os.path.join(clone_root, "zh-f", "prompt.txt"), "w").write("准备出发")
+    tts_el.install(clone_be, store=tts_el.VoiceStore(clone_root, clone_be.presets()))
+    with TestClient(build_app(["tts", "tts_clone", "tts_design"])) as c:
+        spoken = c.post("/v1/text-to-speech/zh-f", json={"text": "请直行"})
+        check("factory clone speak returns 200", spoken.status_code == 200, spoken.text[:120])
+        check("factory clone speak uses the wav, not design",
+              any(call[0] == "clone" and call[1] == "请直行" for call in clone_be.calls)
+              and not any(call[0] == "design" and call[2] == "请直行" for call in clone_be.calls),
+              clone_be.calls)
+        check("factory clone passes Voice Direction to clone",
+              any(call[0] == "clone" and call[3] == "语速稍慢" for call in clone_be.calls),
+              clone_be.calls)
+
 
 def t_tts_el(module_name="firered"):
     import tempfile
@@ -1496,6 +1829,8 @@ def t_tts_el(module_name="firered"):
 
     fake_soundfile()
     backend = FakeELBackend()
+    if module_name == "breeze":
+        backend.card_instruction_is_direction = False
     root = tempfile.mkdtemp(prefix="el-voices-")
     store = tts_el.VoiceStore(root, backend.presets())
     tts_el.install(backend, store=store)
@@ -1530,9 +1865,8 @@ def t_tts_el(module_name="firered"):
               and any(call[0] == "clone" for call in backend.calls),
               backend.calls)
         if module_name == "breeze":
-            check("breeze premade speak keeps Voice Direction instruction",
-                  any(call[0] == "clone" and len(call) > 3
-                      and call[3] == "A clear young female voice."
+            check("breeze premade speak does not send the card blurb as Voice Direction",
+                  any(call[0] == "clone" and (len(call) < 4 or not call[3])
                       for call in backend.calls), backend.calls)
         r2 = c.post("/v1/audio/speech", json={"input": "hello again", "voice": "p1"})
         check("%s OpenAI speech alias is gone" % module_name, r2.status_code == 404,
@@ -1595,6 +1929,39 @@ def t_tts_el(module_name="firered"):
             check("%s async task succeeded" % module_name, doc["status"] == "succeeded",
                   doc.get("status"))
             contract(c, doc, module_name, legacy=False)
+        design_async = c.post("/v1/text-to-voice/design?async=1",
+                              json={"voice_description": "A raspy pirate", "text": "Ahoy again"})
+        check("%s design async 202" % module_name, design_async.status_code == 202,
+              design_async.text[:160])
+        if design_async.status_code == 202:
+            doc = poll(c, design_async.json()["task"]["id"])
+            check("%s design async succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            preview_async = c.get("%s/%s/result" % (TASKS, doc["id"])).json()
+            gid_async = (preview_async.get("previews") or [{}])[0].get("generated_voice_id")
+            check("%s design async result has preview" % module_name, bool(gid_async),
+                  preview_async)
+            persist_async = c.post("/v1/text-to-voice?async=1",
+                                   json={"generated_voice_id": gid_async,
+                                         "voice_name": "PirateAsync"})
+            check("%s persist async 202" % module_name, persist_async.status_code == 202,
+                  persist_async.text[:160])
+            if persist_async.status_code == 202:
+                doc = poll(c, persist_async.json()["task"]["id"])
+                check("%s persist async succeeded" % module_name, doc["status"] == "succeeded",
+                      doc.get("status"))
+        add_async = c.post("/v1/voices/add?async=1",
+                           data={"name": "MeAsync", "description": "this is the transcript"},
+                           files={"file": ("r.wav", wav, "audio/wav")})
+        check("%s add async 202" % module_name, add_async.status_code == 202,
+              (add_async.status_code, add_async.text[:160]))
+        if add_async.status_code == 202:
+            doc = poll(c, add_async.json()["task"]["id"])
+            check("%s add async succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            added = c.get("%s/%s/result" % (TASKS, doc["id"])).json()
+            check("%s add async result has voice_id" % module_name, bool(added.get("voice_id")),
+                  added)
 
     tts_el._state.update(ready=False, error="weights are missing", backend=None, store=None)
     with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
@@ -1603,8 +1970,31 @@ def t_tts_el(module_name="firered"):
               and "weights are missing" in r.text, r.text[:100])
 
 
+def t_tts_el_edge_safe():
+    """A body over the public-hop budget is stored as mp3; a small wav is left alone."""
+    from wrapper.caps import tts_el
+
+    old_lim = tts_el._EDGE_SAFE_BYTES
+    old_enc = tts_el._encode
+    old_fit = tts_el._encode_mp3_fit
+    try:
+        tts_el._encode = lambda audio, sr, fmt: b"RIFF" + b"W" * 1000
+        tts_el._encode_mp3_fit = lambda audio, sr: b"ID3mp3"
+        tts_el._EDGE_SAFE_BYTES = 200
+        body, fmt = tts_el._encode_edge(None, 24000, "wav")
+        check("oversize wav becomes mp3", fmt == "mp3" and body == b"ID3mp3", (fmt, body[:8]))
+        tts_el._EDGE_SAFE_BYTES = 8000
+        body, fmt = tts_el._encode_edge(None, 24000, "wav")
+        check("under-limit wav is unchanged", fmt == "wav" and body.startswith(b"RIFF"),
+              (fmt, len(body)))
+    finally:
+        tts_el._EDGE_SAFE_BYTES = old_lim
+        tts_el._encode = old_enc
+        tts_el._encode_mp3_fit = old_fit
+
+
 def t_tts_el_limits():
-    """Breeze Chart gates live in ENGINE_ARGS. 0 stays off so FireRed is unchanged."""
+    """Product gates live in ENGINE_ARGS. 0 stays off for a bare process."""
     import importlib
     import tempfile
 
@@ -1729,8 +2119,15 @@ def main():
                            ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
                            ("firered elevenlabs", lambda: t_tts_el("firered"), "firered"),
                            ("breeze elevenlabs", lambda: t_tts_el("breeze"), "breeze"),
+                           ("breeze split speak", t_breeze_split_speak, "breeze"),
+                           ("breeze clone slices", t_breeze_clone_slices, "breeze"),
+                           ("tts job tick", t_tts_job_tick, "firered"),
+                           ("breeze clone cancel", t_breeze_clone_cancel, "breeze"),
+                           ("firered clone cancel", t_firered_clone_cancel, "firered"),
                            ("tts_el limits", t_tts_el_limits, "breeze"),
+                           ("tts_el edge-safe", t_tts_el_edge_safe, "breeze"),
                            ("voice cards", t_voice_cards, "firered"),
+                           ("voice cards clone seed", t_voice_cards_clone_seed, "breeze"),
                            ("firered triplet pad", t_firered_triplet_pad, "firered"),
                            ("firered speed_for", t_firered_speed_for, "firered"),
                            ("firered design instruction", t_firered_design_instruction, "firered"),

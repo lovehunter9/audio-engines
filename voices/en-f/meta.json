@@ -1,7 +1,8 @@
 {
-  "voice_id": "clear-en-f",
-  "name": "清晰女 / Clear Female",
+  "voice_id": "en-f",
+  "name": "英文女 / English Female",
   "category": "premade",
+  "source": "clone",
   "instruction": "A clear young female voice speaking English, warm and measured, with a slight smile.",
   "sample_text": "Welcome aboard. Your journey begins now.",
   "description": "英语年轻女声，清晰、温和。Young English female, clear and warm.",
