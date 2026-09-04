@@ -1,0 +1,47 @@
+# speakrs CI: triggers only; the build is the shared build-image.yml.
+name: speakrs-ci
+
+on:
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
+  push:
+    tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/speakrs/**'
+      - '.github/workflows/speakrs-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speakrs-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: speakrs
+      repo: audio-speakrs
+      # ONNX Runtime ships a CUDA execution provider for x86_64 alone, and speakrs reaches the
+      # GPU through it: an arm64 image would build, install and then answer every request on CPU.
+      # bases/speakrs/append.env pins the same platform for a local `make build-push`.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
