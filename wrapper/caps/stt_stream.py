@@ -32,6 +32,19 @@ GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
 # Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
 ENFORCE_EAGER = _args.switch("--enforce-eager")
+# One generate() for the whole batch instead of one per span. Off by default: this changes
+# where a mid-batch cancellation can land, so the two paths have to be comparable in the
+# same image before either becomes the default.
+BATCH_ONE_SHOT = os.environ.get("ASR_BATCH_ONE_SHOT", "0") == "1"
+# A cap proportional to how much audio there is. OFFLINE_MAX_TOKENS is one number for every
+# span, so a three second span is handed the same 4096 as a nine minute one -- and a span
+# that starts repeating runs all the way to that cap. One did: 3.3 seconds of audio produced
+# 4096 tokens and 60 seconds of decode, a third of a serial run and, once spans are batched,
+# 86% of one -- a batch cannot finish before its longest member. Measured output runs about
+# 3.4 tokens per audio second, so 12 leaves roughly triple headroom. 0 keeps the old
+# behaviour, which is what makes the two comparable in one image.
+TOKENS_PER_AUDIO_SEC = float(os.environ.get("ASR_TOKENS_PER_AUDIO_SEC", "0") or 0)
+TOKENS_FLOOR = int(os.environ.get("ASR_TOKENS_FLOOR", "64") or 64)
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -164,6 +177,13 @@ def _decode_to_16k_mono(raw, filename):
     return y.astype("float32")
 
 
+def _token_budget(seconds):
+    if TOKENS_PER_AUDIO_SEC <= 0:
+        return OFFLINE_MAX_TOKENS
+    return max(TOKENS_FLOOR,
+               min(OFFLINE_MAX_TOKENS, int(seconds * TOKENS_PER_AUDIO_SEC) + TOKENS_FLOOR))
+
+
 def _offline_transcribe(audio):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
@@ -171,7 +191,7 @@ def _offline_transcribe(audio):
     old = getattr(sp, "max_tokens", None) if sp is not None else None
     try:
         if sp is not None:
-            sp.max_tokens = OFFLINE_MAX_TOKENS
+            sp.max_tokens = _token_budget(len(audio) / 16000.0)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
         if sp is not None and old is not None:
@@ -181,6 +201,38 @@ def _offline_transcribe(audio):
     if t is None and isinstance(r, dict):
         t = r.get("text")
     return (t or "").strip()
+
+
+def _offline_transcribe_many(clips):
+    # qwen-asr's transcribe() takes a list and hands the whole list to vLLM in one
+    # generate() call: max_inference_batch_size defaults to -1 on the LLM factory, and
+    # chunk_list yields the list unsplit for any non-positive size. Feeding it one clip at
+    # a time is what kept vLLM from ever batching -- a 40 minute meeting arrived as four
+    # HTTP requests and left as 214 single-sequence generate calls.
+    asr = _state["asr"]
+    sp = getattr(asr, "sampling_params", None)
+    old = getattr(sp, "max_tokens", None) if sp is not None else None
+    try:
+        if sp is not None:
+            # One SamplingParams covers the whole call, so the budget follows the longest
+            # clip in the batch. That is looser than the per-clip cap the serial path gets,
+            # and still far tighter than a flat 4096.
+            sp.max_tokens = _token_budget(max(len(c) for c in clips) / 16000.0)
+        results = asr.transcribe(audio=[(c, 16000) for c in clips],
+                                 language=None, return_time_stamps=False)
+    finally:
+        if sp is not None and old is not None:
+            sp.max_tokens = old
+    texts = []
+    for r in (results or []):
+        t = getattr(r, "text", None)
+        if t is None and isinstance(r, dict):
+            t = r.get("text")
+        texts.append((t or "").strip())
+    if len(texts) != len(clips):
+        raise RuntimeError("transcribe returned %d results for %d clips"
+                           % (len(texts), len(clips)))
+    return texts
 
 
 def build_app(supports):
@@ -209,8 +261,41 @@ def build_app(supports):
                 segs = parse_segments(segments)
 
                 def _work_batch(ctx):
-                    out = []
                     ctx.progress(stage="transcribe", done=0, total=len(segs))
+                    if BATCH_ONE_SHOT:
+                        # Slice every span first, then hand the whole list over once. The
+                        # spans in one request are independent -- the caller batches them
+                        # precisely because nothing downstream depends on their order.
+                        out = [None] * len(segs)
+                        spans = []
+                        for i, seg in enumerate(segs):
+                            lo = max(0, int(float(seg.get("start") or 0) * 16000))
+                            hi = min(len(audio), int(float(seg.get("end") or 0) * 16000))
+                            if hi <= lo:
+                                out[i] = {"text": ""}
+                            else:
+                                ctx.meter(input_seconds=(hi - lo) / 16000.0)
+                                spans.append((i, audio[lo:hi]))
+                        if spans:
+                            # The only checkpoint there can be: one generate() covers the
+                            # whole batch, so a cancellation arriving mid-call is not seen
+                            # until it returns. That is the cost of this path.
+                            ctx.checkpoint()
+                            try:
+                                texts = _offline_transcribe_many([c for _, c in spans])
+                                for (i, _), t in zip(spans, texts):
+                                    out[i] = {"text": t}
+                            except tasks.Cancelled:
+                                raise
+                            except Exception as e:
+                                # No per-span outcome exists when the single call fails, so
+                                # every span carries the same error and the caller retries
+                                # the batch -- which is what it already does today.
+                                for i, _ in spans:
+                                    out[i] = {"error": "stt failed: %s" % e}
+                        ctx.progress(done=len(segs), total=len(segs))
+                        return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
+                    out = []
                     for i, seg in enumerate(segs, 1):
                         ctx.checkpoint()
                         try:
