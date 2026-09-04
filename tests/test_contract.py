@@ -64,7 +64,10 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
 
 _EL_TTS_ROUTES = (
     ("GET", "/v1/voices", False),
+    ("GET", "/v1/voices/settings/default", False),
     ("GET", "/v1/voices/{voice_id}", False),
+    ("GET", "/v1/voices/{voice_id}/settings", False),
+    ("POST", "/v1/voices/{voice_id}/settings/edit", False),
     ("DELETE", "/v1/voices/{voice_id}", False),
     ("POST", "/v1/voices/{voice_id}/edit", False),
     ("POST", "/v1/text-to-speech/{voice_id}", True),

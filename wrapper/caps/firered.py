@@ -131,15 +131,17 @@ class FireRedBackend:
         log.info("acoustic_edit speed %.1fx after synth", factor)
         return _as_wave(paced, out_sr)
 
-    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
-        # Split here so cancel/progress land between sentences; one acoustic-edit on the join.
+    def iter_clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        # Split here so cancel/progress land between sentences; stream paces each slice.
         ctx = kw.get("ctx")
+        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
+                                     str(kw.get("instruction") or ""), text=text)
         already = hasattr(self.model, "_apply_frontend")
         sents = self._sentences(text)
         total = len(sents)
         prompt = _as_torch(prompt_audio)
-        waves, sr_out = [], self.sample_rate
         extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
+        pace_each = bool(kw.get("pace_each"))
         for i, sent in enumerate(sents):
             tts_el.job_tick(ctx, i, total)
             audio, sr, _ = as_tts_triplet(self.model.generate_tts(
@@ -148,47 +150,85 @@ class FireRedBackend:
                 prompt_audio_sr=int(prompt_sr),
                 text=sent,
                 n_timesteps=int(tts_el.N_TIMESTEPS),
-                inference_cfg=float(tts_el.INFERENCE_CFG),
-                seed=int(tts_el.SEED),
+                inference_cfg=float(kn.cfg),
+                seed=int(kn.seed),
                 **extra,
             ))
             wave, sr_out = _as_wave(audio, sr)
-            waves.append(wave)
+            if pace_each:
+                wave, sr_out = self._pace(wave, sr_out, instruction=kn.instruction, speed=kn.speed)
             tts_el.job_tick(ctx, i + 1, total)
+            yield wave, sr_out
         tts_el.job_tick(ctx, total, total)
-        return self._pace(*self._join(waves, sr_out),
-                          instruction=str(kw.get("instruction") or ""),
-                          speed=kw.get("speed"))
 
-    def design(self, instruction, text, **kw):
-        # Re-plan once and reuse it so later sentences keep 口音 / 语速 / 音色; official design keeps the original blurb.
+    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        waves, sr_out = [], self.sample_rate
+        kw = dict(kw)
+        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
+                                     str(kw.get("instruction") or ""), text=text)
+        kw["pace_each"] = False
+        for wave, sr_out in self.iter_clone(text, prompt_audio, prompt_sr, prompt_text, **kw):
+            waves.append(wave)
+        return self._pace(*self._join(waves, sr_out),
+                          instruction=kn.instruction, speed=kn.speed)
+
+    def iter_design(self, instruction, text, **kw):
+        # Re-plan once and reuse it so later sentences keep 口音 / 语速 / 音色.
         ctx = kw.get("ctx")
-        speak_as = instruction
-        plan_out, waves, sr_out = None, [], self.sample_rate
+        extra_out = kw.get("extra_out")
+        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
+                                     instruction, text=text)
+        speak_as = kn.instruction or instruction
+        plan_out = None
         already = hasattr(self.model, "_apply_frontend")
         sents = self._sentences(text)
         total = len(sents)
         extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
+        pace_each = bool(kw.get("pace_each"))
         for i, sent in enumerate(sents):
             tts_el.job_tick(ctx, i, total, stage="design")
             audio, sr, seg_plan = self.model.generate_voice_design(
                 instruction=speak_as,
                 text=sent,
                 n_timesteps=int(tts_el.N_TIMESTEPS),
-                inference_cfg=float(tts_el.DESIGN_CFG),
-                seed=int(tts_el.SEED),
+                inference_cfg=float(kn.cfg),
+                seed=int(kn.seed),
                 **extra,
             )
             if seg_plan and plan_out is None:
                 plan_out = seg_plan
                 speak_as = seg_plan
+                if extra_out is not None:
+                    extra_out.append({"plan": plan_out})
             wave, sr_out = _as_wave(audio, sr)
-            waves.append(wave)
+            if pace_each:
+                wave, sr_out = self._pace(wave, sr_out, kn.instruction, speed=kn.speed)
             tts_el.job_tick(ctx, i + 1, total, stage="design")
+            yield wave, sr_out
         tts_el.job_tick(ctx, total, total, stage="design")
+        if extra_out is not None and not extra_out:
+            extra_out.append({"plan": plan_out})
+
+    def design(self, instruction, text, **kw):
+        extra_box = []
+        waves, sr_out = [], self.sample_rate
+        kw = dict(kw)
+        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
+                                     instruction, text=text)
+        kw["pace_each"] = False
+        kw["extra_out"] = extra_box
+        for wave, sr_out in self.iter_design(instruction, text, **kw):
+            waves.append(wave)
         wave, sr = self._join(waves, sr_out)
-        wave, sr = self._pace(wave, sr, instruction, speed=kw.get("speed"))
-        return wave, sr, {"plan": plan_out}
+        wave, sr = self._pace(wave, sr, kn.instruction, speed=kn.speed)
+        extra = extra_box[0] if extra_box else {"plan": None}
+        return wave, sr, extra
+
+    def stream_gap(self, text, sr):
+        import numpy as np
+
+        n = max(0, int(0.050 * sr))
+        return np.zeros(n, dtype="float32")
 
 
 def _load():
