@@ -89,9 +89,10 @@ def truthy(v):
 
 
 class _Ctx:
-    # Handed to the job: report progress, and notice a cancel between two units of work.
-    def __init__(self, task=None):
+    # Report progress and notice a cancel; cancel_event is the no-Task-row case.
+    def __init__(self, task=None, cancel_event=None):
         self._task = task
+        self._cancel_event = cancel_event
 
     def progress(self, ratio=None, stage=None, done=None, total=None):
         t = self._task
@@ -132,11 +133,18 @@ class _Ctx:
             setattr(t, attr, round((getattr(t, attr) or 0.0) + value, 3))
 
     def cancelled(self):
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            return True
         return bool(self._task is not None and self._task.cancel)
 
     def checkpoint(self):
         if self.cancelled():
             raise Cancelled("canceled by client")
+
+
+def stream_ctx(cancel_event):
+    """Cancelable ctx for POST .../stream (no Task). job_tick honors the event."""
+    return _Ctx(cancel_event=cancel_event)
 
 
 # For blocking helpers that are also called outside a job (batch mode reuses the single-clip path).
