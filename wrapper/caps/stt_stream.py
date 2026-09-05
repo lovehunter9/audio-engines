@@ -45,6 +45,18 @@ BATCH_ONE_SHOT = os.environ.get("ASR_BATCH_ONE_SHOT", "0") == "1"
 # behaviour, which is what makes the two comparable in one image.
 TOKENS_PER_AUDIO_SEC = float(os.environ.get("ASR_TOKENS_PER_AUDIO_SEC", "0") or 0)
 TOKENS_FLOOR = int(os.environ.get("ASR_TOKENS_FLOOR", "64") or 64)
+# Ending a span that has started repeating, rather than folding the repetition out of the text
+# afterwards. A 2.2 second clip was measured producing 4096 tokens and six characters of
+# transcript: qwen-asr's parse_asr_output collapses a repeated pattern (threshold 20), so the
+# transcript reads correctly and only the clock suffers -- and once spans are batched, the whole
+# batch waits for that one. vLLM's scheduler can end such a request instead. JSON for
+# RepetitionDetectionParams; empty leaves the behaviour as it is.
+#
+# Two thresholds that have to be read together. min_pattern_size must be at least 2: "对对对"
+# is real Mandarin speech, and stopping there drops the rest of the span. min_count must clear
+# the 20 the downstream folding uses -- at 10 the request stops one repetition short of that
+# threshold, and what is left survives into the transcript.
+REPETITION_DETECTION = os.environ.get("ASR_REPETITION_DETECTION", "").strip()
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -60,6 +72,8 @@ OFFLINE_MAX_INPUT_SEC = 540
 OFFLINE_MAX_TOKENS = 4096
 
 _state = _runtime.state
+# One slot, filled on first use: see _repetition_params.
+_repdet_cache = []
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
@@ -177,6 +191,48 @@ def _decode_to_16k_mono(raw, filename):
     return y.astype("float32")
 
 
+def _repetition_params():
+    """The detector this build can use, or None. Built once; a build without it says so once.
+
+    Not imported at module load: a vLLM without RepetitionDetectionParams must still serve,
+    and the failure has to be one log line rather than an engine that will not start.
+    """
+    if not REPETITION_DETECTION:
+        return None
+    if not _repdet_cache:
+        try:
+            from vllm.sampling_params import RepetitionDetectionParams
+
+            _repdet_cache.append(RepetitionDetectionParams(**json.loads(REPETITION_DETECTION)))
+            _p("repetition detection: %s" % REPETITION_DETECTION)
+        except Exception as e:
+            _p("WARN ASR_REPETITION_DETECTION ignored (%s)" % e)
+            _repdet_cache.append(None)
+    return _repdet_cache[0]
+
+
+def _apply_repetition(sp):
+    """Sets the detector for one call and returns how to put the old value back, or None.
+
+    None when nothing was set, so a build that will not take the attribute does not then
+    fail again inside a finally block -- where the failure would replace the transcript.
+    """
+    params = _repetition_params()
+    if params is None:
+        return None
+    old = getattr(sp, "repetition_detection", None)
+    try:
+        sp.repetition_detection = params
+    except Exception as e:
+        _p("WARN could not set repetition_detection (%s)" % e)
+        return None
+
+    def restore():
+        sp.repetition_detection = old
+
+    return restore
+
+
 def _token_budget(seconds):
     if TOKENS_PER_AUDIO_SEC <= 0:
         return OFFLINE_MAX_TOKENS
@@ -189,13 +245,17 @@ def _offline_transcribe(audio):
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", None) if sp is not None else None
+    restore_rep = None
     try:
         if sp is not None:
             sp.max_tokens = _token_budget(len(audio) / 16000.0)
+            restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
         if sp is not None and old is not None:
             sp.max_tokens = old
+        if restore_rep is not None:
+            restore_rep()
     r = results[0] if results else None
     t = getattr(r, "text", None) if r is not None else None
     if t is None and isinstance(r, dict):
@@ -212,17 +272,21 @@ def _offline_transcribe_many(clips):
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", None) if sp is not None else None
+    restore_rep = None
     try:
         if sp is not None:
             # One SamplingParams covers the whole call, so the budget follows the longest
             # clip in the batch. That is looser than the per-clip cap the serial path gets,
             # and still far tighter than a flat 4096.
             sp.max_tokens = _token_budget(max(len(c) for c in clips) / 16000.0)
+            restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=[(c, 16000) for c in clips],
                                  language=None, return_time_stamps=False)
     finally:
         if sp is not None and old is not None:
             sp.max_tokens = old
+        if restore_rep is not None:
+            restore_rep()
     texts = []
     for r in (results or []):
         t = getattr(r, "text", None)
