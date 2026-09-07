@@ -26,7 +26,8 @@ BASES = {
     "speakrs": [
         (("diar",), "diar_speakrs"),
     ],
-    # Qwen3-TTS in-process: CustomVoice weights serve tts, Base weights serve tts_clone.
+    # Qwen3-TTS in-process: which routes a checkpoint can honour is read off the weights
+    # (e.g. CustomVoice -> tts, Base -> tts_clone, VoiceDesign -> tts, etc.).
     "qwen3tts": [
         (("tts", "tts_clone"), "tts"),
     ],
@@ -41,6 +42,14 @@ BASES = {
     # Voxtral-4B-TTS on ggml. tts only: the published weights ship no encoder to clone a voice with.
     "crispasr": [
         (("tts",), "crispasr_tts"),
+    ],
+    # FireRedTTS3-Instruct: one weight does preset, clone, and design; tts_design advertises, HTTP mounts under tts.
+    "firered": [
+        (("tts", "tts_clone", "tts_design"), "firered"),
+    ],
+    # Breeze TTS 2: the same three slots on one 3B checkpoint (zh/en).
+    "breeze": [
+        (("tts", "tts_clone", "tts_design"), "breeze"),
     ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
@@ -60,6 +69,8 @@ FAMILIES = {
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
+    "firered": "fireredtts3-instruct",
+    "breeze": "breeze-tts-2",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -135,6 +146,59 @@ _MOUNTS = {
         ("POST", "/v1/audio/speech/batch",
          "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
         ("GET", "/v1/audio/voices", "List preset voices", False),
+    ],
+    # ElevenLabs voice_id + /v1/tasks only. No OpenAI /v1/audio/* aliases.
+    ("firered", "tts"): [
+        ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
+        ("GET", "/v1/voices/settings/default", "Default voice_settings (ElevenLabs)", False),
+        ("GET", "/v1/voices/{voice_id}", "Get one voice by id", False),
+        ("GET", "/v1/voices/{voice_id}/settings", "Get stored voice_settings for a voice", False),
+        ("POST", "/v1/voices/{voice_id}/settings/edit",
+         "Edit voice_settings (mapped onto CFG / seed / instruction / speed); premade allowed", False),
+        ("DELETE", "/v1/voices/{voice_id}",
+         "Delete a cloned or designed voice; premade voices return 400", False),
+        ("POST", "/v1/voices/{voice_id}/edit",
+         "Edit a cloned or designed voice (multipart: name required); premade returns 400", False),
+        ("POST", "/v1/text-to-speech/{voice_id}",
+         "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
+        ("POST", "/v1/text-to-speech/{voice_id}/stream",
+         "Speak and flush each slice (output_format: mp3_44100_128 / wav_24000 / …)", False),
+    ],
+    ("firered", "tts_design"): [
+        ("POST", "/v1/text-to-voice/design",
+         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
+        ("POST", "/v1/text-to-voice",
+         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
+    ],
+    ("firered", "tts_clone"): [
+        ("POST", "/v1/voices/add",
+         "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
+    ],
+    ("breeze", "tts"): [
+        ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
+        ("GET", "/v1/voices/settings/default", "Default voice_settings (ElevenLabs)", False),
+        ("GET", "/v1/voices/{voice_id}", "Get one voice by id", False),
+        ("GET", "/v1/voices/{voice_id}/settings", "Get stored voice_settings for a voice", False),
+        ("POST", "/v1/voices/{voice_id}/settings/edit",
+         "Edit voice_settings (mapped onto CFG / seed / instruction / speed); premade allowed", False),
+        ("DELETE", "/v1/voices/{voice_id}",
+         "Delete a cloned or designed voice; premade voices return 400", False),
+        ("POST", "/v1/voices/{voice_id}/edit",
+         "Edit a cloned or designed voice (multipart: name required); premade returns 400", False),
+        ("POST", "/v1/text-to-speech/{voice_id}",
+         "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
+        ("POST", "/v1/text-to-speech/{voice_id}/stream",
+         "Speak and flush each slice (output_format: mp3_44100_128 / wav_24000 / …)", False),
+    ],
+    ("breeze", "tts_design"): [
+        ("POST", "/v1/text-to-voice/design",
+         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
+        ("POST", "/v1/text-to-voice",
+         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
+    ],
+    ("breeze", "tts_clone"): [
+        ("POST", "/v1/voices/add",
+         "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
     ],
     # One endpoint: a script is already the unit of work, and the model has no streaming decode.
     ("tts_dialogue", "tts_dialogue"): [

@@ -1,0 +1,14 @@
+{
+  "voice_id": "zh-f",
+  "name": "中文女 / Chinese Female",
+  "category": "premade",
+  "source": "clone",
+  "instruction": "一个年轻女性的温柔嗓音，说普通话，语速稍慢，带一点俏皮。",
+  "sample_text": "今天天气很好，我们一起去公园散步吧。",
+  "description": "普通话年轻女声，温柔、稍慢。Young Mandarin female, warm and unhurried.",
+  "labels": {
+    "language": "zh",
+    "accent": "mandarin",
+    "gender": "female"
+  }
+}

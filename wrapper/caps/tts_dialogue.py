@@ -1,4 +1,4 @@
-# Multi-speaker dialogue synthesis: SoulX-Podcast in this process, the wrapper is the only server.
+# Multi-speaker dialogue synthesis (e.g. SoulX-Podcast etc.): in this process, the wrapper is the only server.
 #
 # Upstream publishes no PyPI package and no setup.py, so bases/soulx/deps.Dockerfile clones it at
 # a pinned commit into /opt/soulx and puts that on PYTHONPATH. Nothing here adjusts sys.path: the
@@ -39,7 +39,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-tts-dialogue")
 
-_runtime = Runtime("Soul-AILab/SoulX-Podcast-1.7B", model=None, dataset=None)
+_runtime = Runtime(model=None, dataset=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

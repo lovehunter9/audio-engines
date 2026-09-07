@@ -18,7 +18,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-diar")
 
-_runtime = Runtime("pyannote-community-1", pipeline=None, device="cpu", batch1=False, params={})
+_runtime = Runtime(pipeline=None, device="cpu", batch1=False, params={})
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

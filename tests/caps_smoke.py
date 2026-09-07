@@ -90,7 +90,7 @@ def poll(c, tid, timeout=20):
     return {"status": "timeout"}
 
 
-def contract(c, doc, label):
+def contract(c, doc, label, legacy=True):
     """What every engine behind llm-init must answer, not just this one."""
     check("%s doc is object=task kind=audio" % label,
           doc.get("object") == "task" and doc.get("kind") == "audio",
@@ -99,13 +99,20 @@ def contract(c, doc, label):
           doc.get("poll") == "%s/%s" % (TASKS, doc["id"])
           and doc.get("result_url") == "%s/%s/result" % (TASKS, doc["id"]),
           (doc.get("poll"), doc.get("result_url")))
-    alias = c.get("%s/%s" % (LEGACY, doc["id"])).json()
-    check("%s the legacy alias answers the same task" % label, alias == doc, alias.get("id"))
+    if legacy:
+        alias = c.get("%s/%s" % (LEGACY, doc["id"])).json()
+        check("%s the legacy alias answers the same task" % label, alias == doc, alias.get("id"))
+    else:
+        check("%s does not mount the legacy task alias" % label,
+              c.get("%s/%s" % (LEGACY, doc["id"])).status_code == 404)
     cap = (c.get(TASKS).json() or {}).get("capacity") or {}
     check("%s the list reports queue capacity" % label,
           set(cap) == {"queued", "running", "limit", "accepting"} and cap["limit"] > 0, cap)
-    check("%s the legacy list alias agrees" % label,
-          c.get(LEGACY).json() == c.get(TASKS).json())
+    if legacy:
+        check("%s the legacy list alias agrees" % label,
+              c.get(LEGACY).json() == c.get(TASKS).json())
+    else:
+        check("%s the legacy list is gone" % label, c.get(LEGACY).status_code == 404)
     got = c.get(TASKS, params={"status": "succeeded"}).json()["data"]
     check("%s ?status= filters" % label,
           got and all(d["status"] == "succeeded" for d in got),
@@ -171,16 +178,23 @@ def mounted(c):
     return {(e["method"], e["path"]) for e in eps if e["available"]}
 
 
-def advertises_tasks(c, label):
+def advertises_tasks(c, label, legacy=True):
     paths = mounted(c)
     check("%s advertises the task API" % label,
-          ("GET", TASKS + "/{id}") in paths and ("GET", LEGACY + "/{id}") in paths,
-          sorted(p[1] for p in paths))
-    deprecated = {e["path"] for e in c.get("/api/engine-spec").json()["endpoints"]
-                  if e.get("deprecated")}
-    check("%s marks the legacy paths deprecated" % label,
-          deprecated == {LEGACY, LEGACY + "/{id}", LEGACY + "/{id}/result"},
-          sorted(deprecated))
+          ("GET", TASKS + "/{id}") in paths, sorted(p[1] for p in paths))
+    if legacy:
+        check("%s advertises the legacy task alias" % label,
+              ("GET", LEGACY + "/{id}") in paths, sorted(p[1] for p in paths))
+        deprecated = {e["path"] for e in c.get("/api/engine-spec").json()["endpoints"]
+                      if e.get("deprecated")}
+        check("%s marks the legacy paths deprecated" % label,
+              deprecated == {LEGACY, LEGACY + "/{id}", LEGACY + "/{id}/result"},
+              sorted(deprecated))
+    else:
+        check("%s does not advertise the legacy task alias" % label,
+              all(p != LEGACY and not str(p).startswith(LEGACY + "/")
+                  for _m, p in paths),
+              sorted(p[1] for p in paths))
 
 
 WAV = {"file": ("a.wav", b"RIFF0000WAVEfake", "audio/wav")}
@@ -634,11 +648,16 @@ class FakeTTS:
 
     sample_rate = 24000
 
-    def __init__(self, custom=True):
+    def __init__(self, custom=True, design=False):
         self.calls = []
         self.refuse_over = None
-        self.model = types.SimpleNamespace(model=types.SimpleNamespace(
-            tts_model_type="custom_voice" if custom else "base"))
+        if custom:
+            kind = "custom_voice"
+        elif design:
+            kind = "voice_design"
+        else:
+            kind = "base"
+        self.model = types.SimpleNamespace(model=types.SimpleNamespace(tts_model_type=kind))
 
     def get_supported_speakers(self):
         return ["aiden", "nofish"]
@@ -685,13 +704,22 @@ class FakeTTS:
         for _ in range(3):
             yield self._audio()[0], self.sample_rate, {}
 
+    def generate_voice_design(self, **kw):
+        self._record("design", kw)
+        return self._audio(), self.sample_rate
 
-def install_tts(custom):
+    def generate_voice_design_streaming(self, **kw):
+        self._record("design_stream", kw)
+        for _ in range(3):
+            yield self._audio()[0], self.sample_rate, {}
+
+
+def install_tts(custom=True, design=False):
     from wrapper.caps import tts
 
     fake_soundfile()
-    m = FakeTTS(custom=custom)
-    tts._state.update(ready=True, error=None, model=m, custom_voice=custom,
+    m = FakeTTS(custom=custom, design=design)
+    tts._state.update(ready=True, error=None, model=m, custom_voice=custom, voice_design=design,
                       speakers=m.get_supported_speakers() if custom else [])
     return tts, m
 
@@ -881,6 +909,52 @@ def t_tts_clone():
                      data={"input": "hi"}).status_code == 400)
 
 
+def t_tts_design():
+    from fastapi.testclient import TestClient
+
+    tts, m = install_tts(custom=False, design=True)
+
+    with TestClient(tts.build_app(["tts"])) as c:
+        advertises_tasks(c, "tts")
+        check("a design instance refuses speech with no instructions",
+              c.post("/v1/audio/speech", json={"input": "hi"}).status_code == 400)
+        r = c.post("/v1/audio/speech",
+                   json={"input": "hi", "instructions": "a calm low female narrator"})
+        check("a design instance speaks from instructions", r.status_code == 200,
+              (r.status_code, r.text[:160]))
+        kw = m.last("design")
+        check("and the description reaches the model as instruct",
+              kw and kw["instruct"] == "a calm low female narrator" and kw["text"] == "hi", kw)
+        check("a design instance refuses a preset voice",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "voice": "vivian",
+                           "instructions": "calm"}).status_code == 400)
+        check("a design instance refuses ref_audio",
+              c.post("/v1/audio/speech",
+                     json={"input": "hi", "instructions": "calm",
+                           "ref_audio": REF}).status_code == 400)
+        check("a design instance has no voice list",
+              c.get("/v1/audio/voices").status_code == 404)
+
+        rs = c.post("/v1/audio/speech",
+                    json={"input": "hi", "instructions": "calm", "stream": True,
+                          "response_format": "pcm"})
+        check("a design instance streams", rs.status_code == 200 and "design_stream" in m.kinds(),
+              (rs.status_code, m.kinds()))
+
+        rb = c.post("/v1/audio/speech/batch",
+                    json={"response_format": "pcm",
+                          "instructions": "a calm narrator",
+                          "items": [{"input": "one"},
+                                    {"input": "two", "instructions": "a bright child"}]})
+        check("a design batch 200", rb.status_code == 200, (rb.status_code, rb.text[:160]))
+        if rb.status_code == 200:
+            check("a design batch items override the shared instruct",
+                  m.calls[-1][1]["instruct"] == "a bright child"
+                  and m.calls[-2][1]["instruct"] == "a calm narrator",
+                  [m.calls[-2][1].get("instruct"), m.calls[-1][1].get("instruct")])
+
+
 def t_tts_warmup():
     # Ready has to mean warmed, or the first caller waits longer than llm-init holds a proxy open.
     tts, m = install_tts(custom=True)
@@ -903,6 +977,11 @@ def t_tts_warmup():
     m.generate_voice_clone = refuse
     tts._warmup()
     check("a refused warmup is survivable", True)
+
+    tts, m = install_tts(custom=False, design=True)
+    tts._warmup()
+    check("a design warmup speaks from a throwaway instruct",
+          m.kinds() == ["warmup", "design"] and m.last("design")["instruct"], m.kinds())
 
     import wave
 
@@ -1263,7 +1342,7 @@ def t_tts_not_ready():
     from wrapper.caps import tts
 
     tts._state.update(ready=False, error="weights are missing", model=None, custom_voice=True,
-                      speakers=[])
+                      voice_design=False, speakers=[])
     with TestClient(tts.build_app(["tts"])) as c:
         for path, call in (("/v1/audio/speech", lambda: c.post("/v1/audio/speech",
                                                                json={"input": "hi"})),
@@ -1377,6 +1456,1076 @@ def t_crispasr_not_ready():
             check("crispasr %s says why" % path, "missing" in r.text, r.text[:120])
 
 
+class FakeELBackend:
+    sample_rate = 24000
+
+    def __init__(self):
+        self.calls = []
+
+    def presets(self):
+        return [{"voice_id": "p1", "name": "Preset One", "category": "premade",
+                 "instruction": "A clear young female voice.",
+                 "sample_text": "Hello there friend.",
+                 "description": "test preset"}]
+
+    def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        from wrapper.caps import tts_el
+
+        self.calls.append(("clone", text, prompt_text, kw.get("instruction"), kw.get("settings")))
+        tts_el.job_tick(kw.get("ctx"), 1, 1)
+        n = max(2400, len(text) * 120)
+        return np.zeros(n, dtype="float32"), 24000
+
+    def design(self, instruction, text, **kw):
+        from wrapper.caps import tts_el
+
+        self.calls.append(("design", instruction, text, kw.get("settings")))
+        tts_el.job_tick(kw.get("ctx"), 1, 1, stage="design")
+        n = max(2400, len(text) * 120)
+        return np.zeros(n, dtype="float32"), 24000, {"plan": "ok"}
+
+
+class TickCtx:
+    """Stand-in for tasks.Context: count checkpoints, record progress, cancel on the Nth tick."""
+
+    def __init__(self, cancel_after=None):
+        self.n = 0
+        self.ticks = []
+        self.cancel_after = cancel_after
+
+    def checkpoint(self):
+        from wrapper.tasks import Cancelled
+
+        self.n += 1
+        if self.cancel_after is not None and self.n >= self.cancel_after:
+            raise Cancelled("canceled by client")
+
+    def progress(self, **kw):
+        self.ticks.append(kw)
+
+
+def t_voice_cards():
+    import json
+    import tempfile
+
+    from wrapper.caps import tts_el
+
+    fr = tts_el.builtin_presets("firered")
+    br = tts_el.builtin_presets("breeze")
+    ids = [c.get("voice_id") for c in fr]
+    langs = {(c.get("labels") or {}).get("language") for c in fr}
+    check("shared builtin pack is zh+en only",
+          len(fr) == 4 and len(set(ids)) == 4
+          and set(ids) == {"zh-f", "zh-m", "en-f", "en-m"}, ids)
+    check("no language outside zh/en", langs <= {"zh", "en"}, langs)
+    check("firered and breeze read the same cards",
+          [c.get("voice_id") for c in br] == ids, ids)
+    check("voice_id is a role slug, not an engine prefix",
+          ids and all(v and not v.startswith(("fr3-", "br2-")) for v in ids), ids)
+    check("cards are premade with an instruction",
+          all(c.get("category") == "premade" and c.get("instruction") for c in fr + br))
+    check("list name and description are bilingual",
+          all(" / " in (c.get("name") or "")
+              and any("\u4e00" <= ch <= "\u9fff" for ch in (c.get("description") or ""))
+              and any("a" <= ch.lower() <= "z" for ch in (c.get("description") or ""))
+              for c in fr),
+          [(c.get("voice_id"), c.get("name")) for c in fr])
+    dest = tempfile.mkdtemp(prefix="voices-seed-")
+    seeded = tts_el.seed_builtins("firered", dest)
+    check("seed copies shared cards onto the runtime dir", len(seeded) == len(fr))
+    pack_card = next(c for c in fr if c.get("voice_id") == "zh-f")
+    check("clone pack plants factory wav and transcript",
+          os.path.isfile(dest + "/zh-f/prompt.wav")
+          and os.path.isfile(dest + "/zh-f/prompt.txt"))
+    factory_wav = open(dest + "/zh-f/prompt.wav", "rb").read()
+    meta_path = dest + "/zh-f/meta.json"
+    old = json.loads(open(meta_path).read())
+    old["name"] = "旧名"
+    old["description"] = "旧介绍"
+    old["instruction"] = "这是一条已废弃的设计词"
+    open(meta_path, "w").write(json.dumps(old, ensure_ascii=False))
+    os.makedirs(dest + "/ja-f", exist_ok=True)
+    open(dest + "/ja-f/meta.json", "w").write(
+        '{"voice_id": "ja-f", "name": "old", "category": "premade"}')
+    tts_el.seed_builtins("firered", dest)
+    check("clone instruction change keeps the factory wav",
+          os.path.isfile(dest + "/zh-f/prompt.wav")
+          and open(dest + "/zh-f/prompt.wav", "rb").read() == factory_wav)
+    patched = json.loads(open(meta_path).read())
+    check("display fields follow the pack when the ref matches",
+          patched.get("name") == pack_card.get("name")
+          and patched.get("description") == pack_card.get("description")
+          and patched.get("instruction") == pack_card.get("instruction"))
+    check("seed drops a premade that left the pack", not os.path.isdir(dest + "/ja-f"))
+    for vid in ("fr3-warm-zh-f", "br2-clear-en-f"):
+        os.makedirs(dest + "/" + vid, exist_ok=True)
+        open(dest + "/" + vid + "/meta.json", "w").write(
+            '{"voice_id": "%s", "name": "old", "category": "premade"}' % vid)
+    leftover = dest + "/clone-keep/meta.json"
+    os.makedirs(dest + "/clone-keep", exist_ok=True)
+    open(leftover, "w").write('{"voice_id": "clone-keep", "name": "mine", "category": "cloned"}')
+    reused = dest + "/fr3-calm-zh-m/meta.json"
+    os.makedirs(dest + "/fr3-calm-zh-m", exist_ok=True)
+    open(reused, "w").write('{"voice_id": "fr3-calm-zh-m", "name": "mine", "category": "cloned"}')
+    tts_el.seed_builtins("firered", dest)
+    check("seed drops leftover premade ids",
+          not os.path.isdir(dest + "/fr3-warm-zh-f")
+          and not os.path.isdir(dest + "/br2-clear-en-f"))
+    check("seed does not drop a cloned card", open(leftover).read().find("clone-keep") >= 0)
+    check("seed does not drop a user card that reused an old id",
+          open(reused).read().find("cloned") >= 0)
+    check("shared cards are factory clone",
+          all(c.get("source") == "clone" for c in fr)
+          and all(os.path.isfile(os.path.join(str(tts_el.voices_root()), c["voice_id"], "prompt.wav"))
+                  for c in fr),
+          [c.get("source") for c in fr])
+    from wrapper.caps.firered import FireRedBackend
+    backend_ids = [c["voice_id"] for c in FireRedBackend(None).presets()]
+    check("firered backend presets read the cards", backend_ids == ids, backend_ids)
+
+    class OnlyNative:
+        uses_shared_pack = False
+
+        def native_presets(self):
+            return [{"voice_id": "model-a", "name": "Model A", "category": "premade",
+                     "instruction": "native"}]
+
+    native_only = tempfile.mkdtemp(prefix="voices-native-")
+    planted = tts_el.seed_builtins("firered", native_only, backend=OnlyNative())
+    planted_ids = [c["voice_id"] for c in planted]
+    check("native-only backend does not take our pack",
+          planted_ids == ["model-a"], planted_ids)
+
+    class NativePlusOurs:
+        uses_shared_pack = True
+
+        def native_presets(self):
+            return [{"voice_id": "model-a", "name": "Model A", "category": "premade",
+                     "instruction": "native"}]
+
+    both = tempfile.mkdtemp(prefix="voices-both-")
+    planted = tts_el.seed_builtins("firered", both, backend=NativePlusOurs())
+    planted_ids = [c["voice_id"] for c in planted]
+    check("native plus our pack lists both",
+          planted_ids[0] == "model-a" and set(planted_ids) == set(["model-a"] + ids),
+          planted_ids)
+
+
+def t_voice_cards_clone_seed():
+    """Clone premade identity is wav+transcript; instruction is Voice Direction only."""
+    import json
+    import tempfile
+
+    from wrapper.caps import tts_el
+
+    pack = tempfile.mkdtemp(prefix="pack-clone-")
+    dest = tempfile.mkdtemp(prefix="dest-clone-")
+    card = {"voice_id": "zh-f", "name": "中文女 / Chinese Female", "category": "premade",
+            "source": "clone", "instruction": "keep direction",
+            "description": "普通话女声。Mandarin female."}
+    os.makedirs(os.path.join(pack, "zh-f"))
+    open(os.path.join(pack, "zh-f", "meta.json"), "w").write(json.dumps(card, ensure_ascii=False))
+    open(os.path.join(pack, "zh-f", "prompt.wav"), "wb").write(b"RIFF" + b"A" * 80)
+    open(os.path.join(pack, "zh-f", "prompt.txt"), "w").write("今天天气很好")
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone seed plants wav and transcript",
+          open(os.path.join(dest, "zh-f", "prompt.txt")).read() == "今天天气很好"
+          and open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read().startswith(b"RIFF"))
+    card["instruction"] = "new direction"
+    card["name"] = "新名 / New"
+    open(os.path.join(pack, "zh-f", "meta.json"), "w").write(json.dumps(card, ensure_ascii=False))
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone instruction change keeps factory wav",
+          open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read() == b"RIFF" + b"A" * 80)
+    patched = json.loads(open(os.path.join(dest, "zh-f", "meta.json")).read())
+    check("clone instruction change patches display",
+          patched.get("name") == "新名 / New" and patched.get("instruction") == "new direction",
+          patched)
+    open(os.path.join(pack, "zh-f", "prompt.wav"), "wb").write(b"RIFF" + b"B" * 80)
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone wav change replants",
+          open(os.path.join(dest, "zh-f", "prompt.wav"), "rb").read() == b"RIFF" + b"B" * 80)
+    open(os.path.join(pack, "zh-f", "prompt.txt"), "w").write("换一句")
+    tts_el.seed_builtins("breeze", dest, cards=[card], pack=pack)
+    check("clone transcript change replants txt",
+          open(os.path.join(dest, "zh-f", "prompt.txt")).read() == "换一句")
+
+
+def t_breeze_split_speak():
+    from wrapper.caps import breeze
+
+    check("short chinese stays one piece",
+          breeze.split_speak("第一句。第二句！第三句？") == ["第一句。第二句！第三句？"])
+    check("short english stays one piece",
+          breeze.split_speak("Hello there. Next one!") == ["Hello there. Next one!"])
+    check("newlines always split",
+          breeze.split_speak("一行。\n二行。") == ["一行。", "二行。"])
+    tagged = breeze.split_speak("[笑] 欢迎来到今晚的故事时间，让我们一起开始吧。下一句。")
+    check("inline laugh stays in the line",
+          tagged == ["[笑] 欢迎来到今晚的故事时间，让我们一起开始吧。下一句。"], tagged)
+    en = breeze.split_speak("(laugh) Hello there. Next one.")
+    check("english laugh stays in the line",
+          en == ["(laugh) Hello there. Next one."], en)
+    check("short ellipsis stays one piece",
+          breeze.split_speak("Wait... Then this.") == ["Wait... Then this."])
+    limit = breeze.speak_limit()
+    zh = ("啊" * (limit - 2)) + "。下一句！"
+    zh_parts = breeze.split_speak(zh)
+    check("over-budget chinese cuts on 。！？",
+          len(zh_parts) == 2 and zh_parts[1] == "下一句！", zh_parts)
+    pad = ("alpha " * (limit // 6 + 4)).strip()
+    en_over = pad + " sees 3.14 exactly. Next one."
+    en_parts = breeze.split_speak(en_over)
+    check("english decimal is not a sentence cut",
+          any("3.14 exactly." in p for p in en_parts), en_parts)
+    check("english period plus space cuts when over budget",
+          any(p.strip() == "Next one." for p in en_parts), en_parts)
+    check("english title period is not a sentence cut",
+          breeze.split_speak(("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done.")
+          and any("Mr. Smith today." in p for p in breeze.split_speak(
+              ("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done.")),
+          breeze.split_speak(("word " * (limit // 5 + 3)).strip() + " saw Mr. Smith today. Done."))
+    long = "一二，" * ((limit // 2) + 2)
+    parts = breeze.split_speak(long)
+    check("over-budget sentence splits on clauses",
+          len(parts) > 1 and all(len(p) <= limit for p in parts),
+          (limit, [len(p) for p in parts]))
+    thousands = ("word " * (limit // 5 + 3)).strip() + " costs 1,000 now, then more."
+    th_parts = breeze.split_speak(thousands)
+    check("english thousands comma is not a clause cut",
+          any("1,000 now," in p or "1,000 now, then more." in p for p in th_parts), th_parts)
+    blob = "啊" * (limit + 40)
+    pieces = breeze.split_speak(blob)
+    check("unpunctuated over-budget is hard cut",
+          len(pieces) > 1 and all(len(p) <= limit for p in pieces)
+          and "".join(pieces) == blob, [len(p) for p in pieces])
+
+
+def t_breeze_clone_slices():
+    fake_soundfile()
+    from wrapper.caps import tts_el
+    from wrapper.caps.breeze import BreezeBackend, speak_limit
+
+    be = BreezeBackend(None, None, None, None)
+    seen = []
+    cfgs = []
+
+    def gen(text, instruction, ref_path=None, ref_text=None, cfg=None, **kw):
+        seen.append(text)
+        cfgs.append(cfg)
+        return np.ones(2400, dtype="float32"), 24000
+
+    be._generate = gen
+    audio, sr = be.clone("第一句。第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("short clone stays one generate", seen == ["第一句。第二句。"], seen)
+    check("bare clone uses cfg scale 1", cfgs[-1] == tts_el.CFG_SCALE, cfgs)
+    seen.clear()
+    cfgs.clear()
+    audio, sr = be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("newline clone speaks each line once", seen == ["第一句。", "第二句。"], seen)
+    from wrapper.caps import breeze as breeze_cap
+    zh_gap = int(breeze_cap._PAUSE_MS_ZH / 1000.0 * 24000)
+    check("clone inserts a chinese pause between slices",
+          len(audio) == 2400 + 2400 + zh_gap and sr == 24000, (len(audio), zh_gap))
+    quiet = np.concatenate([
+        np.ones(1200, dtype="float32"),
+        np.full(400, 0.01, dtype="float32"),
+        np.zeros(800, dtype="float32"),
+    ])
+    mid = np.concatenate([np.ones(1600, dtype="float32"), np.zeros(4000, dtype="float32")])
+    joined, _ = breeze_cap._join([mid, quiet], 24000, pause_ms=0)
+    mid_kept = len(joined) - len(quiet)
+    check("middle slice drops trailing silence only",
+          1600 <= mid_kept <= 1600 + int(0.08 * 24000) + 2, mid_kept)
+    check("last slice keeps a quiet last syllable",
+          float(np.max(np.abs(joined[-1200:]))) >= 0.009, float(np.max(np.abs(joined[-1200:]))))
+    seen.clear()
+    cfgs.clear()
+    audio, sr = be.clone("Hello.\nNext.", np.zeros(2400, dtype="float32"), 24000, "ref")
+    en_gap = int(breeze_cap._PAUSE_MS_EN / 1000.0 * 24000)
+    check("clone inserts a shorter english pause",
+          len(audio) == 2400 + 2400 + en_gap, (len(audio), en_gap))
+    seen.clear()
+    cfgs.clear()
+    be.clone("短句。", np.zeros(2400, dtype="float32"), 24000, "ref",
+             instruction="说得慢一点")
+    check("request direction uses design cfg", cfgs[-1] == tts_el.DESIGN_CFG, cfgs)
+    seen.clear()
+    be.design("A warm voice.", "第一句。第二句。第三句。")
+    check("design stays one shot", seen == ["第一句。第二句。第三句。"], seen)
+    seen.clear()
+    blob = "啊" * (speak_limit() + 40)
+    be.clone(blob, np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("clone hard-cuts an unsplittable piece",
+          len(seen) > 1 and all(len(s) <= speak_limit() for s in seen)
+          and "".join(seen) == blob, [len(s) for s in seen])
+
+
+def t_breeze_stream_chunks():
+    fake_soundfile()
+    from wrapper.caps.breeze import BreezeBackend
+
+    be = BreezeBackend(None, None, None, None)
+    seen = []
+
+    def it(text, instruction, ref_path=None, ref_text=None, cfg=None, **kw):
+        seen.append(text)
+        yield np.ones(80, dtype="float32"), 24000
+        yield np.ones(80, dtype="float32"), 24000
+
+    be._iter_generate = it
+    waves = list(be.iter_clone(
+        "第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref",
+        pace_each=True))
+    check("pace_each yields codec chunks and a pause",
+          len(waves) == 5 and seen == ["第一句。", "第二句。"], (len(waves), seen))
+    check("first two yields are audio",
+          len(waves[0][0]) == 80 and len(waves[1][0]) == 80, (len(waves[0][0]), len(waves[1][0])))
+    gap = waves[2][0]
+    check("pause sits between parts",
+          len(gap) > 0 and float(np.max(np.abs(gap))) == 0.0, len(gap))
+    check("stream_gap stays off", be.stream_gap("中文。", 24000) is None)
+    raw = np.ones(16, dtype="float32")
+    check("stream_next does not fade every chunk",
+          np.array_equal(be.stream_next_slice(raw, 24000), raw))
+
+
+def t_breeze_pace():
+    from wrapper.caps.breeze import BreezeBackend
+
+    be = BreezeBackend(None, None, None, None)
+    w = np.ones(24000, dtype="float32")
+    out, sr = be._pace(w, 24000, 2.0)
+    check("2x halves samples", 11900 <= len(out) <= 12100 and sr == 24000, len(out))
+    keep, _ = be._pace(w, 24000, 1.0)
+    check("1x keeps length", len(keep) == 24000, len(keep))
+    fast, _ = be._pace(w, 24000, 4.0)
+    check("4x is about a quarter", 5900 <= len(fast) <= 6100, len(fast))
+    slow, _ = be._pace(w, 24000, 0.5)
+    check("0.5x doubles samples", 47900 <= len(slow) <= 48100, len(slow))
+
+
+def t_tts_job_tick():
+    from wrapper.caps import tts_el
+    from wrapper.tasks import Cancelled
+
+    ctx = TickCtx()
+    tts_el.job_tick(None, 1, 2)
+    tts_el.job_tick(ctx, 1, 4)
+    check("tick publishes done/total",
+          ctx.ticks and ctx.ticks[-1].get("done") == 1 and ctx.ticks[-1].get("total") == 4,
+          ctx.ticks)
+    ctx2 = TickCtx(cancel_after=1)
+    try:
+        tts_el.job_tick(ctx2, 0, 2)
+        check("tick raises Cancelled", False)
+    except Cancelled:
+        check("tick raises Cancelled", True)
+
+
+def t_stream_ctx_cancel():
+    import threading
+    import time
+
+    from wrapper.caps import tts_el
+    from wrapper import tasks
+    from wrapper.tasks import Cancelled
+
+    stop = threading.Event()
+    ctx = tasks.stream_ctx(stop)
+    seen = []
+
+    def work():
+        try:
+            for i, part in enumerate(["a", "b", "c"]):
+                tts_el.job_tick(ctx, i, 3)
+                seen.append(part)
+                time.sleep(0.25)
+        except Cancelled:
+            return
+
+    th = threading.Thread(target=work)
+    th.start()
+    time.sleep(0.05)
+    stop.set()
+    th.join(2)
+    check("stream_ctx cancel stops before later pieces", seen == ["a"], seen)
+
+
+def t_live_stream_stops_iter():
+    import asyncio
+    import tempfile
+    import threading
+    import time
+
+    from wrapper.caps import tts_el
+
+    fake_soundfile()
+    seen = []
+    started = threading.Event()
+
+    class SlowEL(FakeELBackend):
+        def iter_clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+            ctx = kw.get("ctx")
+            for i, part in enumerate(["one", "two", "three"]):
+                tts_el.job_tick(ctx, i, 3)
+                seen.append(part)
+                started.set()
+                time.sleep(0.35)
+                yield np.ones(80, dtype="float32"), 24000
+
+    class FlipReq:
+        def __init__(self):
+            self.gone = False
+
+        async def is_disconnected(self):
+            return self.gone
+
+    backend = SlowEL()
+    root = tempfile.mkdtemp(prefix="el-stream-stop-")
+    tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
+    req = FlipReq()
+
+    async def run():
+        resp = await tts_el._live_stream("p1", "hello stream", "", "mp3", None, req)
+        check("stream opened", getattr(resp, "status_code", 200) == 200, getattr(resp, "status_code", None))
+        started.wait(2)
+        req.gone = True
+        async for _ in resp.body_iterator:
+            pass
+
+    asyncio.run(run())
+    time.sleep(0.2)
+    check("disconnect canceled later slices", "three" not in seen, seen)
+
+
+def t_breeze_clone_cancel():
+    fake_soundfile()
+    from wrapper.caps.breeze import BreezeBackend
+    from wrapper.tasks import Cancelled
+
+    be = BreezeBackend(None, None, None, None)
+    seen = []
+
+    def gen(text, instruction, ref_path=None, ref_text=None, cfg=None, **kw):
+        seen.append(text)
+        return np.ones(80, dtype="float32"), 24000
+
+    be._generate = gen
+    ctx = TickCtx(cancel_after=3)
+    try:
+        be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref", ctx=ctx)
+        check("canceled breeze clone did not finish", False)
+    except Cancelled:
+        check("breeze clone stops after the current piece", seen == ["第一句。"], seen)
+    check("breeze clone published 1/2 before the next piece",
+          any(t.get("done") == 1 and t.get("total") == 2 for t in ctx.ticks), ctx.ticks)
+
+
+def t_firered_clone_cancel():
+    from wrapper.caps import firered
+    from wrapper.tasks import Cancelled
+
+    seen = []
+
+    class FakeModel:
+        def _apply_frontend(self, text):
+            parts, buf = [], ""
+            for ch in text:
+                buf += ch
+                if ch in "。！？!?":
+                    if buf.strip():
+                        parts.append(buf)
+                    buf = ""
+            if buf.strip():
+                parts.append(buf)
+            return text, "zh", parts or [text]
+
+        def generate_tts(self, **kw):
+            seen.append(("tts", kw.get("text")))
+            return np.ones(80, dtype="float32"), 24000
+
+        def generate_voice_design(self, **kw):
+            seen.append(("design", kw.get("text")))
+            return np.ones(80, dtype="float32"), 24000, "plan"
+
+    orig = firered._as_torch
+    firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+    try:
+        be = firered.FireRedBackend(FakeModel())
+        be._join = lambda waves, sr, fade_ms=50.0: (
+            np.concatenate([np.asarray(w, dtype="float32").reshape(-1) for w in waves]), sr)
+        be._pace = lambda audio, sr, instruction="", speed=None: (audio, sr)
+        ctx = TickCtx(cancel_after=3)
+        try:
+            be.clone("第一句。第二句。", np.zeros(80, dtype="float32"), 24000, "ref",
+                     ctx=ctx, speed=1.0)
+            check("canceled firered clone did not finish", False)
+        except Cancelled:
+            check("firered clone stops after the current sentence",
+                  seen == [("tts", "第一句。")], seen)
+        check("firered clone published 1/2 before the next sentence",
+              any(t.get("done") == 1 and t.get("total") == 2 for t in ctx.ticks), ctx.ticks)
+        seen.clear()
+        ctx2 = TickCtx(cancel_after=3)
+        try:
+            be.design("沉稳男声", "第一句。第二句。", ctx=ctx2, speed=1.0)
+            check("canceled firered design did not finish", False)
+        except Cancelled:
+            check("firered design stops after the current sentence",
+                  seen == [("design", "第一句。")], seen)
+        check("firered design published 1/2 before the next sentence",
+              any(t.get("done") == 1 and t.get("total") == 2 and t.get("stage") == "design"
+                  for t in ctx2.ticks), ctx2.ticks)
+    finally:
+        firered._as_torch = orig
+
+
+def t_firered_triplet_pad():
+    from wrapper.caps.firered import as_tts_triplet
+
+    check("2-tuple becomes a triplet", as_tts_triplet(("a", 24000)) == ("a", 24000, None))
+    check("triplet is left alone", as_tts_triplet(("a", 24000, "x")) == ("a", 24000, "x"))
+
+
+def t_firered_design_instruction():
+    from wrapper.caps.tts_el import _design_identity, _design_instruction
+
+    check("plan beats the short blurb",
+          _design_instruction({"instruction": "年轻女声", "plan": "口音：四川话"})
+          == "口音：四川话")
+    check("extra.plan is enough",
+          _design_instruction({"instruction": "年轻女声", "extra": {"plan": "语速稍慢"}})
+          == "语速稍慢")
+    check("blurb is the fallback",
+          _design_instruction({"instruction": "年轻女声"}) == "年轻女声")
+    check("factory clone is not a design identity",
+          not _design_identity({"source": "clone", "category": "premade"}))
+    check("user clone is not a design identity",
+          not _design_identity({"category": "cloned"}))
+    check("generated card is a design identity",
+          _design_identity({"category": "generated", "source": "design"}))
+    check("legacy premade without source is a design identity",
+          _design_identity({"category": "premade", "instruction": "年轻女声"}))
+
+
+def t_output_format():
+    from fastapi import HTTPException
+    from wrapper.caps import tts_el
+
+    d = tts_el._output_format(None)
+    check("default token is EL mp3 44.1/128",
+          d.kind == "mp3" and d.sr == 44100 and d.bitrate == 128, (d.kind, d.sr, d.bitrate))
+    m = tts_el._output_format("mp3_44100_192")
+    check("mp3 192 token", m.kind == "mp3" and m.sr == 44100 and m.bitrate == 192, m.token)
+    w = tts_el._output_format("wav_48000")
+    check("wav 48k token", w.kind == "wav" and w.sr == 48000 and w.bitrate is None, w.token)
+    eight = tts_el._output_format("wav_8000")
+    check("wav 8k token", eight.kind == "wav" and eight.sr == 8000, eight.token)
+    bare = tts_el._output_format("mp3")
+    check("bare mp3 is EL default", bare.sr == 44100 and bare.bitrate == 128, bare.token)
+    try:
+        tts_el._output_format("pcm_24000")
+        check("pcm token is 400 (not on EL dropdown)", False)
+    except HTTPException as e:
+        check("pcm token is 400 (not on EL dropdown)", e.status_code == 400, e.detail)
+    try:
+        tts_el._output_format("aac_44100")
+        check("unknown codec is 400", False)
+    except HTTPException as e:
+        check("unknown codec is 400", e.status_code == 400, e.detail)
+
+
+def t_voice_settings_map():
+    from wrapper.caps import tts_el
+
+    base = 2.0
+    d = tts_el.resolve_settings(tts_el._DEFAULT_SETTINGS, base, "")
+    check("default knobs keep chart CFG", abs(d.cfg - base) < 1e-6, d.cfg)
+    check("default knobs keep seed", d.seed == int(tts_el.SEED), d.seed)
+    check("default knobs add no instruction", d.instruction == "", d.instruction)
+    high = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "similarity_boost": 1.0}, base, "")
+    check("high similarity raises CFG", high.cfg > base, high.cfg)
+    off = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "use_speaker_boost": False}, base, "")
+    check("speaker_boost off lowers CFG", off.cfg < base, off.cfg)
+    low = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "stability": 0.1}, base, "")
+    check("low stability varies the seed", low.seed != int(tts_el.SEED), low.seed)
+    styled = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "style": 0.8}, base, "")
+    check("style wraps an English direction",
+          "expressive" in styled.instruction.lower(), styled.instruction)
+    check("style raises CFG", styled.cfg > base, styled.cfg)
+    slow = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "speed": 0.6}, base, "沉稳男声")
+    check("slow speed wraps a Chinese direction", "慢" in slow.instruction, slow.instruction)
+
+
+def t_firered_settings_apply():
+    from wrapper.caps import firered, tts_el
+
+    seen = []
+
+    class FakeModel:
+        def generate_tts(self, **kw):
+            seen.append(kw)
+            return np.ones(80, dtype="float32"), 24000
+
+        def generate_voice_design(self, **kw):
+            seen.append(kw)
+            return np.ones(80, dtype="float32"), 24000, "plan"
+
+    orig = firered._as_torch
+    firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+    try:
+        be = firered.FireRedBackend(FakeModel())
+        be._pace = lambda audio, sr, instruction="", speed=None: (audio, sr)
+        be._join = lambda waves, sr, fade_ms=50.0: (waves[0], sr)
+        be.clone("你好", np.zeros(80, dtype="float32"), 24000, "ref",
+                 settings={**tts_el._DEFAULT_SETTINGS, "similarity_boost": 1.0})
+        check("firered clone uses mapped CFG",
+              seen and seen[-1].get("inference_cfg") > tts_el.INFERENCE_CFG,
+              seen[-1] if seen else None)
+        seen.clear()
+        be.design("沉稳男声", "你好",
+                  settings={**tts_el._DEFAULT_SETTINGS, "style": 0.8, "speed": 0.6})
+        check("firered design uses mapped CFG",
+              seen and seen[-1].get("inference_cfg") > tts_el.DESIGN_CFG,
+              seen[-1] if seen else None)
+        check("firered design instruction carries style wrap",
+              seen and "夸张" in str(seen[-1].get("instruction") or ""),
+              seen[-1] if seen else None)
+    finally:
+        firered._as_torch = orig
+
+
+def t_firered_speed_for():
+    from wrapper.caps.firered import clamp_speed, speed_for
+
+    check("clamp snaps to 0.1", clamp_speed(0.73) == 0.7)
+    check("clamp floors at 0.5", clamp_speed(0.1) == 0.5)
+    check("clamp caps at 2.0", clamp_speed(9) == 2.0)
+    check("default speak speed is below 1", speed_for("") < 1.0)
+    check("很慢 goes to 0.6 or slower", speed_for("语速很慢，带一点俏皮") <= 0.6)
+    check("very slow matches 很慢", speed_for("a very slow narrator") <= 0.6)
+    check("很快 skips the edit", speed_for("语速很快") == 1.0)
+
+
+def t_firered_design_speak():
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    class FakeFireRed(FakeELBackend):
+        prefer_design_speak = True
+
+    fake_soundfile()
+    backend = FakeFireRed()
+    root = tempfile.mkdtemp(prefix="el-voices-")
+    store = tts_el.VoiceStore(root, backend.presets())
+    tts_el.install(backend, store=store)
+    from wrapper.caps.firered import build_app
+
+    with TestClient(build_app(["tts", "tts_clone", "tts_design"])) as c:
+        r = c.post("/v1/text-to-speech/p1", json={"text": "hello from design speak"})
+        check("design-speak premade returns 200", r.status_code == 200, r.text[:120])
+        clones = [call for call in backend.calls if call[0] == "clone"]
+        designs = [call for call in backend.calls if call[0] == "design"]
+        check("design-speak never falls back to clone", clones == [], backend.calls)
+        check("freeze still designs a sample",
+              any(call[2] != "hello from design speak" for call in designs), designs)
+        check("speak redesigns with the user text",
+              any(call[2] == "hello from design speak" for call in designs), designs)
+        check("premade speak uses the frozen plan not the blurb",
+              any(call[0] == "design" and call[1] == "ok"
+                  and call[2] == "hello from design speak" for call in backend.calls),
+              backend.calls)
+        preview = c.post("/v1/text-to-voice/design",
+                         json={"voice_description": "A raspy pirate", "text": "Ahoy"})
+        check("design preview keeps a plan",
+              preview.status_code == 200
+              and (preview.json().get("previews") or [{}])[0].get("plan") == "ok",
+              preview.text[:160])
+        gid = (preview.json().get("previews") or [{}])[0].get("generated_voice_id")
+        created = c.post("/v1/text-to-voice",
+                         json={"generated_voice_id": gid, "voice_name": "Pirate"})
+        vid = created.json().get("voice_id")
+        backend.calls.clear()
+        spoken = c.post("/v1/text-to-speech/%s" % vid, json={"text": "more pirate"})
+        check("saved design speak returns 200", spoken.status_code == 200, spoken.text[:120])
+        check("saved design speak uses the frozen plan",
+              any(call[0] == "design" and call[1] == "ok" and call[2] == "more pirate"
+                  for call in backend.calls), backend.calls)
+
+    class FakeClonePack(FakeELBackend):
+        prefer_design_speak = True
+
+        def presets(self):
+            return [{"voice_id": "zh-f", "name": "中文女", "category": "premade",
+                     "source": "clone", "instruction": "语速稍慢",
+                     "description": "nav"}]
+
+    clone_be = FakeClonePack()
+    clone_root = tempfile.mkdtemp(prefix="el-voices-clone-")
+    os.makedirs(os.path.join(clone_root, "zh-f"), exist_ok=True)
+    open(os.path.join(clone_root, "zh-f", "meta.json"), "w").write(
+        '{"voice_id":"zh-f","name":"中文女","category":"premade","source":"clone",'
+        '"instruction":"语速稍慢"}')
+    open(os.path.join(clone_root, "zh-f", "prompt.wav"), "wb").write(wav_of(0.4))
+    open(os.path.join(clone_root, "zh-f", "prompt.txt"), "w").write("准备出发")
+    tts_el.install(clone_be, store=tts_el.VoiceStore(clone_root, clone_be.presets()))
+    with TestClient(build_app(["tts", "tts_clone", "tts_design"])) as c:
+        spoken = c.post("/v1/text-to-speech/zh-f", json={"text": "请直行"})
+        check("factory clone speak returns 200", spoken.status_code == 200, spoken.text[:120])
+        check("factory clone speak uses the wav, not design",
+              any(call[0] == "clone" and call[1] == "请直行" for call in clone_be.calls)
+              and not any(call[0] == "design" and call[2] == "请直行" for call in clone_be.calls),
+              clone_be.calls)
+        check("factory clone passes Voice Direction to clone",
+              any(call[0] == "clone" and call[3] == "语速稍慢" for call in clone_be.calls),
+              clone_be.calls)
+
+
+def t_tts_el(module_name="firered"):
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    fake_soundfile()
+    backend = FakeELBackend()
+    if module_name == "breeze":
+        backend.card_instruction_is_direction = False
+    root = tempfile.mkdtemp(prefix="el-voices-")
+    store = tts_el.VoiceStore(root, backend.presets())
+    tts_el.install(backend, store=store)
+    build = __import__("wrapper.caps.%s" % module_name, fromlist=["build_app"]).build_app
+    wav = wav_of(0.4)
+
+    with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
+        advertises_tasks(c, module_name, legacy=False)
+        spec_paths = mounted(c)
+        check("%s advertises ElevenLabs list/design/speak" % module_name,
+              ("GET", "/v1/voices") in spec_paths
+              and ("GET", "/v1/voices/settings/default") in spec_paths
+              and ("POST", "/v1/voices/{voice_id}/settings/edit") in spec_paths
+              and ("POST", "/v1/text-to-voice/design") in spec_paths
+              and ("POST", "/v1/text-to-speech/{voice_id}") in spec_paths
+              and ("POST", "/v1/text-to-speech/{voice_id}/stream") in spec_paths
+              and ("POST", "/v1/voices/add") in spec_paths,
+              sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
+        check("%s does not advertise OpenAI speech aliases" % module_name,
+              ("GET", "/v1/audio/voices") not in spec_paths
+              and ("POST", "/v1/audio/speech") not in spec_paths
+              and ("POST", "/v1/audio/speech/clone") not in spec_paths,
+              sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
+        listed = c.get("/v1/voices").json()["voices"]
+        check("%s lists premade voices before they are frozen" % module_name,
+              listed and listed[0]["voice_id"] == "p1" and listed[0]["category"] == "premade",
+              listed)
+        check("%s OpenAI voices alias is gone" % module_name,
+              c.get("/v1/audio/voices").status_code == 404)
+        r = c.post("/v1/text-to-speech/p1", json={"text": "hello from eleven"})
+        check("%s speaks a premade voice_id" % module_name, r.status_code == 200,
+              (r.status_code, r.text[:120]))
+        check("%s first premade speak froze a design sample" % module_name,
+              any(call[0] == "design" for call in backend.calls)
+              and any(call[0] == "clone" for call in backend.calls),
+              backend.calls)
+        if module_name == "breeze":
+            check("breeze premade speak does not send the card blurb as Voice Direction",
+                  any(call[0] == "clone" and (len(call) < 4 or not call[3])
+                      for call in backend.calls), backend.calls)
+        r2 = c.post("/v1/audio/speech", json={"input": "hello again", "voice": "p1"})
+        check("%s OpenAI speech alias is gone" % module_name, r2.status_code == 404,
+              r2.status_code)
+        preview = c.post("/v1/text-to-voice/design",
+                         json={"voice_description": "A raspy pirate", "text": "Ahoy there"})
+        check("%s design returns a generated_voice_id" % module_name, preview.status_code == 200,
+              (preview.status_code, preview.text[:160]))
+        gid = (preview.json().get("previews") or [{}])[0].get("generated_voice_id")
+        created = c.post("/v1/text-to-voice",
+                         json={"generated_voice_id": gid, "voice_name": "Pirate"})
+        check("%s persist design yields a voice_id" % module_name,
+              created.status_code == 200 and created.json().get("voice_id"),
+              created.text[:160])
+        add = c.post("/v1/voices/add",
+                     data={"name": "Me", "description": "this is the transcript"},
+                     files={"file": ("r.wav", wav, "audio/wav")})
+        check("%s clone add returns voice_id" % module_name,
+              add.status_code == 200 and add.json().get("voice_id"),
+              (add.status_code, add.text[:160]))
+        vid = add.json().get("voice_id")
+        check("%s advertises delete and edit" % module_name,
+              ("DELETE", "/v1/voices/{voice_id}") in spec_paths
+              and ("POST", "/v1/voices/{voice_id}/edit") in spec_paths,
+              sorted(p[1] for p in spec_paths if "voices" in p[1]))
+        edited = c.post("/v1/voices/%s/edit" % vid, data={"name": "Renamed"})
+        check("%s edit returns ok" % module_name,
+              edited.status_code == 200 and edited.json().get("status") == "ok",
+              (edited.status_code, edited.text[:160]))
+        check("%s edit updates GET" % module_name,
+              c.get("/v1/voices/%s" % vid).json().get("name") == "Renamed")
+        check("%s edit unknown is 404" % module_name,
+              c.post("/v1/voices/nobody/edit", data={"name": "X"}).status_code == 404)
+        check("%s edit premade is 400" % module_name,
+              c.post("/v1/voices/p1/edit", data={"name": "Nope"}).status_code == 400)
+        deleted = c.delete("/v1/voices/%s" % vid)
+        check("%s delete clone returns ok" % module_name,
+              deleted.status_code == 200 and deleted.json().get("status") == "ok",
+              (deleted.status_code, deleted.text[:160]))
+        check("%s deleted voice is gone" % module_name,
+              c.get("/v1/voices/%s" % vid).status_code == 404)
+        check("%s delete premade is 400" % module_name,
+              c.delete("/v1/voices/p1").status_code == 400)
+        check("%s delete unknown is 404" % module_name,
+              c.delete("/v1/voices/nobody").status_code == 404)
+        check("%s clone without a transcript is a 400" % module_name,
+              c.post("/v1/voices/add", data={"name": "Nope"},
+                     files={"file": ("r.wav", wav, "audio/wav")}).status_code == 400)
+        check("%s empty text is a 400" % module_name,
+              c.post("/v1/text-to-speech/p1", json={"text": "  "}).status_code == 400)
+        check("%s unknown voice_id is a 404" % module_name,
+              c.post("/v1/text-to-speech/nobody", json={"text": "hi"}).status_code == 404)
+        check("%s stream rejects async=1" % module_name,
+              c.post("/v1/text-to-speech/p1/stream?async=1",
+                     json={"text": "later"}).status_code == 400)
+        streamed = c.post("/v1/text-to-speech/p1/stream",
+                          json={"text": "hello stream", "output_format": "mp3"})
+        check("%s stream returns audio as it is produced" % module_name,
+              streamed.status_code == 200
+              and "mpeg" in (streamed.headers.get("content-type") or "")
+              and len(streamed.content) > 0,
+              (streamed.status_code, streamed.headers.get("content-type"),
+               len(streamed.content)))
+        stream_hid = streamed.headers.get("history-item-id")
+        stream_history = c.get("/v1/history/%s" % stream_hid).json() if stream_hid else {}
+        check("%s completed stream publishes output duration" % module_name,
+              stream_history.get("state") == "created"
+              and float(stream_history.get("output_duration_seconds") or 0) > 0,
+              stream_history)
+        default_s = c.get("/v1/voices/settings/default")
+        check("%s default settings look like ElevenLabs" % module_name,
+              default_s.status_code == 200
+              and default_s.json().get("stability") == 0.5
+              and default_s.json().get("similarity_boost") == 0.75
+              and "speed" in default_s.json(),
+              default_s.json())
+        got_s = c.get("/v1/voices/p1/settings")
+        check("%s premade settings GET works" % module_name,
+              got_s.status_code == 200 and got_s.json().get("speed") == 1.0,
+              got_s.json())
+        edited_s = c.post("/v1/voices/p1/settings/edit",
+                          json={"speed": 0.8, "stability": 0.2, "unknown_knob": 9})
+        check("%s premade settings edit is allowed" % module_name,
+              edited_s.status_code == 200
+              and edited_s.json().get("speed") == 0.8
+              and edited_s.json().get("stability") == 0.2
+              and "unknown_knob" not in edited_s.json(),
+              edited_s.json())
+        check("%s settings persist on GET" % module_name,
+              c.get("/v1/voices/p1/settings").json().get("speed") == 0.8)
+        backend.calls.clear()
+        knobs_r = c.post("/v1/text-to-speech/p1",
+                         json={"text": "knobs please",
+                               "voice_settings": {"style": 0.9, "similarity_boost": 1.0}})
+        check("%s speak accepts voice_settings" % module_name, knobs_r.status_code == 200,
+              knobs_r.text[:120])
+        check("%s speak forwards voice_settings to the backend" % module_name,
+              any((call[0] == "clone" and (call[4] or {}).get("style") == 0.9)
+                  or (call[0] == "design" and len(call) > 3
+                      and (call[3] or {}).get("style") == 0.9)
+                  for call in backend.calls),
+              backend.calls)
+        async_r = c.post("/v1/text-to-speech/p1?async=1", json={"text": "later"})
+        check("%s async 202" % module_name, async_r.status_code == 202, async_r.text[:120])
+        if async_r.status_code == 202:
+            doc = poll(c, async_r.json()["task"]["id"])
+            check("%s async task succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            contract(c, doc, module_name, legacy=False)
+        design_async = c.post("/v1/text-to-voice/design?async=1",
+                              json={"voice_description": "A raspy pirate", "text": "Ahoy again"})
+        check("%s design async 202" % module_name, design_async.status_code == 202,
+              design_async.text[:160])
+        if design_async.status_code == 202:
+            doc = poll(c, design_async.json()["task"]["id"])
+            check("%s design async succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            preview_async = c.get("%s/%s/result" % (TASKS, doc["id"])).json()
+            gid_async = (preview_async.get("previews") or [{}])[0].get("generated_voice_id")
+            check("%s design async result has preview" % module_name, bool(gid_async),
+                  preview_async)
+            persist_async = c.post("/v1/text-to-voice?async=1",
+                                   json={"generated_voice_id": gid_async,
+                                         "voice_name": "PirateAsync"})
+            check("%s persist async 202" % module_name, persist_async.status_code == 202,
+                  persist_async.text[:160])
+            if persist_async.status_code == 202:
+                doc = poll(c, persist_async.json()["task"]["id"])
+                check("%s persist async succeeded" % module_name, doc["status"] == "succeeded",
+                      doc.get("status"))
+        add_async = c.post("/v1/voices/add?async=1",
+                           data={"name": "MeAsync", "description": "this is the transcript"},
+                           files={"file": ("r.wav", wav, "audio/wav")})
+        check("%s add async 202" % module_name, add_async.status_code == 202,
+              (add_async.status_code, add_async.text[:160]))
+        if add_async.status_code == 202:
+            doc = poll(c, add_async.json()["task"]["id"])
+            check("%s add async succeeded" % module_name, doc["status"] == "succeeded",
+                  doc.get("status"))
+            added = c.get("%s/%s/result" % (TASKS, doc["id"])).json()
+            check("%s add async result has voice_id" % module_name, bool(added.get("voice_id")),
+                  added)
+
+    tts_el._state.update(ready=False, error="weights are missing", backend=None, store=None)
+    with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
+        r = c.get("/v1/voices")
+        check("%s list is 503 while loading" % module_name, r.status_code == 503
+              and "weights are missing" in r.text, r.text[:100])
+
+
+def t_tts_el_edge_safe():
+    """A body over the public-hop budget is stored as mp3; a small wav is left alone."""
+    from wrapper.caps import tts_el
+
+    old_lim = tts_el._EDGE_SAFE_BYTES
+    old_enc = tts_el._encode
+    old_fit = tts_el._encode_mp3_fit
+    try:
+        tts_el._encode = lambda audio, sr, fmt: b"RIFF" + b"W" * 1000
+        tts_el._encode_mp3_fit = lambda audio, sr: b"ID3mp3"
+        tts_el._EDGE_SAFE_BYTES = 200
+        silent = np.zeros(8, dtype="float32")
+        body, fmt = tts_el._encode_edge(silent, 24000, "wav_44100")
+        check("oversize wav becomes mp3", fmt == "mp3" and body == b"ID3mp3", (fmt, body[:8]))
+        tts_el._EDGE_SAFE_BYTES = 8000
+        body, fmt = tts_el._encode_edge(silent, 24000, "wav_44100")
+        check("under-limit wav is unchanged", fmt == "wav" and body.startswith(b"RIFF"),
+              (fmt, len(body)))
+    finally:
+        tts_el._EDGE_SAFE_BYTES = old_lim
+        tts_el._encode = old_enc
+        tts_el._encode_mp3_fit = old_fit
+
+
+def t_tts_el_live_mux_duration():
+    """Logical duration is identical across containers and includes every write (including gaps)."""
+    from wrapper.caps import tts_el
+
+    class Sink:
+        def write(self, _data):
+            return None
+
+        def flush(self):
+            return None
+
+    class Proc:
+        stdin = Sink()
+
+    durations = {}
+    old_encode = tts_el._encode_out
+    try:
+        tts_el._encode_out = lambda *_args: b"encoded"
+        for kind in ("pcm", "wav", "mp3", "flac", "opus"):
+            mux = tts_el._LiveMux(tts_el.OutSpec(kind, 24000, 64 if kind in ("mp3", "opus") else None), 24000)
+            if kind == "wav":
+                mux._oneshot = True
+            elif kind not in ("pcm", "wav"):
+                mux.proc = Proc()
+            mux.write(np.zeros(2400, dtype="float32"), 24000)
+            mux.write(np.zeros(4800, dtype="float32"), 24000)
+            durations[kind] = mux.output_duration_seconds
+    finally:
+        tts_el._encode_out = old_encode
+    check("live mux duration is container-independent",
+          all(abs(value - 0.3) < 1e-9 for value in durations.values()), durations)
+
+
+def t_tts_el_history_duration():
+    """Only a normally completed history item publishes a final duration."""
+    import tempfile
+    from wrapper.caps import tts_el
+
+    store = tts_el.HistoryStore(tempfile.mkdtemp(prefix="el-history-duration-"))
+    args = dict(voice_id="p1", voice_name="Voice", voice_category="premade",
+                text="hello", settings={}, content_type="audio/mpeg", output_format="mp3")
+    created = store.begin(**args)
+    doc = store.finish(created["history_item_id"], "created", 1.25)
+    check("created history carries duration", doc.get("output_duration_seconds") == 1.25, doc)
+    canceled = store.begin(**args)
+    doc = store.finish(canceled["history_item_id"], "canceled", 9.0)
+    check("canceled history omits duration", "output_duration_seconds" not in doc, doc)
+
+
+def t_tts_el_limits():
+    """Product gates live in ENGINE_ARGS. 0 stays off for a bare process."""
+    import importlib
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    was = os.environ.get("ENGINE_ARGS", "")
+    try:
+        os.environ["ENGINE_ARGS"] = (
+            "--cfg-scale 1 --design-cfg 4 --ref-min-seconds 3 --ref-max-seconds 30 "
+            "--ref-max-mb 5 --design-min-chars 3 --design-max-chars 500 "
+            "--max-new-tokens 1500 --max-seq-len 2048"
+        )
+        importlib.reload(tts_el)
+        check("tts_el reads Breeze product gates from ENGINE_ARGS",
+              tts_el.REF_MIN_SECONDS == 3 and tts_el.REF_MAX_SECONDS == 30
+              and tts_el.REF_MAX_MB == 5
+              and tts_el.DESIGN_MIN_CHARS == 3 and tts_el.DESIGN_MAX_CHARS == 500
+              and tts_el.MAX_NEW_TOKENS == 1500 and tts_el.MAX_SEQ_LEN == 2048,
+              (tts_el.REF_MIN_SECONDS, tts_el.REF_MAX_SECONDS, tts_el.MAX_SEQ_LEN))
+        fake_soundfile()
+        backend = FakeELBackend()
+        root = tempfile.mkdtemp(prefix="el-limits-")
+        tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
+        with TestClient(tts_el.build_app(["tts", "tts_clone", "tts_design"],
+                                         module="breeze")) as c:
+            add = lambda wav: c.post(
+                "/v1/voices/add",
+                data={"name": "Me", "description": "this is the transcript"},
+                files={"file": ("r.wav", wav, "audio/wav")})
+            short = add(wav_of(1))
+            check("clone shorter than --ref-min-seconds is 400",
+                  short.status_code == 400 and "ref-min-seconds" in short.text,
+                  (short.status_code, short.text[:160]))
+            mid = add(wav_of(10))
+            check("clone inside 3–30s is 200",
+                  mid.status_code == 200 and mid.json().get("voice_id"),
+                  (mid.status_code, mid.text[:160]))
+            long = add(wav_of(35))
+            check("clone longer than --ref-max-seconds is 400",
+                  long.status_code == 400 and "ref-max-seconds" in long.text,
+                  (long.status_code, long.text[:160]))
+            fat = add(b"RIFF" + b"\x00" * (6 * 1024 * 1024))
+            check("clone bigger than --ref-max-mb is 400",
+                  fat.status_code == 400 and "ref-max-mb" in fat.text,
+                  (fat.status_code, fat.text[:160]))
+            tiny = c.post("/v1/text-to-voice/design",
+                          json={"voice_description": "ab", "text": "Ahoy"})
+            check("design shorter than --design-min-chars is 400",
+                  tiny.status_code == 400 and "design-min-chars" in tiny.text,
+                  (tiny.status_code, tiny.text[:160]))
+            huge = c.post("/v1/text-to-voice/design",
+                          json={"voice_description": "x" * 501, "text": "Ahoy"})
+            check("design longer than --design-max-chars is 400",
+                  huge.status_code == 400 and "design-max-chars" in huge.text,
+                  (huge.status_code, huge.text[:160]))
+            ok = c.post("/v1/text-to-voice/design",
+                        json={"voice_description": "A raspy pirate", "text": "Ahoy"})
+            check("design inside 3–500 characters is 200",
+                  ok.status_code == 200, (ok.status_code, ok.text[:160]))
+    finally:
+        if was:
+            os.environ["ENGINE_ARGS"] = was
+        else:
+            os.environ.pop("ENGINE_ARGS", None)
+        importlib.reload(tts_el)
+
+
 def t_engine_args():
     # Every knob is a flag in ENGINE_ARGS now, so this parser is the one gate they all pass through.
     from wrapper.contract import EngineArgs
@@ -1421,6 +2570,7 @@ def main():
                            ("qwen", t_qwen, "qwen"),
                            ("tts", t_tts, "qwen3tts"),
                            ("tts clone", t_tts_clone, "qwen3tts"),
+                           ("tts design", t_tts_design, "qwen3tts"),
                            ("tts warmup", t_tts_warmup, "qwen3tts"),
                            ("tts not ready", t_tts_not_ready, "qwen3tts"),
                            ("crispasr tts", t_crispasr, "crispasr"),
@@ -1430,6 +2580,30 @@ def main():
                            ("sound_fx engine args", t_sound_fx_engine_args, "dasheng"),
                            ("tts_dialogue", t_tts_dialogue, "soulx"),
                            ("tts_dialogue not ready", t_tts_dialogue_not_ready, "soulx"),
+                           ("firered elevenlabs", lambda: t_tts_el("firered"), "firered"),
+                           ("breeze elevenlabs", lambda: t_tts_el("breeze"), "breeze"),
+                           ("breeze split speak", t_breeze_split_speak, "breeze"),
+                           ("breeze clone slices", t_breeze_clone_slices, "breeze"),
+                           ("breeze stream chunks", t_breeze_stream_chunks, "breeze"),
+                           ("breeze pace", t_breeze_pace, "breeze"),
+                           ("tts job tick", t_tts_job_tick, "firered"),
+                           ("stream ctx cancel", t_stream_ctx_cancel, "breeze"),
+                           ("live stream stops iter", t_live_stream_stops_iter, "breeze"),
+                           ("breeze clone cancel", t_breeze_clone_cancel, "breeze"),
+                           ("firered clone cancel", t_firered_clone_cancel, "firered"),
+                           ("tts_el limits", t_tts_el_limits, "breeze"),
+                           ("tts_el edge-safe", t_tts_el_edge_safe, "breeze"),
+                           ("tts_el live mux duration", t_tts_el_live_mux_duration, "breeze"),
+                           ("tts_el history duration", t_tts_el_history_duration, "breeze"),
+                           ("voice cards", t_voice_cards, "firered"),
+                           ("voice cards clone seed", t_voice_cards_clone_seed, "breeze"),
+                           ("firered triplet pad", t_firered_triplet_pad, "firered"),
+                           ("firered speed_for", t_firered_speed_for, "firered"),
+                           ("output format tokens", t_output_format, "firered"),
+                           ("voice settings map", t_voice_settings_map, "firered"),
+                           ("firered settings apply", t_firered_settings_apply, "firered"),
+                           ("firered design instruction", t_firered_design_instruction, "firered"),
+                           ("firered design speak", t_firered_design_speak, "firered"),
                            ("diar_speakrs", t_diar_speakrs, "speakrs"),
                            ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs")):
         print("\n[%s]" % name)

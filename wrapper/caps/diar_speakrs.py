@@ -72,7 +72,7 @@ def _models_dir(repo):
     log.info("no HF snapshot under %s; passing the directory itself to the engine", root)
     return root
 
-_runtime = Runtime("speakrs-community-1", pipeline=None, device="cpu", params={})
+_runtime = Runtime(pipeline=None, device="cpu", params={})
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 

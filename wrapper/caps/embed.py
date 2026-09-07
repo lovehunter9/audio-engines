@@ -14,7 +14,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-embed")
 
-_runtime = Runtime("pyannote-embedding", inference=None, device="cpu", dim=None)
+_runtime = Runtime(inference=None, device="cpu", dim=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

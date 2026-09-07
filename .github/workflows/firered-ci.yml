@@ -1,5 +1,5 @@
-# qwen3tts CI: triggers only; the build is the shared build-image.yml.
-name: qwen3tts-ci
+# firered CI: triggers only; the build is the shared build-image.yml.
+name: firered-ci
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
     paths:
       - 'wrapper/**'
       - 'tests/**'
-      - 'bases/qwen3tts/**'
-      - '.github/workflows/qwen3tts-ci.yml'
+      - 'bases/firered/**'
+      - '.github/workflows/firered-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
@@ -26,15 +26,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: qwen3tts-ci-${{ github.ref }}
+  group: firered-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     uses: ./.github/workflows/build-image.yml
     with:
-      base: qwen3tts
-      repo: audio-qwen3tts
+      base: firered
+      repo: audio-firered
       namespace: ${{ inputs.namespace || 'beclab' }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

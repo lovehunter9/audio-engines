@@ -38,15 +38,23 @@ _ROUTES = [
 INPUT_SECONDS_HEADER = "X-Audio-Input-Duration-Seconds"
 OUTPUT_SECONDS_HEADER = "X-Audio-Output-Duration-Seconds"
 
-# Advertised by /api/engine-spec next to the capability's own endpoints.
-ENDPOINTS = [
-    {"method": method, "path": TASKS_PATH + tail, "description": desc}
-    for method, tail, desc in _ROUTES
-] + [
-    {"method": method, "path": LEGACY_PATH + tail, "deprecated": True,
-     "description": "%s; alias of %s" % (desc, TASKS_PATH + tail)}
-    for method, tail, desc in _ROUTES
-]
+def advertised(legacy=True):
+    """Task routes this process will mount. FireRed / Breeze omit the /v1/audio/tasks alias."""
+    rows = [
+        {"method": method, "path": TASKS_PATH + tail, "description": desc}
+        for method, tail, desc in _ROUTES
+    ]
+    if legacy:
+        rows += [
+            {"method": method, "path": LEGACY_PATH + tail, "deprecated": True,
+             "description": "%s; alias of %s" % (desc, TASKS_PATH + tail)}
+            for method, tail, desc in _ROUTES
+        ]
+    return rows
+
+
+# Full set: what the engine can advertise. A process may mount a subset.
+ENDPOINTS = advertised()
 
 # Appended to a capability's own description so callers can discover the async mode.
 ASYNC_HINT = "async=1 -> 202 + task"
@@ -81,9 +89,10 @@ def truthy(v):
 
 
 class _Ctx:
-    # Handed to the job: report progress, and notice a cancel between two units of work.
-    def __init__(self, task=None):
+    # Report progress and notice a cancel; cancel_event is the no-Task-row case.
+    def __init__(self, task=None, cancel_event=None):
         self._task = task
+        self._cancel_event = cancel_event
 
     def progress(self, ratio=None, stage=None, done=None, total=None):
         t = self._task
@@ -124,11 +133,18 @@ class _Ctx:
             setattr(t, attr, round((getattr(t, attr) or 0.0) + value, 3))
 
     def cancelled(self):
+        if self._cancel_event is not None and self._cancel_event.is_set():
+            return True
         return bool(self._task is not None and self._task.cancel)
 
     def checkpoint(self):
         if self.cancelled():
             raise Cancelled("canceled by client")
+
+
+def stream_ctx(cancel_event):
+    """Cancelable ctx for POST .../stream (no Task). job_tick honors the event."""
+    return _Ctx(cancel_event=cancel_event)
 
 
 # For blocking helpers that are also called outside a job (batch mode reuses the single-clip path).
@@ -495,7 +511,7 @@ def _select(tasks, status, limit):
     return sorted(kept, key=lambda t: t.created), len(done) > room
 
 
-def mount(app):
+def mount(app, legacy=True):
     from fastapi import HTTPException
     from fastapi.responses import FileResponse, JSONResponse
 
@@ -532,7 +548,10 @@ def mount(app):
             return JSONResponse(content=t.result, headers=t.meter_headers() or None)
         if not (t.result_path and os.path.isfile(t.result_path)):
             raise HTTPException(status_code=410, detail="the result was already dropped")
-        return FileResponse(t.result_path, media_type=t.content_type, headers=t.headers or None)
+        # gin strips Content-Length; close so a client that cannot see the size does not hang.
+        headers = dict(t.headers or {})
+        headers.setdefault("Connection", "close")
+        return FileResponse(t.result_path, media_type=t.content_type, headers=headers)
 
     def _dropped(t):
         _runner.forget(t)
@@ -549,8 +568,9 @@ def mount(app):
             return _dropped(t)
         return {"id": tid, "status": t.status, "canceling": True}
 
-    # One handler per route, reachable under both bases, so the alias can never drift.
-    for base in (TASKS_PATH, LEGACY_PATH):
+    # One handler per route. FireRed/Breeze pass legacy=False and only mount /v1/tasks.
+    bases = (TASKS_PATH, LEGACY_PATH) if legacy else (TASKS_PATH,)
+    for base in bases:
         app.get(base)(list_tasks)
         app.get(base + "/{tid}")(get_task)
         app.get(base + "/{tid}/result")(get_result)

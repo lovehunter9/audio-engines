@@ -18,7 +18,7 @@ from ..runtime import Runtime
 
 log = logging.getLogger("audio-enhance")
 
-_runtime = Runtime("mtl-mimic-voicebank", model=None, kind=None, device="cpu")
+_runtime = Runtime(model=None, kind=None, device="cpu")
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None

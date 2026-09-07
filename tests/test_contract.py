@@ -64,6 +64,38 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     },
 }
 
+_EL_TTS_ROUTES = (
+    ("GET", "/v1/voices", False),
+    ("GET", "/v1/voices/settings/default", False),
+    ("GET", "/v1/voices/{voice_id}", False),
+    ("GET", "/v1/voices/{voice_id}/settings", False),
+    ("POST", "/v1/voices/{voice_id}/settings/edit", False),
+    ("DELETE", "/v1/voices/{voice_id}", False),
+    ("POST", "/v1/voices/{voice_id}/edit", False),
+    ("POST", "/v1/text-to-speech/{voice_id}", True),
+    ("POST", "/v1/text-to-speech/{voice_id}/stream", False),
+)
+_EL_DESIGN_ROUTES = (
+    ("POST", "/v1/text-to-voice/design", True),
+    ("POST", "/v1/text-to-voice", True),
+)
+_EL_CLONE_ROUTES = (
+    ("POST", "/v1/voices/add", True),
+)
+for _el_mod in ("firered", "breeze"):
+    for _method, _path, _async in _EL_TTS_ROUTES:
+        EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts", _method, _path)] = {
+            "async_supported": _async,
+        }
+    for _method, _path, _async in _EL_DESIGN_ROUTES:
+        EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_design", _method, _path)] = {
+            "async_supported": _async,
+        }
+    for _method, _path, _async in _EL_CLONE_ROUTES:
+        EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
+            "async_supported": _async,
+        }
+
 TASK_PATHS = {
     "/v1/tasks",
     "/v1/tasks/{id}",
@@ -137,6 +169,12 @@ class CatalogContractTest(unittest.TestCase):
                 actual_metadata[key] = metadata
         self.assertEqual(actual_metadata, EXPECTED_CAPABILITY_ENDPOINTS)
 
+    def test_el_instance_does_not_advertise_the_same_route_twice(self):
+        for module in ("firered", "breeze"):
+            rows = catalog.endpoints(module, ["tts", "tts_clone", "tts_design"])
+            keys = [(row["method"], row["path"]) for row in rows]
+            self.assertEqual(keys, list(dict.fromkeys(keys)), module)
+
     def test_task_advertisements_use_the_llm_init_contract_literals(self):
         advertised = {endpoint["path"] for endpoint in tasks.ENDPOINTS if not endpoint.get("deprecated")}
         self.assertEqual(advertised, TASK_PATHS)
@@ -176,7 +214,7 @@ class RuntimeHelperTest(unittest.TestCase):
             },
             clear=False,
         ):
-            engine = Runtime("default-name", default_repo="default/repo", model=None)
+            engine = Runtime(model=None)
 
         self.assertEqual(engine.model_name, "served-name")
         self.assertEqual(engine.model_repo, "org/repo")
@@ -186,11 +224,35 @@ class RuntimeHelperTest(unittest.TestCase):
         engine.state.update(ready=True)
         self.assertTrue(engine.state["ready"])
 
+    def test_runtime_does_not_invent_a_name_or_repo(self):
+        from wrapper.runtime import Runtime
+
+        with mock.patch.dict(
+            os.environ,
+            {"MODEL_NAME": "", "MODEL_SOURCE": ""},
+            clear=False,
+        ):
+            engine = Runtime()
+        self.assertEqual(engine.model_name, "")
+        self.assertEqual(engine.model_repo, "")
+
+    def test_runtime_does_not_treat_model_name_as_a_repo(self):
+        from wrapper.runtime import Runtime
+
+        with mock.patch.dict(
+            os.environ,
+            {"MODEL_NAME": "chart-model", "MODEL_SOURCE": ""},
+            clear=False,
+        ):
+            engine = Runtime()
+        self.assertEqual(engine.model_name, "chart-model")
+        self.assertEqual(engine.model_repo, "")
+
     def test_runtime_preserves_background_and_blocking_startup_axes(self):
         from wrapper.runtime import Runtime
 
         events = []
-        background = Runtime("background")
+        background = Runtime()
         app = object()
 
         class FakeThread:
@@ -238,7 +300,7 @@ class RuntimeHelperTest(unittest.TestCase):
         )
 
         events.clear()
-        blocking = Runtime("blocking")
+        blocking = Runtime()
         with (
             mock.patch(
                 "wrapper.runtime.watchdog.arm",
@@ -282,8 +344,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "align": {
                 "supports": ["align"],
                 "watchdog": "Qwen3-ForcedAligner",
-                "model": "Qwen/Qwen3-ForcedAligner-0.6B",
-                "repo": "Qwen/Qwen3-ForcedAligner-0.6B",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
             },
             "diar_speakrs": {
@@ -302,8 +362,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "diar": {
                 "supports": ["diar"],
                 "watchdog": "pyannote pipeline",
-                "model": "pyannote-community-1",
-                "repo": "pyannote-community-1",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -316,16 +374,12 @@ class RuntimeHelperTest(unittest.TestCase):
             "diar_stream": {
                 "supports": ["diar_stream"],
                 "watchdog": "streaming sortformer",
-                "model": "diar-streaming-sortformer",
-                "repo": "nvidia/diar_streaming_sortformer_4spk-v2.1",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
                 "disable_ws_ping": True,
             },
             "embed": {
                 "supports": ["speaker_embed"],
                 "watchdog": "pyannote embedding",
-                "model": "pyannote-embedding",
-                "repo": "pyannote-embedding",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -337,8 +391,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "enhance": {
                 "supports": ["enhance"],
                 "watchdog": "speechbrain enhancement",
-                "model": "mtl-mimic-voicebank",
-                "repo": "mtl-mimic-voicebank",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -350,8 +402,6 @@ class RuntimeHelperTest(unittest.TestCase):
             "stt_stream": {
                 "supports": ["stt", "stt_stream"],
                 "watchdog": "qwen-asr vLLM",
-                "model": "Qwen/Qwen3-ASR-1.7B",
-                "repo": "Qwen/Qwen3-ASR-1.7B",
                 "state": {"ready": False, "error": None, "asr": None},
                 "load_on_main": True,
                 "disable_ws_ping": True,
@@ -359,15 +409,11 @@ class RuntimeHelperTest(unittest.TestCase):
             "vad": {
                 "supports": ["vad"],
                 "watchdog": "silero-vad",
-                "model": "silero-v5",
-                "repo": "silero-v5",
                 "state": {"ready": False, "error": None, "model": None, "get_ts": None},
             },
             "whisper": {
                 "supports": ["stt"],
                 "watchdog": "faster-whisper",
-                "model": "Systran/faster-whisper-large-v3",
-                "repo": "Systran/faster-whisper-large-v3",
                 "state": {
                     "ready": False,
                     "error": None,
@@ -384,8 +430,8 @@ class RuntimeHelperTest(unittest.TestCase):
                 with mock.patch.dict(
                     os.environ,
                     {
-                        "MODEL_NAME": expected["model"],
-                        "MODEL_SOURCE": "",
+                        "MODEL_NAME": "chart-model",
+                        "MODEL_SOURCE": "hf://org/weights",
                         "ENGINE_PORT": "8000",
                         "LOG_LEVEL": "info",
                     },
@@ -396,8 +442,8 @@ class RuntimeHelperTest(unittest.TestCase):
                     )
                     self.assertTrue(callable(module.build_app))
                     self.assertTrue(callable(module.run))
-                    self.assertEqual(module.MODEL_NAME, expected["model"])
-                    self.assertEqual(module._runtime.model_repo, expected["repo"])
+                    self.assertEqual(module.MODEL_NAME, "chart-model")
+                    self.assertEqual(module._runtime.model_repo, "org/weights")
                     self.assertEqual(module._runtime.port, 8000)
                     self.assertEqual(module._runtime.log_level, "info")
                     self.assertEqual(module._state, expected["state"])
@@ -672,6 +718,17 @@ class EngineSurfaceTest(unittest.TestCase):
 
         self.assertEqual(samples, expected)
         self.assertEqual(type_declarations, {f"# TYPE {name} gauge" for name in expected})
+
+
+class BreezeAttnFallbackTest(unittest.TestCase):
+    def test_flash_rewritten_to_requested(self):
+        from wrapper.caps.breeze import _fallback_attn
+
+        self.assertEqual(_fallback_attn("eager", "flash_attention_2"), "eager")
+        self.assertEqual(_fallback_attn("sdpa", "flash_attention_3"), "sdpa")
+        self.assertEqual(_fallback_attn("eager", "eager"), "eager")
+        self.assertEqual(_fallback_attn("eager", None), "eager")
+        self.assertEqual(_fallback_attn("", "flash_attention_2"), "eager")
 
 
 if __name__ == "__main__":

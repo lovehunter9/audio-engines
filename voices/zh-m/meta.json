@@ -1,0 +1,14 @@
+{
+  "voice_id": "zh-m",
+  "name": "中文男 / Chinese Male",
+  "category": "premade",
+  "source": "clone",
+  "instruction": "一位沉稳的中年男性，说普通话，声音低沉清晰，语速中等。",
+  "sample_text": "各位同事，我们开始今天的会议。",
+  "description": "普通话中年男声，低沉、清晰。Adult Mandarin male, low and measured.",
+  "labels": {
+    "language": "zh",
+    "accent": "mandarin",
+    "gender": "male"
+  }
+}
