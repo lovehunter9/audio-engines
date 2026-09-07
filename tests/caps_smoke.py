@@ -2140,6 +2140,12 @@ def t_tts_el(module_name="firered"):
               and len(streamed.content) > 0,
               (streamed.status_code, streamed.headers.get("content-type"),
                len(streamed.content)))
+        stream_hid = streamed.headers.get("history-item-id")
+        stream_history = c.get("/v1/history/%s" % stream_hid).json() if stream_hid else {}
+        check("%s completed stream publishes output duration" % module_name,
+              stream_history.get("state") == "created"
+              and float(stream_history.get("output_duration_seconds") or 0) > 0,
+              stream_history)
         default_s = c.get("/v1/voices/settings/default")
         check("%s default settings look like ElevenLabs" % module_name,
               default_s.status_code == 200
@@ -2243,6 +2249,55 @@ def t_tts_el_edge_safe():
         tts_el._EDGE_SAFE_BYTES = old_lim
         tts_el._encode = old_enc
         tts_el._encode_mp3_fit = old_fit
+
+
+def t_tts_el_live_mux_duration():
+    """Logical duration is identical across containers and includes every write (including gaps)."""
+    from wrapper.caps import tts_el
+
+    class Sink:
+        def write(self, _data):
+            return None
+
+        def flush(self):
+            return None
+
+    class Proc:
+        stdin = Sink()
+
+    durations = {}
+    old_encode = tts_el._encode_out
+    try:
+        tts_el._encode_out = lambda *_args: b"encoded"
+        for kind in ("pcm", "wav", "mp3", "flac", "opus"):
+            mux = tts_el._LiveMux(tts_el.OutSpec(kind, 24000, 64 if kind in ("mp3", "opus") else None), 24000)
+            if kind == "wav":
+                mux._oneshot = True
+            elif kind not in ("pcm", "wav"):
+                mux.proc = Proc()
+            mux.write(np.zeros(2400, dtype="float32"), 24000)
+            mux.write(np.zeros(4800, dtype="float32"), 24000)
+            durations[kind] = mux.output_duration_seconds
+    finally:
+        tts_el._encode_out = old_encode
+    check("live mux duration is container-independent",
+          all(abs(value - 0.3) < 1e-9 for value in durations.values()), durations)
+
+
+def t_tts_el_history_duration():
+    """Only a normally completed history item publishes a final duration."""
+    import tempfile
+    from wrapper.caps import tts_el
+
+    store = tts_el.HistoryStore(tempfile.mkdtemp(prefix="el-history-duration-"))
+    args = dict(voice_id="p1", voice_name="Voice", voice_category="premade",
+                text="hello", settings={}, content_type="audio/mpeg", output_format="mp3")
+    created = store.begin(**args)
+    doc = store.finish(created["history_item_id"], "created", 1.25)
+    check("created history carries duration", doc.get("output_duration_seconds") == 1.25, doc)
+    canceled = store.begin(**args)
+    doc = store.finish(canceled["history_item_id"], "canceled", 9.0)
+    check("canceled history omits duration", "output_duration_seconds" not in doc, doc)
 
 
 def t_tts_el_limits():
@@ -2382,6 +2437,8 @@ def main():
                            ("firered clone cancel", t_firered_clone_cancel, "firered"),
                            ("tts_el limits", t_tts_el_limits, "breeze"),
                            ("tts_el edge-safe", t_tts_el_edge_safe, "breeze"),
+                           ("tts_el live mux duration", t_tts_el_live_mux_duration, "breeze"),
+                           ("tts_el history duration", t_tts_el_history_duration, "breeze"),
                            ("voice cards", t_voice_cards, "firered"),
                            ("voice cards clone seed", t_voice_cards_clone_seed, "breeze"),
                            ("firered triplet pad", t_firered_triplet_pad, "firered"),

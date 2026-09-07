@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import queue
 import shutil
@@ -317,6 +318,10 @@ class _LiveMux:
         self.proc = None
         self._q = queue.Queue()
         self._pcm = self.spec.kind == "pcm"
+        # Logical audio accepted by the output encoder. Counting samples here
+        # makes duration independent of the wire container and includes the
+        # silence inserted between generated slices.
+        self.output_duration_seconds = 0.0
 
     def start(self):
         if self._pcm:
@@ -365,17 +370,24 @@ class _LiveMux:
     def write(self, audio, sr):
         if getattr(self, "_oneshot", False):
             self._q.put(_encode_out(audio, sr, self.spec))
-            return
+            duration = len(_to_mono(audio)) / float(sr)
+            self.output_duration_seconds += duration
+            return duration
         if self._pcm:
-            a, _ = _resample(audio, sr, self.spec.sr or sr)
+            a, out_sr = _resample(audio, sr, self.spec.sr or sr)
             self._q.put(_pcm16(a))
-            return
-        a, _ = _resample(audio, sr, self.in_sr)
+            duration = len(a) / float(out_sr)
+            self.output_duration_seconds += duration
+            return duration
+        a, out_sr = _resample(audio, sr, self.in_sr)
         try:
             self.proc.stdin.write(a.astype("<f4").tobytes())
             self.proc.stdin.flush()
         except (BrokenPipeError, ValueError):
-            pass
+            return 0.0
+        duration = len(a) / float(out_sr)
+        self.output_duration_seconds += duration
+        return duration
 
     def drain(self, wait=0.08):
         out = []
@@ -966,7 +978,7 @@ class HistoryStore:
             except OSError:
                 pass
 
-    def finish(self, hid, state="created"):
+    def finish(self, hid, state="created", output_duration_seconds=None):
         """Mark a reading complete, so a follower knows nothing more is coming."""
         with self._lock:
             path = self.root / hid / "item.json"
@@ -974,8 +986,18 @@ class HistoryStore:
                 doc = json.loads(path.read_text(encoding="utf-8"))
             except Exception:
                 return None
+            if (state == "created" and output_duration_seconds is not None
+                    and math.isfinite(float(output_duration_seconds))
+                    and float(output_duration_seconds) >= 0):
+                doc["output_duration_seconds"] = float(output_duration_seconds)
+            else:
+                doc.pop("output_duration_seconds", None)
+            # Publish the complete metadata in one rename: readers must never
+            # observe state=created before its final duration is present.
             doc["state"] = state
-            path.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            pending = path.with_suffix(".json.pending")
+            pending.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+            os.replace(pending, path)
         return doc
 
     def size(self, hid):
@@ -1667,6 +1689,7 @@ async def _live_stream(vid, text, instruction, fmt, settings, request=None):
     def produce():
         n = 0
         mux = None
+        completed = False
         try:
             backend = _backend()
             for wave, sr in _iter_speak_voice(vid, text, instruction=instruction,
@@ -1695,6 +1718,7 @@ async def _live_stream(vid, text, instruction, fmt, settings, request=None):
                         q.put(chunk)
             if n == 0 and not stop.is_set():
                 raise RuntimeError("engine produced no audio")
+            completed = not stop.is_set()
         except tasks.Cancelled:
             log.info("stream canceled after %s slices", n)
         except Exception as e:
@@ -1708,7 +1732,9 @@ async def _live_stream(vid, text, instruction, fmt, settings, request=None):
                     pass
             # Whatever was spoken stays readable; silence leaves no item.
             if _history().size(hid) > 0:
-                _history().finish(hid, "created")
+                state = "created" if completed else ("failed" if err else "canceled")
+                duration = mux.output_duration_seconds if completed and mux is not None else None
+                _history().finish(hid, state, duration)
             else:
                 _history().delete(hid)
             _live_end(hid)
