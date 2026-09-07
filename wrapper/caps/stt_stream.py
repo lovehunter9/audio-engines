@@ -35,7 +35,7 @@ ENFORCE_EAGER = _args.switch("--enforce-eager")
 # One generate() for the whole batch instead of one per span. Off by default: this changes
 # where a mid-batch cancellation can land, so the two paths have to be comparable in the
 # same image before either becomes the default.
-BATCH_ONE_SHOT = os.environ.get("ASR_BATCH_ONE_SHOT", "0") == "1"
+BATCH_ONE_SHOT = _args.switch("--batch-one-shot")
 # A cap proportional to how much audio there is. OFFLINE_MAX_TOKENS is one number for every
 # span, so a three second span is handed the same 4096 as a nine minute one -- and a span
 # that starts repeating runs all the way to that cap. One did: 3.3 seconds of audio produced
@@ -43,8 +43,8 @@ BATCH_ONE_SHOT = os.environ.get("ASR_BATCH_ONE_SHOT", "0") == "1"
 # 86% of one -- a batch cannot finish before its longest member. Measured output runs about
 # 3.4 tokens per audio second, so 12 leaves roughly triple headroom. 0 keeps the old
 # behaviour, which is what makes the two comparable in one image.
-TOKENS_PER_AUDIO_SEC = float(os.environ.get("ASR_TOKENS_PER_AUDIO_SEC", "0") or 0)
-TOKENS_FLOOR = int(os.environ.get("ASR_TOKENS_FLOOR", "64") or 64)
+TOKENS_PER_AUDIO_SEC = _args.number("--tokens-per-audio-sec", 0)
+TOKENS_FLOOR = _args.count("--tokens-floor", 64)
 # Ending a span that has started repeating, rather than folding the repetition out of the text
 # afterwards. A 2.2 second clip was measured producing 4096 tokens and six characters of
 # transcript: qwen-asr's parse_asr_output collapses a repeated pattern (threshold 20), so the
@@ -56,7 +56,7 @@ TOKENS_FLOOR = int(os.environ.get("ASR_TOKENS_FLOOR", "64") or 64)
 # is real Mandarin speech, and stopping there drops the rest of the span. min_count must clear
 # the 20 the downstream folding uses -- at 10 the request stops one repetition short of that
 # threshold, and what is left survives into the transcript.
-REPETITION_DETECTION = os.environ.get("ASR_REPETITION_DETECTION", "").strip()
+REPETITION_DETECTION = (_args.text("--repetition-detection", "") or "").strip()
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -206,7 +206,7 @@ def _repetition_params():
             _repdet_cache.append(RepetitionDetectionParams(**json.loads(REPETITION_DETECTION)))
             _p("repetition detection: %s" % REPETITION_DETECTION)
         except Exception as e:
-            _p("WARN ASR_REPETITION_DETECTION ignored (%s)" % e)
+            _p("WARN --repetition-detection ignored (%s)" % e)
             _repdet_cache.append(None)
     return _repdet_cache[0]
 
