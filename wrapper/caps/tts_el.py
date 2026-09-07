@@ -1239,7 +1239,7 @@ def _is_cjk(*parts):
     return any("\u4e00" <= ch <= "\u9fff" for part in parts for ch in (part or ""))
 
 
-def _settings_direction(settings, instruction="", text=""):
+def _settings_direction(settings, instruction="", text="", include_speed=True):
     """Style / speed have no engine flag: wrap them into the speak instruction."""
     style = float((settings or {}).get("style") or 0.0)
     try:
@@ -1252,10 +1252,11 @@ def _settings_direction(settings, instruction="", text=""):
         extra.append("语气夸张，富有表现力。" if zh else "Deliver with strong expressive style.")
     elif style >= 0.35:
         extra.append("带一点语气和情绪。" if zh else "Speak with noticeable style and emotion.")
-    if speed <= 0.85:
-        extra.append("说得慢一点。" if zh else "Speak slowly.")
-    elif speed >= 1.15:
-        extra.append("说得快一点。" if zh else "Speak quickly.")
+    if include_speed:
+        if speed <= 0.85:
+            extra.append("说得慢一点。" if zh else "Speak slowly.")
+        elif speed >= 1.15:
+            extra.append("说得快一点。" if zh else "Speak quickly.")
     base = (instruction or "").strip()
     return " ".join([base] + extra).strip()
 
@@ -1272,7 +1273,7 @@ class Knobs:
         self.context = bool(context)
 
 
-def resolve_settings(settings, base_cfg, instruction="", text=""):
+def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_direction=True):
     """EL knobs → CFG / seed / instruction / acoustic-edit; the defaults are a no-op."""
     s = dict(_DEFAULT_SETTINGS)
     if isinstance(settings, dict):
@@ -1294,7 +1295,9 @@ def resolve_settings(settings, base_cfg, instruction="", text=""):
         import random
         span = max(1, int(round((0.5 - stab) * 10000)))
         seed = (int(SEED) + span + random.randint(0, span)) & 0x7FFFFFFF
-    return Knobs(cfg, seed, speed, _settings_direction(s, instruction, text), boost)
+    return Knobs(cfg, seed, speed,
+                 _settings_direction(s, instruction, text,
+                                     include_speed=include_speed_direction), boost)
 
 
 def _public_voice(meta):
