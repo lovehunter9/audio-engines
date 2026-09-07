@@ -150,7 +150,7 @@ _MOUNTS = {
         ("POST", "/v1/text-to-speech/{voice_id}",
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
-         "Speak and flush each slice (output_format: mp3_44100_128 / wav_24000 / …)", False),
+         "Speak and flush each slice (output_format: pcm_24000 / mp3_44100_128 / wav_24000 / …)", False),
     ],
     ("firered", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
@@ -176,7 +176,7 @@ _MOUNTS = {
         ("POST", "/v1/text-to-speech/{voice_id}",
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
-         "Speak and flush each slice (output_format: mp3_44100_128 / wav_24000 / …)", False),
+         "Speak and flush each slice (output_format: pcm_24000 / mp3_44100_128 / wav_24000 / …)", False),
     ],
     ("breeze", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
