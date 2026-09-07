@@ -1635,6 +1635,12 @@ def t_breeze_stream_chunks():
 
 
 def t_breeze_pace():
+    import shutil
+
+    if shutil.which("ffmpeg") is None:
+        print("  skip Breeze tempo checks: ffmpeg is not installed in the lint runner")
+        return
+
     from wrapper.caps.breeze import BreezeBackend, _TempoStream, _atempo_chain
     from wrapper.caps import tts_el
 
