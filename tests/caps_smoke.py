@@ -1635,18 +1635,64 @@ def t_breeze_stream_chunks():
 
 
 def t_breeze_pace():
-    from wrapper.caps.breeze import BreezeBackend
+    from wrapper.caps.breeze import BreezeBackend, _TempoStream, _atempo_chain
+    from wrapper.caps import tts_el
 
     be = BreezeBackend(None, None, None, None)
-    w = np.ones(24000, dtype="float32")
+    t = np.arange(24000, dtype="float32") / 24000.0
+    w = (0.4 * np.sin(2.0 * np.pi * 440.0 * t)).astype("float32")
     out, sr = be._pace(w, 24000, 2.0)
-    check("2x halves samples", 11900 <= len(out) <= 12100 and sr == 24000, len(out))
+    check("2x halves samples", 11500 <= len(out) <= 13000 and sr == 24000, len(out))
     keep, _ = be._pace(w, 24000, 1.0)
     check("1x keeps length", len(keep) == 24000, len(keep))
     fast, _ = be._pace(w, 24000, 4.0)
-    check("4x is about a quarter", 5900 <= len(fast) <= 6100, len(fast))
+    check("4x is about a quarter", 5500 <= len(fast) <= 7000, len(fast))
     slow, _ = be._pace(w, 24000, 0.5)
-    check("0.5x doubles samples", 47900 <= len(slow) <= 48100, len(slow))
+    check("0.5x doubles samples", 45000 <= len(slow) <= 51000, len(slow))
+    very_slow, _ = be._pace(w, 24000, 0.25)
+    check("0.25x quadruples samples", 88000 <= len(very_slow) <= 102000, len(very_slow))
+    check("paced output fades to silence",
+          np.max(np.abs(out[-240:])) == 0.0 and np.max(np.abs(fast[-240:])) == 0.0)
+
+    active = out[:-240]
+    spectrum = np.abs(np.fft.rfft(active * np.hanning(len(active))))
+    hz = np.fft.rfftfreq(len(active), 1.0 / 24000.0)[int(np.argmax(spectrum))]
+    check("tempo keeps pitch", abs(hz - 440.0) < 8.0, hz)
+
+    high = (0.25 * np.sin(2.0 * np.pi * 7000.0 * t)).astype("float32")
+    high_fast, _ = be._pace(high, 24000, 2.0)
+    high_active = high_fast[:-240]
+    high_spectrum = np.abs(np.fft.rfft(high_active * np.hanning(len(high_active))))
+    high_hz = np.fft.rfftfreq(len(high_active), 1.0 / 24000.0)[int(np.argmax(high_spectrum))]
+    check("tempo does not alias high frequencies", abs(high_hz - 7000.0) < 20.0, high_hz)
+
+    stream = _TempoStream(24000, 2.0)
+    streamed = []
+    live_chunks = 0
+    try:
+        for chunk in np.array_split(w, 7):
+            ready = stream.write(chunk, 24000)
+            live_chunks += len(ready)
+            streamed.extend(ready)
+        streamed.extend(stream.finish())
+    finally:
+        stream.abort()
+    streamed = np.concatenate(streamed)
+    check("tempo state crosses input chunk boundaries",
+          len(streamed) == len(out) and np.allclose(streamed, out),
+          (len(streamed), len(out), float(np.max(np.abs(streamed[:min(len(streamed), len(out))] - out[:min(len(streamed), len(out))])))))
+    check("tempo emits before the request finishes", live_chunks > 0, live_chunks)
+    check("atempo extremes use portable chains",
+          _atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
+          and _atempo_chain(4.0) == "atempo=2,atempo=2",
+          (_atempo_chain(0.25), _atempo_chain(4.0)))
+
+    knobs = tts_el.resolve_settings(
+        {**tts_el._DEFAULT_SETTINGS, "speed": 2.0}, 1.0,
+        "沉稳男声", text="你好", include_speed_direction=False)
+    check("breeze does not ask the model to apply speed twice",
+          "快" not in knobs.instruction and "slow" not in knobs.instruction.lower(),
+          knobs.instruction)
 
 
 def t_tts_job_tick():

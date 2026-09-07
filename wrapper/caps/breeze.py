@@ -1,7 +1,10 @@
 # Breeze TTS 2 in-process. Official PyTorch: clone (ref+transcript), design, voice direction.
 import logging
 import os
+import queue
 import re
+import subprocess
+import threading
 from pathlib import Path
 
 from . import tts_el
@@ -42,6 +45,141 @@ _LIMIT_FLOOR = 80
 _CTX_SECONDS = 10.0
 _CTX_TOKENS = int(_CTX_SECONDS * _FPS) + 40
 _BREAK_RE = re.compile(r"[。．！？；;，、!?,]\s*")
+
+
+def _atempo_chain(speed):
+    """Build a portable atempo chain whose individual factors stay in 0.5..2.0."""
+    factor = max(0.25, min(4.0, float(speed if speed is not None else 1.0)))
+    parts = []
+    while factor < 0.5 - 1e-9:
+        parts.append(0.5)
+        factor /= 0.5
+    while factor > 2.0 + 1e-9:
+        parts.append(2.0)
+        factor /= 2.0
+    if abs(factor - 1.0) >= 1e-9 or not parts:
+        parts.append(factor)
+    return ",".join("atempo=%.8g" % value for value in parts)
+
+
+class _TempoStream:
+    """One pitch-preserving tempo filter for every chunk in a Breeze request."""
+
+    _DONE = object()
+
+    def __init__(self, sr, speed, tail_ms=10.0):
+        import numpy as np
+
+        self.sr = int(sr)
+        self.speed = max(0.25, min(4.0, float(speed if speed is not None else 1.0)))
+        self.tail = max(1, int(round(float(tail_ms) / 1000.0 * self.sr)))
+        self.pending = np.zeros(0, dtype="float32")
+        self.remainder = b""
+        self.q = queue.Queue()
+        self.proc = None
+        if abs(self.speed - 1.0) < 0.02:
+            return
+        cmd = [
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-f", "f32le", "-ar", str(self.sr), "-ac", "1", "-i", "pipe:0",
+            "-af", _atempo_chain(self.speed),
+            "-f", "f32le", "-acodec", "pcm_f32le", "pipe:1",
+        ]
+        try:
+            self.proc = subprocess.Popen(
+                cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            raise RuntimeError("ffmpeg is required for Breeze speed control: %s" % e) from e
+        threading.Thread(target=self._pump, daemon=True, name="breeze-tempo").start()
+
+    def _pump(self):
+        try:
+            while True:
+                chunk = self.proc.stdout.read(4096)
+                if not chunk:
+                    break
+                self.q.put(chunk)
+        finally:
+            self.q.put(self._DONE)
+
+    def _emit(self, arrays, final=False):
+        import numpy as np
+
+        if arrays:
+            joined = np.concatenate([self.pending] + arrays)
+        else:
+            joined = self.pending
+        if not final:
+            if len(joined) <= self.tail:
+                self.pending = joined
+                return []
+            self.pending = joined[-self.tail:].copy()
+            return [joined[:-self.tail]]
+        self.pending = np.zeros(0, dtype="float32")
+        if not len(joined):
+            return []
+        out = joined.astype("float32", copy=True)
+        fade = min(self.tail, len(out))
+        out[-fade:] *= np.linspace(1.0, 0.0, fade, dtype="float32")
+        return [out, np.zeros(self.tail, dtype="float32")]
+
+    def _drain(self, wait=0.01, until_done=False):
+        import numpy as np
+
+        arrays = []
+        done = False
+        while True:
+            try:
+                item = self.q.get(timeout=2.0 if until_done else wait)
+            except queue.Empty:
+                break
+            if item is self._DONE:
+                done = True
+                break
+            raw = self.remainder + item
+            cut = len(raw) - (len(raw) % 4)
+            if cut:
+                arrays.append(np.frombuffer(raw[:cut], dtype="<f4").astype("float32", copy=True))
+            self.remainder = raw[cut:]
+            if not until_done:
+                wait = 0.0
+        if until_done and not done:
+            raise RuntimeError("Breeze tempo filter did not finish")
+        return arrays
+
+    def write(self, wave, sr):
+        w = _collect(wave)
+        if int(sr) != self.sr:
+            w, _ = tts_el._resample(w, int(sr), self.sr)
+        if self.proc is None:
+            return [w]
+        try:
+            self.proc.stdin.write(w.astype("<f4").tobytes())
+            self.proc.stdin.flush()
+        except (BrokenPipeError, ValueError) as e:
+            raise RuntimeError("Breeze tempo filter stopped early") from e
+        return self._emit(self._drain())
+
+    def finish(self):
+        if self.proc is None:
+            return []
+        try:
+            self.proc.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass
+        arrays = self._drain(until_done=True)
+        rc = self.proc.wait(timeout=15)
+        if rc != 0:
+            detail = (self.proc.stderr.read() or b"")[-300:].decode("utf-8", "replace")
+            raise RuntimeError("Breeze tempo filter failed: %s" % (detail or rc))
+        if self.remainder:
+            raise RuntimeError("Breeze tempo filter returned incomplete float samples")
+        return self._emit(arrays, final=True)
+
+    def abort(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+            self.proc.wait(timeout=5)
 
 def _fallback_attn(requested, impl):
     return tts_el.fallback_attn(requested, impl)
@@ -395,8 +533,10 @@ class BreezeBackend:
         # Voice Direction: ref + transcript + instruction at CFG 4; bare clone keeps CFG 1.
         direction = str(kw.get("instruction") or "").strip()
         base_cfg = tts_el.DESIGN_CFG if direction else tts_el.CFG_SCALE
-        kn = tts_el.resolve_settings(kw.get("settings"), base_cfg,
-                                     direction or "Speak clearly and naturally.", text=text)
+        kn = tts_el.resolve_settings(
+            kw.get("settings"), base_cfg,
+            direction or "Speak clearly and naturally.", text=text,
+            include_speed_direction=False)
         wav = _collect(prompt_audio)
         rate = int(prompt_sr or self.sample_rate)
         reserve = _CTX_TOKENS if kn.context else 0
@@ -420,41 +560,52 @@ class BreezeBackend:
             sf.write(path, wav, rate, format="WAV", subtype="PCM_16")
             ctx = kw.get("ctx")
             pace = bool(kw.get("pace_each"))
+            tempo = _TempoStream(self.sample_rate, kn.speed) if pace else None
             total = len(parts)
-            for i, part in enumerate(parts):
-                tts_el.job_tick(ctx, i, total)
-                if pace:
-                    if i:
-                        gap_n = max(0, int(_pause_ms(text) / 1000.0 * self.sample_rate))
-                        if gap_n:
-                            import numpy as np
-                            yield self._pace(np.zeros(gap_n, dtype="float32"),
-                                             self.sample_rate, kn.speed)
-                    n = 0
-                    said = []
-                    for audio, sr in self._iter_generate(
-                            part, kn.instruction, ref_path=path, ref_text=prompt_text,
-                            cfg=kn.cfg, ctx=ctx, seed=kn.seed, carry=carry):
+            try:
+                for i, part in enumerate(parts):
+                    tts_el.job_tick(ctx, i, total)
+                    if pace:
+                        if i:
+                            gap_n = max(0, int(_pause_ms(text) / 1000.0 * self.sample_rate))
+                            if gap_n:
+                                import numpy as np
+                                for paced in tempo.write(
+                                        np.zeros(gap_n, dtype="float32"), self.sample_rate):
+                                    yield paced, self.sample_rate
+                        n = 0
+                        said = []
+                        for audio, sr in self._iter_generate(
+                                part, kn.instruction, ref_path=path, ref_text=prompt_text,
+                                cfg=kn.cfg, ctx=ctx, seed=kn.seed, carry=carry):
+                            wave = _collect(audio)
+                            said.append(wave)
+                            if i and n == 0:
+                                wave = _fade_head(
+                                    wave, max(1, int(_JOIN_FADE_MS / 1000.0 * sr)))
+                            n += 1
+                            for paced in tempo.write(wave, sr):
+                                yield paced, self.sample_rate
+                        if n == 0:
+                            raise RuntimeError("Breeze TTS 2 produced no audio")
+                        if kn.context and i + 1 < total:
+                            carry = self._carry(carry_path, part, said)
+                    else:
+                        audio, sr = self._generate(part, kn.instruction,
+                                                   ref_path=path, ref_text=prompt_text,
+                                                   cfg=kn.cfg, ctx=ctx, seed=kn.seed,
+                                                   carry=carry)
                         wave = _collect(audio)
-                        said.append(wave)
-                        if i and n == 0:
-                            wave = _fade_head(wave, max(1, int(_JOIN_FADE_MS / 1000.0 * sr)))
-                        n += 1
-                        yield self._pace(wave, sr, kn.speed)
-                    if n == 0:
-                        raise RuntimeError("Breeze TTS 2 produced no audio")
-                    if kn.context and i + 1 < total:
-                        carry = self._carry(carry_path, part, said)
-                else:
-                    audio, sr = self._generate(part, kn.instruction,
-                                               ref_path=path, ref_text=prompt_text,
-                                               cfg=kn.cfg, ctx=ctx, seed=kn.seed,
-                                               carry=carry)
-                    wave = _collect(audio)
-                    if kn.context and i + 1 < total:
-                        carry = self._carry(carry_path, part, [wave])
-                    yield self._pace(wave, sr, kn.speed)
-                tts_el.job_tick(ctx, i + 1, total)
+                        if kn.context and i + 1 < total:
+                            carry = self._carry(carry_path, part, [wave])
+                        yield wave, sr
+                    tts_el.job_tick(ctx, i + 1, total)
+                if tempo is not None:
+                    for paced in tempo.finish():
+                        yield paced, self.sample_rate
+            finally:
+                if tempo is not None:
+                    tempo.abort()
         finally:
             _vram("clone")
             for gone in (path, carry_path):
@@ -464,17 +615,19 @@ class BreezeBackend:
                     pass
 
     def _pace(self, wave, sr, speed):
-        import numpy as np
-
         factor = max(0.25, min(4.0, float(speed if speed is not None else 1.0)))
         w = _collect(wave)
         if abs(factor - 1.0) < 0.02 or not len(w):
             return w, sr
-        n = max(1, int(round(len(w) / factor)))
-        if n == len(w):
-            return w, sr
-        x = np.linspace(0.0, float(len(w) - 1), n)
-        return np.interp(x, np.arange(len(w), dtype="float64"), w).astype("float32"), sr
+        tempo = _TempoStream(sr, factor)
+        try:
+            parts = tempo.write(w, sr) + tempo.finish()
+        finally:
+            tempo.abort()
+        if not parts:
+            raise RuntimeError("Breeze tempo filter produced no audio")
+        import numpy as np
+        return np.concatenate(parts), sr
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         waves, sr = [], self.sample_rate
@@ -482,7 +635,9 @@ class BreezeBackend:
         kw["pace_each"] = False
         for wave, sr in self.iter_clone(text, prompt_audio, prompt_sr, prompt_text, **kw):
             waves.append(wave)
-        return _join(waves, sr, pause_ms=_pause_ms(text))
+        joined, sr = _join(waves, sr, pause_ms=_pause_ms(text))
+        settings = tts_el._normalize_settings(kw.get("settings"))
+        return self._pace(joined, sr, settings.get("speed", 1.0))
 
     def stream_gap(self, text, sr):
         # Intra-part codec chunks already include the part pause from iter_clone.
@@ -493,8 +648,9 @@ class BreezeBackend:
 
     def design(self, instruction, text, **kw):
         ctx = kw.get("ctx")
-        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
-                                     instruction, text=text)
+        kn = tts_el.resolve_settings(
+            kw.get("settings"), tts_el.DESIGN_CFG, instruction, text=text,
+            include_speed_direction=False)
         tts_el.job_tick(ctx, 0, 1, stage="design")
         audio, sr = self._generate(text, kn.instruction or instruction,
                                    cfg=kn.cfg, ctx=ctx, seed=kn.seed)
