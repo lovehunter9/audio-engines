@@ -1868,11 +1868,9 @@ def t_output_format():
     check("wav 8k token", eight.kind == "wav" and eight.sr == 8000, eight.token)
     bare = tts_el._output_format("mp3")
     check("bare mp3 is EL default", bare.sr == 44100 and bare.bitrate == 128, bare.token)
-    try:
-        tts_el._output_format("pcm_24000")
-        check("pcm token is 400 (not on EL dropdown)", False)
-    except HTTPException as e:
-        check("pcm token is 400 (not on EL dropdown)", e.status_code == 400, e.detail)
+    pcm = tts_el._output_format("pcm_24000")
+    check("pcm 24k token", pcm.kind == "pcm" and pcm.sr == 24000 and pcm.bitrate is None,
+          (pcm.kind, pcm.sr, pcm.bitrate))
     try:
         tts_el._output_format("aac_44100")
         check("unknown codec is 400", False)

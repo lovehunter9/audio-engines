@@ -227,7 +227,7 @@ class OutSpec:
         self.token = token or kind
 
 
-# Same eight tokens as ElevenLabs' output_format dropdown. Nothing else.
+# ElevenLabs' public tokens plus raw 24 kHz PCM for first-party live preview.
 _FORMAT_TOKENS = {
     "mp3": ("mp3", 44100, 128),
     "mp3_44100_128": ("mp3", 44100, 128),
@@ -238,11 +238,12 @@ _FORMAT_TOKENS = {
     "wav_24000": ("wav", 24000, None),
     "wav_44100": ("wav", 44100, None),
     "wav_48000": ("wav", 48000, None),
+    "pcm_24000": ("pcm", 24000, None),
 }
 
 
 def _output_format(raw, default="mp3_44100_128"):
-    """ElevenLabs `mp3_44100_128` / `wav_44100` / OpenAI `wav` → OutSpec."""
+    """ElevenLabs `mp3_44100_128` / `wav_44100` / raw `pcm_24000` → OutSpec."""
     if isinstance(raw, OutSpec):
         return raw
     token = str(raw or default).strip().lower()
