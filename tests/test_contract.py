@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import re
 import sys
 import unittest
 from unittest import mock
@@ -764,6 +765,141 @@ class EngineSurfaceTest(unittest.TestCase):
 
         self.assertEqual(samples, expected)
         self.assertEqual(type_declarations, {f"# TYPE {name} gauge" for name in expected})
+
+
+class RouteSpecAgreementTest(unittest.TestCase):
+    """What the app mounts and what /api/engine-spec says it mounts.
+
+    Nothing downstream can check this. llm-init relays the spec and the
+    gateway routes on it, so a row that says available for a path FastAPI
+    never mounted turns into a bare 404 two hops away, and a path that is
+    mounted but absent from the spec is a capability the gateway will
+    refuse as undeclared. Both look like an outage in somebody else's
+    service.
+    """
+
+    # Mounted, and deliberately not advertised as available. Every entry is
+    # a decision that has to be re-made when the route moves, which is why
+    # this is a list of (module, capability, method, path) and not a
+    # loosened assertion.
+    MOUNTED_WITHOUT_ADVERTISING = frozenset({
+        # FireRedTTS3-Instruct and Breeze TTS 2 serve preset, clone and
+        # design off one weight, so the design routes are mounted whenever
+        # tts is. tts_design is what declares them, and an instance that
+        # declares only supports_tts leaves them mounted and unadvertised
+        # (wrapper/catalog.py, the firered entry). The gateway routes on
+        # what is advertised, so this is a route a caller cannot reach --
+        # deliberately, and only reachable by declaring the capability.
+        ("firered", "tts_design", "POST", "/v1/text-to-voice"),
+        ("firered", "tts_design", "POST", "/v1/text-to-voice/design"),
+        ("breeze", "tts_design", "POST", "/v1/text-to-voice"),
+        ("breeze", "tts_design", "POST", "/v1/text-to-voice/design"),
+        # Qwen3-TTS reads its preset library off the checkpoint, so
+        # voice.list is mounted always and available only for a checkpoint
+        # that has one. This is the endpoint_available callback working.
+        ("tts", "tts", "GET", "/v1/audio/voices"),
+    })
+
+    @staticmethod
+    def _placeholders(path):
+        """`/v1/tasks/{tid}` and `/v1/tasks/{id}` are the same route.
+
+        FastAPI names a path parameter after the handler argument; the
+        catalog names it after the contract. Comparing the names would fail
+        on a rename that changes nothing a caller can see.
+        """
+        return re.sub(r"\{[^}]*\}", "{}", path)
+
+    @classmethod
+    def _mounted(cls, app):
+        from starlette.routing import WebSocketRoute
+
+        out = set()
+        for route in app.routes:
+            path = getattr(route, "path", "")
+            if not path.startswith("/v1/"):
+                continue
+            if isinstance(route, WebSocketRoute):
+                out.add(("WS", cls._placeholders(path)))
+                continue
+            for method in getattr(route, "methods", None) or ():
+                # Starlette adds these for free; the catalog does not
+                # describe them and neither does the gateway route them.
+                if method in ("HEAD", "OPTIONS"):
+                    continue
+                out.add((method, cls._placeholders(path)))
+        return out
+
+    def _spec(self, app):
+        with TestClient(app) as client:
+            endpoints = client.get("/api/engine-spec").json()["endpoints"]
+        rows = [e for e in endpoints if e["path"].startswith("/v1/")]
+        available = {
+            (e["method"], self._placeholders(e["path"])) for e in rows if e["available"]
+        }
+        described = {(e["method"], self._placeholders(e["path"])) for e in rows}
+        return available, described
+
+    def _build(self, base, caps, module):
+        env = {
+            "AUDIO_BASE": base,
+            "MODEL_SUPPORTS": ",".join(contract.SUPPORTS_PREFIX + c for c in caps),
+        }
+        with mock.patch.dict(os.environ, env, clear=False):
+            built = importlib.import_module("wrapper.caps." + module)
+            return built.build_app(list(caps))
+
+    def test_every_base_mounts_exactly_what_it_advertises(self):
+        for base, routes in catalog.BASES.items():
+            for caps, module in routes:
+                with self.subTest(base=base, module=module):
+                    app = self._build(base, caps, module)
+                    mounted = self._mounted(app)
+                    available, described = self._spec(app)
+
+                    self.assertEqual(
+                        available - mounted,
+                        set(),
+                        f"{base} advertises routes it does not mount",
+                    )
+                    self.assertEqual(
+                        mounted - described,
+                        set(),
+                        f"{base} mounts routes its spec does not describe",
+                    )
+                    allowed = {
+                        (method, self._placeholders(path))
+                        for mod, _cap, method, path in self.MOUNTED_WITHOUT_ADVERTISING
+                        if mod == module
+                    }
+                    self.assertEqual(
+                        (mounted - available) - allowed,
+                        set(),
+                        f"{base} mounts a route it does not advertise, "
+                        "and the reason is not written down",
+                    )
+
+    def test_declaring_only_tts_leaves_the_design_routes_unreachable(self):
+        """The whitelist above, exercised rather than asserted about.
+
+        The three TTS slots share one weight, so declaring supports_tts
+        mounts the design routes too. What keeps them out of reach is the
+        spec, and nothing else -- so if this ever stops holding, the
+        gateway starts routing a capability nobody declared.
+        """
+        for base, module in (("firered", "firered"), ("breeze", "breeze")):
+            with self.subTest(base=base):
+                app = self._build(base, ("tts",), module)
+                mounted = self._mounted(app)
+                available, _described = self._spec(app)
+
+                design = {("POST", "/v1/text-to-voice"), ("POST", "/v1/text-to-voice/design")}
+                self.assertTrue(design.issubset(mounted))
+                self.assertEqual(design & available, set())
+                # And declaring it is what makes them reachable.
+                declared = self._build(base, ("tts", "tts_design"), module)
+                declared_available, _ = self._spec(declared)
+                self.assertTrue(design.issubset(declared_available))
 
 
 class BreezeAttnFallbackTest(unittest.TestCase):
