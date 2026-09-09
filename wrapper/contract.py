@@ -251,13 +251,14 @@ def models_payload(model_name, capabilities, description="", repo=None, module="
 CONTRACT_ENDPOINTS = [
     {"method": "GET", "path": "/v1/models",
      "description": "Model list (Ollama + OpenAI shape, with capabilities); 503 until the model is loaded",
-     "available": True},
+     "available": True,
+     **catalog.describe_endpoint("", "", "GET", "/v1/models", False)},
 ]
 
 
 def register(app, *, model_name, module, served, is_ready, error=None, task_api=False,
              task_legacy=True, repo=None, model_format=None, quantization=None,
-             sample_rate=None):
+             sample_rate=None, endpoint_available=None):
     # is_ready: () -> bool ; error: () -> str|None (last load error, for detail).
     from fastapi import HTTPException
 
@@ -265,7 +266,7 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     declared, _bad = parse_supports()
     capabilities = [COARSE_CAPABILITY] + list(served)
     spec = {
-        "schema_version": 1,
+        "schema_version": 2,
         "base": base,
         "model": model_name,
         "implements": catalog.implements(base),
@@ -282,7 +283,10 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
         spec["endpoints"].extend(
             dict(e, available=True) for e in tasks.advertised(legacy=task_legacy))
     for endpoint in spec["endpoints"]:
-        endpoint.setdefault("async_supported", False)
+        described = catalog.describe_endpoint(
+            "", "", endpoint["method"], endpoint["path"], endpoint.get("async_supported", False))
+        for key, value in described.items():
+            endpoint.setdefault(key, value)
 
     def _err():
         try:
@@ -301,7 +305,21 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     @app.get("/api/engine-spec")
     def engine_spec():
         # Never gated on load: llm-init reads the contract while the model is still downloading.
-        return spec
+        if endpoint_available is None:
+            return spec
+        report = dict(spec)
+        report["endpoints"] = []
+        for source in spec["endpoints"]:
+            endpoint = dict(source)
+            try:
+                available, reason = endpoint_available(endpoint)
+            except Exception:
+                available, reason = endpoint.get("available", False), "dynamic availability unavailable"
+            endpoint["available"] = bool(endpoint.get("available", False) and available)
+            if not endpoint["available"] and reason:
+                endpoint["reason"] = reason
+            report["endpoints"].append(endpoint)
+        return report
 
     @app.get("/health")
     def health():

@@ -29,15 +29,19 @@ Every image MUST expose, on the engine port (default `8000`):
 | `GET /health` \| `/healthz` \| `/readyz` | The engine's own health (200 ready / 503 loading). |
 | `POST\|GET /v1/audio/*` | The actual capability endpoints; an unsupported op returns its own `404`. |
 
-Engine-spec v1 has `schema_version: 1`, a non-empty `model`,
+Engine-spec v2 has `schema_version: 2`, a non-empty `model`,
 `implements` (what the image can do), `declares` (what `MODEL_SUPPORTS`
 asked for), `serves` (what this process mounted), and a non-empty
 `endpoints[]`. Each usable endpoint has `method`, `path`, `available`, and
-optionally `capability`, `description`, `reason`, or `deprecated`. `base` is
+the stable `operation_id`, `protocol`, `transport`, sync/async flags,
+input/output modalities, parameters, formats, sample rates, limits and
+resource scope. Optional `capability`, `description`, `reason`, `deprecated`
+and extension fields remain additive. `base` is
 an audio extension naming the engine family; it is not required by the shared
-v1 contract, so OCR legitimately omits it.
+contract, so OCR legitimately omits it. Model Console continues accepting v1
+reports while Router clients migrate to the v2 operation directory.
 
-A structurally valid v1 report with at least one usable endpoint row is
+A structurally valid recognized report with at least one usable endpoint row is
 authoritative for `llm-init`'s proxied data-plane catalog: undeclared static
 proxy rows are removed. Reports with an unknown or missing version can still
 relay well-formed endpoint rows for compatibility, but cannot remove the

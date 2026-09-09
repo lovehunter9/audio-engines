@@ -151,6 +151,11 @@ _MOUNTS = {
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Speak and flush each slice (output_format: pcm_24000 / mp3_44100_128 / wav_24000 / …)", False),
+        ("GET", "/v1/history", "List generated speech history", False),
+        ("POST", "/v1/history/download", "Download multiple history items", False),
+        ("GET", "/v1/history/{history_item_id}", "Read speech history metadata", False),
+        ("GET", "/v1/history/{history_item_id}/audio", "Read generated speech audio", False),
+        ("DELETE", "/v1/history/{history_item_id}", "Delete generated speech history", False),
     ],
     ("firered", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
@@ -177,6 +182,11 @@ _MOUNTS = {
          "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
         ("POST", "/v1/text-to-speech/{voice_id}/stream",
          "Speak and flush each slice (output_format: pcm_24000 / mp3_44100_128 / wav_24000 / …)", False),
+        ("GET", "/v1/history", "List generated speech history", False),
+        ("POST", "/v1/history/download", "Download multiple history items", False),
+        ("GET", "/v1/history/{history_item_id}", "Read speech history metadata", False),
+        ("GET", "/v1/history/{history_item_id}/audio", "Read generated speech audio", False),
+        ("DELETE", "/v1/history/{history_item_id}", "Delete generated speech history", False),
     ],
     ("breeze", "tts_design"): [
         ("POST", "/v1/text-to-voice/design",
@@ -211,12 +221,154 @@ def module_of(base, cap):
     return None
 
 
-def _row(cap, mount, available, reason=None):
+_OPERATION_IDS = {
+    ("GET", "/v1/models"): "model.list",
+    ("POST", "/v1/audio/transcriptions"): "audio.transcribe",
+    ("POST", "/v1/audio/translations"): "audio.translate",
+    ("WS", "/v1/audio/stream"): "audio.transcribe.stream",
+    ("POST", "/v1/audio/align"): "audio.align",
+    ("POST", "/v1/audio/vad"): "audio.vad",
+    ("POST", "/v1/audio/diarization"): "audio.diarize",
+    ("WS", "/v1/audio/diarize/stream"): "audio.diarize.stream",
+    ("POST", "/v1/audio/embeddings"): "audio.speaker_embed",
+    ("POST", "/v1/audio/enhance"): "audio.enhance",
+    ("POST", "/v1/audio/speech"): "speech.synthesize",
+    ("POST", "/v1/audio/speech/batch"): "speech.synthesize.batch",
+    ("WS", "/v1/audio/speech/stream"): "speech.synthesize.stream",
+    ("GET", "/v1/audio/voices"): "voice.list",
+    ("POST", "/v1/audio/speech/clone"): "speech.synthesize.reference",
+    ("GET", "/v1/voices"): "voice.list",
+    ("GET", "/v1/voices/settings/default"): "voice.settings.default",
+    ("GET", "/v1/voices/{voice_id}"): "voice.read",
+    ("GET", "/v1/voices/{voice_id}/settings"): "voice.settings.read",
+    ("POST", "/v1/voices/{voice_id}/settings/edit"): "voice.settings.update",
+    ("DELETE", "/v1/voices/{voice_id}"): "voice.delete",
+    ("POST", "/v1/voices/{voice_id}/edit"): "voice.update",
+    ("POST", "/v1/text-to-speech/{voice_id}"): "speech.synthesize",
+    ("POST", "/v1/text-to-speech/{voice_id}/stream"): "speech.synthesize.stream",
+    ("POST", "/v1/text-to-voice/design"): "voice.design.preview",
+    ("POST", "/v1/text-to-voice"): "voice.design.save",
+    ("POST", "/v1/voices/add"): "voice.clone",
+    ("GET", "/v1/history"): "history.list",
+    ("POST", "/v1/history/download"): "history.download",
+    ("GET", "/v1/history/{history_item_id}"): "history.read",
+    ("GET", "/v1/history/{history_item_id}/audio"): "history.audio",
+    ("DELETE", "/v1/history/{history_item_id}"): "history.delete",
+    ("GET", "/v1/tasks"): "task.list",
+    ("GET", "/v1/tasks/{id}"): "task.read",
+    ("GET", "/v1/tasks/{id}/result"): "task.result",
+    ("DELETE", "/v1/tasks/{id}"): "task.cancel",
+    ("GET", "/v1/audio/tasks"): "task.list",
+    ("GET", "/v1/audio/tasks/{id}"): "task.read",
+    ("GET", "/v1/audio/tasks/{id}/result"): "task.result",
+    ("DELETE", "/v1/audio/tasks/{id}"): "task.cancel",
+}
+
+
+def _protocol(path):
+    if path.startswith(("/v1/voices", "/v1/text-to-speech", "/v1/text-to-voice")):
+        return "elevenlabs.voice.v1"
+    if path in ("/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech"):
+        return "openai.audio.v1"
+    return "olares.audio.v1"
+
+
+def _operation_id(module, cap, method, path):
+    if cap == "tts_dialogue" and path == "/v1/audio/speech":
+        return "speech.dialogue"
+    if cap == "sound_fx":
+        return "sound.generate.batch" if path.endswith("/batch") else "sound.generate"
+    if cap == "tts_clone" and path in ("/v1/audio/speech", "/v1/audio/speech/batch", "/v1/audio/speech/stream"):
+        return {"/v1/audio/speech": "speech.synthesize.reference",
+                "/v1/audio/speech/batch": "speech.synthesize.reference.batch",
+                "/v1/audio/speech/stream": "speech.synthesize.reference.stream"}[path]
+    return _OPERATION_IDS.get((method, path), "")
+
+
+def _modalities(operation_id):
+    if operation_id.startswith("speech.synthesize.reference"):
+        return ["text", "audio"], ["audio"]
+    if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
+        return ["text"], ["audio"]
+    if operation_id == "voice.clone":
+        return ["audio", "text"], ["voice"]
+    if operation_id == "voice.design.preview":
+        return ["text"], ["voice", "audio"]
+    if operation_id.startswith("audio."):
+        return ["audio"], ["audio"] if operation_id == "audio.enhance" else ["text"]
+    return [], []
+
+
+def _parameters(module, operation_id):
+    params = []
+    if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
+        if module in ("firered", "breeze"):
+            params.append({"name": "output_format", "type": "string", "default": "mp3_44100_128",
+                           "enum": ["pcm_24000", "wav_24000", "mp3_44100_128"]})
+        else:
+            params.append({"name": "response_format", "type": "string", "default": "wav",
+                           "enum": ["wav", "pcm", "mp3", "flac", "ogg"]})
+    if module in ("firered", "breeze") and operation_id.startswith(("speech.", "voice.settings")):
+        params.extend([
+            {"name": "speed", "type": "number", "default": 1.0, "minimum": 0.25, "maximum": 4.0},
+            {"name": "stability", "type": "number", "default": 0.5, "minimum": 0.0, "maximum": 1.0},
+            {"name": "similarity_boost", "type": "number", "default": 0.75, "minimum": 0.0, "maximum": 1.0},
+            {"name": "style", "type": "number", "default": 0.0, "minimum": 0.0, "maximum": 1.0},
+            {"name": "use_speaker_boost", "type": "boolean", "default": True},
+        ])
+    return params
+
+
+def _constraints(module, operation_id):
+    formats, rates, limits = [], [], {}
+    if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
+        formats = (["pcm_24000", "wav_24000", "mp3_44100_128"]
+                   if module in ("firered", "breeze") else ["wav", "pcm", "mp3", "flac", "ogg"])
+    if module in ("firered", "breeze"):
+        rates = [24000]
+    if operation_id == "speech.synthesize.batch":
+        limits["max_batch_items"] = 8 if module == "sound_fx" else 32
+    if operation_id == "voice.clone":
+        limits["reference_audio_seconds"] = {"minimum": 5, "maximum": 30}
+    return formats, rates, limits
+
+
+def describe_endpoint(module, cap, method, path, is_async):
+    operation_id = _operation_id(module, cap, method, path)
+    inputs, outputs = _modalities(operation_id)
+    formats, rates, limits = _constraints(module, operation_id)
+    scope = "model"
+    if operation_id.startswith("voice."):
+        scope = "voice"
+    elif operation_id.startswith("history."):
+        scope = "history"
+    elif operation_id.startswith("task."):
+        scope = "task"
+    return {
+        "operation_id": operation_id,
+        "protocol": _protocol(path),
+        "transport": "websocket" if method == "WS" else "http",
+        "sync_supported": method != "WS",
+        "streaming": method == "WS" or path.endswith("/stream"),
+        "async_supported": is_async,
+        "required_supports": [cap] if cap else [],
+        "input_modalities": inputs,
+        "output_modalities": outputs,
+        "output_formats": formats,
+        "sample_rates": rates,
+        "parameters": _parameters(module, operation_id),
+        "limits": limits,
+        "resource_scope": scope,
+    }
+
+
+def _row(module, cap, mount, available, reason=None):
     method, path, desc, is_async = mount
     if is_async:
         desc = "%s; %s" % (desc, tasks.ASYNC_HINT)
     row = {"capability": cap, "method": method, "path": path, "description": desc,
-           "available": available, "async_supported": is_async}
+           "available": available}
+    row.update(describe_endpoint(module, cap, method, path, is_async))
     if reason:
         row["reason"] = reason
     return row
@@ -224,7 +376,7 @@ def _row(cap, mount, available, reason=None):
 
 def endpoints(module, served):
     """The capability endpoints this process mounts."""
-    return [_row(cap, m, True)
+    return [_row(module, cap, m, True)
             for cap in served for m in _MOUNTS.get((module, cap), ())]
 
 
@@ -235,9 +387,9 @@ def spec_endpoints(base, served, declared):
         module = module_of(base, cap)
         mounts = _MOUNTS.get((module, cap), ())
         if cap in served:
-            rows.extend(_row(cap, m, True) for m in mounts)
+            rows.extend(_row(module, cap, m, True) for m in mounts)
             continue
         why = ("declared, but needs its own instance of this base" if cap in declared
                else "not declared in MODEL_SUPPORTS")
-        rows.extend(_row(cap, m, False, why) for m in mounts)
+        rows.extend(_row(module, cap, m, False, why) for m in mounts)
     return rows

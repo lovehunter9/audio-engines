@@ -341,9 +341,14 @@ def build_app(supports):
     app = FastAPI(title="audio-tts (faster-qwen3-tts)")
     mount_metrics(app)
 
+    def _endpoint_available(endpoint):
+        if endpoint.get("operation_id") == "voice.list":
+            return bool(_state["custom_voice"]), "checkpoint has no preset voice library"
+        return True, ""
+
     register(app, model_name=MODEL_NAME, module="tts", served=supports, repo=MODEL_REPO,
              is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True,
-             sample_rate=OUT_SR)
+             sample_rate=OUT_SR, endpoint_available=_endpoint_available)
 
     # No child engine takes the leftovers here, so a mistyped flag would otherwise vanish silently.
     _args.warn_unclaimed(log)

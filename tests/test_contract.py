@@ -72,6 +72,11 @@ _EL_TTS_ROUTES = (
     ("POST", "/v1/voices/{voice_id}/edit", False),
     ("POST", "/v1/text-to-speech/{voice_id}", True),
     ("POST", "/v1/text-to-speech/{voice_id}/stream", False),
+    ("GET", "/v1/history", False),
+    ("POST", "/v1/history/download", False),
+    ("GET", "/v1/history/{history_item_id}", False),
+    ("GET", "/v1/history/{history_item_id}/audio", False),
+    ("DELETE", "/v1/history/{history_item_id}", False),
 )
 _EL_DESIGN_ROUTES = (
     ("POST", "/v1/text-to-voice/design", True),
@@ -102,6 +107,28 @@ TASK_PATHS = {
 
 
 class CatalogContractTest(unittest.TestCase):
+    def test_shared_paths_keep_model_specific_operation_semantics(self):
+        self.assertEqual(
+            catalog.describe_endpoint("tts_dialogue", "tts_dialogue", "POST", "/v1/audio/speech", True)["operation_id"],
+            "speech.dialogue",
+        )
+        self.assertEqual(
+            catalog.describe_endpoint("sound_fx", "sound_fx", "POST", "/v1/audio/speech", True)["operation_id"],
+            "sound.generate",
+        )
+        clone = catalog.describe_endpoint("tts", "tts_clone", "POST", "/v1/audio/speech", True)
+        self.assertEqual(clone["operation_id"], "speech.synthesize.reference")
+        self.assertNotEqual(clone["operation_id"], "voice.design.preview")
+        persisted = catalog.describe_endpoint("tts", "tts_clone", "POST", "/v1/audio/speech/clone", True)
+        self.assertEqual(persisted["operation_id"], "speech.synthesize.reference")
+        self.assertEqual(persisted["resource_scope"], "model")
+        for module in ("firered", "breeze"):
+            synth = catalog.describe_endpoint(module, "tts", "POST", "/v1/text-to-speech/{voice_id}", True)
+            design = catalog.describe_endpoint(module, "tts_design", "POST", "/v1/text-to-voice/design", True)
+            self.assertEqual(synth["protocol"], "elevenlabs.voice.v1")
+            self.assertEqual(synth["operation_id"], "speech.synthesize")
+            self.assertEqual(design["operation_id"], "voice.design.preview")
+
     def test_register_does_not_mutate_shared_contract_endpoints(self):
         original = [dict(endpoint) for endpoint in contract.CONTRACT_ENDPOINTS]
 
@@ -117,6 +144,21 @@ class CatalogContractTest(unittest.TestCase):
             )
 
         self.assertEqual(contract.CONTRACT_ENDPOINTS, original)
+
+    def test_engine_spec_can_report_dynamic_operation_availability(self):
+        app = FastAPI()
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen3tts"}):
+            contract.register(
+                app, model_name="demo", module="tts", served=["tts"], is_ready=lambda: True,
+                endpoint_available=lambda endpoint: (
+                    (False, "checkpoint has no preset voice library")
+                    if endpoint.get("operation_id") == "voice.list" else (True, "")
+                ),
+            )
+        spec = TestClient(app).get("/api/engine-spec").json()
+        voice_list = next(row for row in spec["endpoints"] if row.get("operation_id") == "voice.list")
+        self.assertFalse(voice_list["available"])
+        self.assertEqual(voice_list["reason"], "checkpoint has no preset voice library")
 
     def test_catalog_imports_without_engine_dependencies(self):
         modules = {
@@ -650,7 +692,7 @@ class EngineSurfaceTest(unittest.TestCase):
     def test_engine_spec_has_the_versioned_contract_shape(self):
         spec = self.client.get("/api/engine-spec").json()
 
-        self.assertEqual(spec["schema_version"], 1)
+        self.assertEqual(spec["schema_version"], 2)
         self.assertEqual(spec["base"], "qwen")
         self.assertEqual(spec["model"], "test-model")
         self.assertEqual(spec["implements"], ["stt", "stt_stream", "align"])
@@ -661,6 +703,8 @@ class EngineSurfaceTest(unittest.TestCase):
         advertised = {endpoint["path"] for endpoint in spec["endpoints"]}
         self.assertTrue(TASK_PATHS.issubset(advertised))
         self.assertTrue(all("async_supported" in endpoint for endpoint in spec["endpoints"]))
+        self.assertTrue(all("operation_id" in endpoint for endpoint in spec["endpoints"]))
+        self.assertTrue(all("protocol" in endpoint for endpoint in spec["endpoints"]))
         by_route = {
             (endpoint["method"], endpoint["path"]): endpoint
             for endpoint in spec["endpoints"]
@@ -680,6 +724,8 @@ class EngineSurfaceTest(unittest.TestCase):
             if endpoint["path"] == "/v1/audio/transcriptions"
         )
         self.assertTrue(transcription["async_supported"])
+        self.assertEqual(transcription["operation_id"], "audio.transcribe")
+        self.assertEqual(transcription["protocol"], "openai.audio.v1")
         self.assertTrue(all("max_input_seconds" not in endpoint for endpoint in spec["endpoints"]))
 
     def test_metrics_expose_exactly_the_four_generic_gpu_gauges(self):
