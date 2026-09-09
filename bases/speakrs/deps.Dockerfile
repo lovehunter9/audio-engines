@@ -1,5 +1,8 @@
-# audio-speakrs deps (hash-tagged rebuilds). amd64 only: speakrs on CUDA needs ONNX Runtime's
-# CUDA provider, which upstream ships for x86_64 alone.
+# audio-speakrs deps (hash-tagged rebuilds).
+#
+# CUDA 13 on both architectures, and the base has to move with the engine image rather than after
+# it: the runtime ONNX Runtime links against is chosen there, and a CUDA 12 base under a CUDA 13
+# runtime is missing libcudart.so.13 outright. The two are one change in two files.
 #
 # No torch. speakrs runs on ONNX Runtime, which links CUDA itself, so a torch stack here would be
 # several gigabytes bought for nothing; the four /metrics gauges come from NVML instead (the same
@@ -16,13 +19,13 @@
 ARG ENGINE_IMAGE=docker.io/olareshzy/speakrs-engine@sha256:e1c62272114b6f67e1ff91932228cca1fb68afc80235dbc2fac029532a54cd0a
 FROM ${ENGINE_IMAGE} AS engine
 
-FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
+FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
-        python3 python3-pip python3-venv libsndfile1 libcudnn9-cuda-12 ca-certificates \
+        python3 python3-pip python3-venv libsndfile1 libcudnn9-cuda-13 ca-certificates \
         ffmpeg; \
     rm -rf /var/lib/apt/lists/*
 
