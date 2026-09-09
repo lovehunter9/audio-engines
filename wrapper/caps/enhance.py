@@ -1,5 +1,4 @@
 # Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
-import asyncio
 import contextlib
 import io
 import os
@@ -13,7 +12,8 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics, quota_mib
 from ..contract import register, EngineArgs
-from ..audioio import decode_mono, seconds, spill, unlink
+from ..audioio import decode_mono, seconds, unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-enhance")
@@ -32,6 +32,10 @@ OVERLAP_S = 1.0   # crossfade overlap (s)
 # A window is one big forward pass, so fp16 is the only speed lever — and it can underflow a mask.
 _args = EngineArgs()
 AMP = _args.switch("--amp")
+# Overlap-add keeps VRAM flat in the clip's length, so this bound is about the rest of it: the
+# decoded input, the float32 output and the encoded body all sit in memory at once, ~256 KB per
+# second between them, and the enhanced audio is then held until the caller collects it.
+BOUNDS = Bounds(_args, seconds=14400)
 _args.warn_unclaimed(log)
 
 # Default stays WAV, but 16k PCM16 is ~2 MB/min and the gateway buffers whole bodies in memory.
@@ -149,8 +153,8 @@ def build_app(supports):
         if want not in _FORMATS:
             raise HTTPException(status_code=400, detail="format must be one of %s"
                                                        % ", ".join(sorted(_FORMATS)))
-        data = await file.read()
-        path = await asyncio.to_thread(spill, data, file.filename)
+        path, _seconds = await BOUNDS.spill(
+            file, "this engine holds the clip and its enhanced copy in memory")
 
         def _work(ctx):
             import numpy as np

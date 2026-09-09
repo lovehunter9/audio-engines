@@ -1,0 +1,17 @@
+# Style is not what this check is for; correctness is.
+#
+# ruff ran with `|| true` behind it, which means it ran for nobody: the output was hundreds of
+# lines of `%`-format and bare-except opinions, and a real finding -- an import that does not
+# exist, a name used before assignment -- had nowhere to be seen. Selecting the rules that catch
+# mistakes and dropping the ones that catch preferences is what lets the check block a merge.
+#
+# The excluded families are deliberate house style, not debt: `%` formatting (UP031) is what
+# every module here uses, and `except Exception` around an optional dependency or a probe
+# (BLE001, S110) is how a cap degrades instead of failing. Reintroducing one of those means
+# changing the code everywhere first, in its own change.
+
+target-version = "py310"  # `X | Y` in caps/tts_el.py; the images run 3.11+
+line-length = 100
+
+[lint]
+select = ["E4", "E7", "E9", "F", "B006", "F821"]

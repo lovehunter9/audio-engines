@@ -69,6 +69,16 @@ understands under the **upstream's own spelling** — `--gpu-memory-utilization`
 `--max-model-len`, `--beam-size`, `--compute-type` — and whatever is left over is
 handed to a child engine's argv, or logged as ignored where there is no child.
 
+Two flags are claimed by every capability that holds a whole clip at once — `diar`
+(both engines), `speaker_embed`, `enhance`, `vad`. `--max-upload-mb` (default 1024)
+bounds the request while it is still arriving; `--max-audio-seconds` bounds what it
+decodes into, read off the header rather than by decoding it, and defaults to four
+hours everywhere except `speaker_embed`, which embeds the whole clip in one pass and
+stops at thirty minutes. Past either, the answer is `413`. Without them a long enough
+upload is an OOM kill, which reaches the caller as a dropped connection rather than
+as something it can act on. A deployment that knows its own memory ceiling moves
+them; see `wrapper/limits.py`.
+
 A new knob is therefore a new flag, never a new env. The only envs an engine reads
 are the platform's own (`MODEL_NAME`, `MODEL_SOURCE`, `MODEL_SUPPORTS`,
 `ENGINE_PORT`, `ENGINE_ARGS`, `REQUIRED_GPU_MEMORY`, `HF_*`, `LOG_LEVEL`) plus
@@ -201,6 +211,7 @@ passes. For the same reason the build's final import check must go **through**
 | `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr in-process vLLM (`Qwen3ASRModel.LLM`) | validated |
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
+| `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
@@ -298,8 +309,10 @@ Wire protocol on `WS /v1/audio/diarize/stream`: the client sends an optional
 `{"type":"partial"|"final","segments":[{start,end,speaker}],"speakers":[…]}`, or
 `{"type":"error"}`. Fusing these turns with ASR text is the consumer's job.
 
-Latency presets, in 80 ms frames, via `DIAR_*` env — the default is **high
-latency**, because transcription streams from a separate `stt_stream` engine and
+Latency presets, in 80 ms frames, via `ENGINE_ARGS --latency-preset
+low|high|veryhigh` (each of the five attributes is also settable on its own:
+`--chunk-len`, `--right-context`, `--fifo-len`, `--update-period`,
+`--spkcache-len`) — the default is **high latency**, because transcription streams from a separate `stt_stream` engine and
 speaker accuracy matters more than immediacy here; a ~10 s chunk also resolves
 rapid adjacent turns far better than a 480 ms one and is ~18x cheaper (NVIDIA's
 own CALLHOME 4spk DER: 12.44 -> 11.72):
@@ -394,6 +407,14 @@ does land.
 the `DOCKERHUB_USERNAME` / `DOCKERHUB_PASS` repo secrets (login identity with push
 access to the destination namespace; the namespace is an input, default `beclab`).
 
+The lint job that gates every PR byte-compiles the wrapper, runs `tests/` and runs
+`ruff check wrapper tests`, blocking, against the narrow rule set in `ruff.toml` —
+mistakes, not style; the excluded families are house style and the file says which
+and why. It installs **ffmpeg**, without which the FireRed/Breeze tempo assertions
+skip themselves. The wrapper targets **Python 3.10** at the oldest (`X | Y`
+annotations in `caps/tts_el.py`); the images all run newer, and CI lints and tests
+on 3.11.
+
 ### Deps once, wrapper in seconds
 
 Every base is split in two, because the wrapper changes daily and the deps
@@ -454,8 +475,3 @@ builder; see the `EXTRA` hook in the `Makefile`.
    `base` and `repo`; the build itself is the shared `build-image.yml`.
 5. Update the **Bases** table above.
 
-## Branching
-
-`main` starts empty; work lands on `feat/audio-stt` first and is promoted to
-`main` later. Because CI publishes only from `main` / tags, dev images are built
-locally (see above) until then.

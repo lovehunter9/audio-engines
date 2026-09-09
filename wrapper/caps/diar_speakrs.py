@@ -7,7 +7,8 @@
 # Why a pipe and a file path, not a socket and a request body: the upload is already spilled to a
 # temp file by the time a job runs, and both processes see the same filesystem, so the path moves
 # no audio. This removes one copy of a hundreds-of-megabytes clip, not the memory it needs -- the
-# engine still holds the whole thing decoded, which is what MAX_AUDIO_SECONDS below bounds.
+# engine still holds the whole thing decoded, which is what BOUNDS below caps.
+import contextlib
 import json
 import logging
 import os
@@ -18,9 +19,11 @@ import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs, cache_dir
-from ..audioio import probe_seconds, spill, unlink
+from ..audioio import unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-diar-speakrs")
@@ -106,11 +109,9 @@ MIN_DURATION_ON = _args.text("--min-duration-on")
 EXCLUSIVE = _args.switch("--exclusive", False)
 # speakrs takes the whole clip as one resident f32 buffer -- run(audio: &[f32]) -- so memory grows
 # with duration and nothing streams: an hour is 230 MB, three hours 690 MB, on top of the model.
-# Passing the file path instead of the bytes saved one copy, not the buffer itself. Unbounded, a
-# long enough upload gets the container OOM-killed, which reaches the caller as a dropped
-# connection rather than an error it can act on. Four hours is past any real meeting; a deployment
-# that knows its own memory ceiling can move it.
-MAX_AUDIO_SECONDS = _args.number("--max-audio-seconds", 14400)
+# Passing the file path instead of the bytes saved one copy, not the buffer itself. Four hours is
+# past any real meeting; a deployment that knows its own memory ceiling can move it.
+BOUNDS = Bounds(_args, seconds=14400)
 _args.warn_unclaimed(log)
 
 # Wire name -> (child field, converter). Kept in one place so the request path, the ENGINE_ARGS
@@ -122,38 +123,6 @@ TUNABLES = {
 }
 
 _state = _runtime.state
-
-
-def _duration(path):
-    """Seconds, preferring the header readers and falling back to ffprobe.
-
-    The two disagree by construction, and that gap is the whole reason for the fallback:
-    probe_seconds reads through soundfile and the stdlib wave module, while the engine decodes
-    through ffmpeg. A container the first pair cannot parse may be one the engine reads happily,
-    and that is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
-    demuxers, so what it can measure is what the engine can decode.
-
-    Local rather than in audioio because it is the only cap that needs it: every other one decodes
-    the clip itself and knows the length from the samples.
-
-    None survives as an answer. ffprobe may be absent from an image, and a file neither reader can
-    measure is one the engine almost certainly cannot decode either -- it fails on its own, before
-    any memory is spent.
-    """
-    seconds = probe_seconds(path)
-    if seconds is not None:
-        return seconds
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=30)
-        if out.returncode == 0:
-            return round(float(out.stdout.strip()), 3)
-        log.info("ffprobe could not measure %s: %s", path, (out.stderr or "").strip()[:200])
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        log.info("ffprobe unusable (%s); duration stays unknown", e)
-    return None
 
 
 class _Child:
@@ -190,6 +159,10 @@ class _Child:
             self._argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # inherit: the child's log belongs in the container log, interleaved
             text=True, bufsize=1,
+            # Its own process group, so the SIGTERM that ends this pod reaches the child through
+            # us rather than beside us. Otherwise a normal shutdown and a crash look identical
+            # from the reaper, and it has to treat one of them wrongly.
+            start_new_session=True,
         )
         threading.Thread(target=self._reap, daemon=True).start()
         hello = self._readline("startup")
@@ -199,16 +172,29 @@ class _Child:
         return hello
 
     def _reap(self):
-        """A child that dies takes the engine with it; say so loudly rather than hanging.
+        """A child that dies takes the engine with it, and nothing here can put it back.
 
-        Restarting it here would be wrong: the model takes a long time to load, so a crash loop
-        would answer 503 for minutes while looking alive. The watchdog already handles a process
-        that is neither ready nor failed, and k8s rebuilds the container.
+        Everything this container serves runs in that process, so once it is gone the pod is an
+        endpoint that answers 503 to every request, forever: the load watchdog only fires while a
+        model is still loading, and a wrapper that once loaded is "failed with a reason", which
+        is deliberately left alone. Recovery took someone noticing and deleting the pod.
+
+        Exiting hands that to the thing that already does it. k8s restarts the container, backs
+        off if the crash repeats, and a CrashLoopBackOff says what a permanently unhealthy
+        endpoint does not. Reloading in-process was the alternative and is worse in the same
+        way the old comment says: minutes of model load behind a port that reports ready.
         """
         rc = self._proc.wait()
         _state["ready"] = False
         _state["error"] = "engine process exited with code %d" % rc
-        log.error("engine process exited with code %d", rc)
+        if _stopping.is_set():
+            log.info("engine process exited with code %d during shutdown", rc)
+            return
+        log.error("engine process exited with code %d; exiting so the container is restarted", rc)
+        # Long enough for the job that was in flight to come back as a 500 rather than as a
+        # connection the caller has to guess about.
+        time.sleep(_EXIT_GRACE_S)
+        _exit(watchdog.EXIT_CODE)
 
     def _readline(self, what):
         line = self._proc.stdout.readline()
@@ -241,6 +227,14 @@ class _Child:
 
 _child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE,
                  "--models-dir", _models_dir(MODEL_REPO)])
+
+# Set once this process is on its way out, so the child dying with us is not read as a crash.
+_stopping = threading.Event()
+
+# Indirections, so a test can watch the decision without the test runner being the thing that
+# exits, and without waiting out the grace period.
+_exit = os._exit
+_EXIT_GRACE_S = 2.0
 
 
 def _seed():
@@ -296,8 +290,16 @@ def _load():
         log.exception("engine load failed: %s", e)
 
 
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    yield
+    # Uvicorn runs this when it starts shutting down, which is the only warning the reaper gets
+    # that the exit it is about to see is ours.
+    _stopping.set()
+
+
 def build_app(supports):
-    app = FastAPI(title="audio-diarization (speakrs)")
+    app = FastAPI(title="audio-diarization (speakrs)", lifespan=_lifespan)
     mount_metrics(app)
 
     register(app, model_name=MODEL_NAME, module="diar_speakrs", served=supports, repo=MODEL_REPO,
@@ -329,20 +331,9 @@ def build_app(supports):
         tuning = _tunables({"min_duration_off": min_duration_off,
                             "min_duration_on": min_duration_on,
                             "clustering_threshold": clustering_threshold})
-        data = await file.read()
-        path = await _to_thread(spill, data, file.filename)
-        # Read off the header, not a decode: this cap never holds samples, the child does. None is
-        # a real answer -- a container this cannot probe may still be one the engine reads -- so it
-        # passes rather than being refused, and bills as "not measured".
-        seconds = await _to_thread(_duration, path)
-        if seconds is not None and seconds > MAX_AUDIO_SECONDS:
-            unlink(path)
-            raise HTTPException(status_code=413,
-                                detail="audio is %.0fs; this engine holds the whole clip in memory "
-                                       "and accepts at most %.0fs" % (seconds, MAX_AUDIO_SECONDS))
-        if seconds is None:
-            log.warning("could not read the duration of %s: it is neither billed nor length-checked",
-                        file.filename)
+        # Read off the header, not a decode: this cap never holds samples, the child does.
+        path, seconds = await BOUNDS.spill(
+            file, "this engine holds the whole clip in memory")
 
         def _work(ctx):
             ctx.meter(input_seconds=seconds)
@@ -373,12 +364,6 @@ def build_app(supports):
                                     cleanup=lambda: unlink(path), fail="diarization failed")
 
     return app
-
-
-async def _to_thread(fn, *a):
-    import asyncio
-
-    return await asyncio.to_thread(fn, *a)
 
 
 def run(supports):

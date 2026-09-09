@@ -439,8 +439,11 @@ def t_diar_speakrs():
               sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
 
         # The engine holds the whole clip decoded, so an unbounded upload is an OOM kill, which
-        # reaches the caller as a dropped connection rather than as something it can act on.
-        ds.MAX_AUDIO_SECONDS = 1.0
+        # reaches the caller as a dropped connection rather than as something it can act on. The
+        # bound lives in wrapper/limits.py now; every cap that holds a whole clip shares it.
+        from wrapper import limits
+
+        ds.BOUNDS.seconds = 1.0
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs refuses audio longer than it can hold",
               r.status_code == 413 and "memory" in r.json()["detail"],
@@ -448,17 +451,17 @@ def t_diar_speakrs():
         r = c.post("/v1/audio/diarization", files=WAV, data={"async": "1"})
         check("diar_speakrs refuses it before a task exists, not inside one",
               r.status_code == 413, (r.status_code, r.text[:120]))
-        ds.MAX_AUDIO_SECONDS = 14400.0
+        ds.BOUNDS.seconds = 14400.0
 
         # A container the header readers cannot parse may still be one the engine decodes, and it
         # is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
         # demuxers, so it measures what the engine can read.
-        real_probe, real_sub = ds.probe_seconds, ds.subprocess
-        ds.probe_seconds = lambda _p: None
-        ds.subprocess = types.SimpleNamespace(
+        real_probe, real_sub = limits.probe_seconds, limits.subprocess
+        limits.probe_seconds = lambda _p: None
+        limits.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="7200.0\n", stderr=""),
             SubprocessError=real_sub.SubprocessError)
-        ds.MAX_AUDIO_SECONDS = 60.0
+        ds.BOUNDS.seconds = 60.0
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs falls back to ffprobe when the header readers cannot",
               r.status_code == 413 and "7200s" in r.json()["detail"],
@@ -466,14 +469,24 @@ def t_diar_speakrs():
 
         # ffprobe absent or unable: unknown stays a real answer rather than a refusal, because a
         # file nothing can measure is one the engine will fail on cheaply, before spending memory.
-        ds.subprocess = types.SimpleNamespace(
+        limits.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="bad"),
             SubprocessError=real_sub.SubprocessError)
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs lets an unmeasurable clip through rather than refusing it",
               r.status_code == 200, (r.status_code, r.text[:120]))
-        ds.probe_seconds, ds.subprocess = real_probe, real_sub
-        ds.MAX_AUDIO_SECONDS = 14400.0
+        limits.probe_seconds, limits.subprocess = real_probe, real_sub
+        ds.BOUNDS.seconds = 14400.0
+
+        # An upload too big to hold is refused while it is still arriving; the seconds bound
+        # cannot help here, because nothing has been written to measure yet.
+        ds.BOUNDS.megabytes = 0.001  # ~1 KiB
+        big = {"file": ("big.wav", b"RIFF" + b"\0" * 4096, "audio/wav")}
+        r = c.post("/v1/audio/diarization", files=big)
+        check("diar_speakrs refuses an upload past its byte bound",
+              r.status_code == 413 and "MiB" in r.json()["detail"],
+              (r.status_code, r.json()))
+        ds.BOUNDS.megabytes = 1024.0
 
         sent.clear()
         doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
@@ -498,6 +511,77 @@ def t_diar_speakrs():
         check("diar_speakrs 503s while the engine is loading",
               r.status_code == 503 and "load" in r.json()["detail"],
               (r.status_code, r.json()))
+
+    # Everything this container serves lives in that child, so a pod that outlives it is an
+    # endpoint answering 503 to everyone until somebody notices and deletes it. The load
+    # watchdog does not cover this: it only fires while a model is still loading.
+    from wrapper import watchdog
+
+    exits, real_exit, real_grace = [], ds._exit, ds._EXIT_GRACE_S
+    ds._exit, ds._EXIT_GRACE_S = exits.append, 0.0
+    ds._child._proc = types.SimpleNamespace(wait=lambda: 9)
+    try:
+        ds._stopping.clear()
+        ds._child._reap()
+        check("diar_speakrs exits so k8s restarts a container whose engine died",
+              exits == [watchdog.EXIT_CODE], exits)
+
+        # The same exit during a rollout would turn every normal shutdown into an error.
+        exits.clear()
+        ds._stopping.set()
+        ds._child._reap()
+        check("diar_speakrs does not call a shutdown a crash", exits == [], exits)
+    finally:
+        ds._exit, ds._EXIT_GRACE_S = real_exit, real_grace
+        ds._stopping.clear()
+        ds._child._proc = None
+
+
+def t_diar_stream_offline():
+    """llm-init downloads, the engine loads offline.
+
+    Reaching for the hub when the cache is empty fails minutes later with a network error that
+    names none of the actual fault, and on the machines where it succeeds the engine serves
+    weights nobody downloaded.
+    """
+    from wrapper.caps import diar_stream
+
+    # The image carries torch and NeMo; a test box does not, and the point here is which branch
+    # _load takes before it ever touches a model.
+    fetched = []
+    mods = {
+        "torch": {"cuda": types.SimpleNamespace(is_available=lambda: False)},
+        "nemo": {},
+        "nemo.collections": {},
+        "nemo.collections.asr": {},
+        "nemo.collections.asr.models": {
+            "SortformerEncLabelModel": types.SimpleNamespace(
+                restore_from=lambda **k: None,
+                from_pretrained=lambda *a, **k: fetched.append(a) or None)},
+    }
+    saved = {name: sys.modules.get(name) for name in mods}
+    for name, attrs in mods.items():
+        mod = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        sys.modules[name] = mod
+
+    real_find = diar_stream._find_nemo
+    diar_stream._find_nemo = lambda: None
+    try:
+        diar_stream._state["error"] = None
+        diar_stream._load()
+    finally:
+        diar_stream._find_nemo = real_find
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+    check("diar_stream does not reach for the hub when the cache is empty", fetched == [], fetched)
+    err = diar_stream._state["error"] or ""
+    check("diar_stream fails naming the empty cache rather than reaching for the hub",
+          "shared cache" in err and "offline" in err, err[:160])
 
 
 def t_embed():
@@ -1893,12 +1977,9 @@ def t_breeze_pace():
 
     stream = TempoStream(24000, 2.0)
     streamed = []
-    live_chunks = 0
     try:
         for chunk in np.array_split(tone, 7):
-            ready = stream.write(chunk, 24000)
-            live_chunks += len(ready)
-            streamed.extend(ready)
+            streamed.extend(stream.write(chunk, 24000))
         streamed.extend(stream.finish())
     finally:
         stream.abort()
@@ -1906,6 +1987,22 @@ def t_breeze_pace():
     check("tempo state crosses input chunk boundaries",
           len(streamed) == len(paced) and np.allclose(streamed, paced),
           (len(streamed), len(paced)))
+
+    # A separate stream, because this one is about latency rather than samples:
+    # audio has to come back out while the request is still being spoken, not
+    # only once the whole utterance has been synthesized. Each write drains for
+    # ten milliseconds, which a loaded machine can lose every time, so keep
+    # feeding until something comes back or the deadline says the filter really
+    # is holding everything to the end.
+    live = TempoStream(24000, 2.0)
+    live_chunks = 0
+    deadline = time.time() + 10.0
+    try:
+        while live_chunks == 0 and time.time() < deadline:
+            for chunk in np.array_split(tone, 7):
+                live_chunks += len(live.write(chunk, 24000))
+    finally:
+        live.abort()
     check("tempo emits before the request finishes", live_chunks > 0, live_chunks)
     check("atempo extremes use portable chains",
           _atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
@@ -2925,10 +3022,11 @@ def t_tts_el_limits():
         tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
         with TestClient(tts_el.build_app(["tts", "tts_clone", "tts_design"],
                                          module="breeze")) as c:
-            add = lambda wav: c.post(
-                "/v1/voices/add",
-                data={"name": "Me", "description": "this is the transcript"},
-                files={"file": ("r.wav", wav, "audio/wav")})
+            def add(wav):
+                return c.post(
+                    "/v1/voices/add",
+                    data={"name": "Me", "description": "this is the transcript"},
+                    files={"file": ("r.wav", wav, "audio/wav")})
             short = add(wav_of(1))
             check("clone shorter than --ref-min-seconds is 400",
                   short.status_code == 400 and "ref-min-seconds" in short.text,
@@ -3055,7 +3153,8 @@ def main():
                            ("firered design instruction", t_firered_design_instruction, "firered"),
                            ("firered design speak", t_firered_design_speak, "firered"),
                            ("diar_speakrs", t_diar_speakrs, "speakrs"),
-                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs")):
+                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs"),
+                           ("diar_stream offline", t_diar_stream_offline, "nemo")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

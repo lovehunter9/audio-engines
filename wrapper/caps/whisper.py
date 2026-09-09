@@ -129,12 +129,12 @@ def _load():
 def _norm_lang(lang):
     if not lang:
         return None
-    l = str(lang).strip().lower()
-    if not l or l in ("auto", "none", "null", "automatic detection"):
+    want = str(lang).strip().lower()
+    if not want or want in ("auto", "none", "null", "automatic detection"):
         return None
-    if l in _LANG:
-        return _LANG[l]
-    return l.split("-")[0].split("_")[0]  # en-US/zh_CN -> en/zh
+    if want in _LANG:
+        return _LANG[want]
+    return want.split("-")[0].split("_")[0]  # en-US/zh_CN -> en/zh
 
 
 def _parse_temp(raw):

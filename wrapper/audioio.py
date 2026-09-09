@@ -7,13 +7,51 @@ import tempfile
 log = logging.getLogger("audio-io")
 
 
+# What lets a restart recognise and sweep whatever a crash stranded in the temp directory.
+SPILL_PREFIX = "upload-"
+
+# One read of an upload being streamed to disk. Big enough that the syscalls do not dominate,
+# small enough that the resident cost of a request does not depend on the size of its upload.
+SPILL_CHUNK = 1 << 20
+
+
 def spill(data, filename=None, default_suffix=".wav"):
     # Upload bytes -> a temp path the models can open. Blocking, so handlers thread it.
     suffix = os.path.splitext(filename or "")[1] or default_suffix
-    # The prefix is what lets a restart recognise and sweep whatever a crash stranded here.
-    with tempfile.NamedTemporaryFile(prefix="upload-", suffix=suffix, delete=False) as f:
+    with tempfile.NamedTemporaryFile(prefix=SPILL_PREFIX, suffix=suffix, delete=False) as f:
         f.write(data)
         return f.name
+
+
+async def spill_upload(file, max_bytes=None, default_suffix=".wav"):
+    """Stream an upload to a temp path, without ever holding the whole of it.
+
+    Returns (path, size, over_limit). `over_limit` says the upload was longer than max_bytes;
+    the partial file is already gone in that case and path is None, so the caller only has to
+    decide what to answer.
+
+    The alternative, `await file.read()`, resolves to the entire body in memory before a single
+    bound can be applied to it -- the check would run after the damage. Starlette has already
+    spooled a large upload to its own temp file by then, so this copies from disk to disk.
+    """
+    suffix = os.path.splitext(getattr(file, "filename", "") or "")[1] or default_suffix
+    f = tempfile.NamedTemporaryFile(prefix=SPILL_PREFIX, suffix=suffix, delete=False)
+    size = 0
+    try:
+        while True:
+            chunk = await file.read(SPILL_CHUNK)
+            if not chunk:
+                break
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                f.close()
+                unlink(f.name)
+                return None, size, True
+            f.write(chunk)
+    finally:
+        if not f.closed:
+            f.close()
+    return f.name, size, False
 
 
 def unlink(path):

@@ -7,8 +7,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
-from ..contract import register
-from ..audioio import decode_mono
+from ..contract import register, EngineArgs
+from ..audioio import decode_mono, unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-vad")
@@ -24,6 +25,12 @@ VAD_MIN_SILENCE_MS = 500
 VAD_SPEECH_PAD_MS = 200
 VAD_MIN_SPEECH_MS = 250
 VAD_MAX_SPEECH_S = 30
+
+# Silero is small and runs frame by frame, but this cap decodes the clip to 16k mono float32 in
+# one piece and hands silero the whole tensor: 64 KB per second resident before any inference.
+_args = EngineArgs()
+BOUNDS = Bounds(_args, seconds=14400)
+_args.warn_unclaimed(log)
 
 _state = _runtime.state
 
@@ -60,10 +67,14 @@ def build_app(supports):
     ):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
-        data = await file.read()
+        path, _seconds = await BOUNDS.spill(
+            file, "this engine decodes the whole clip before detecting anything")
 
         def _decode():
-            return decode_mono(data, SR).squeeze(0).contiguous()
+            try:
+                return decode_mono(path, SR).squeeze(0).contiguous()
+            finally:
+                unlink(path)
 
         try:
             wav = await asyncio.to_thread(_decode)
