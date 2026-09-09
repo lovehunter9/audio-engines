@@ -3009,10 +3009,11 @@ def t_tts_el_limits():
         tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
         with TestClient(tts_el.build_app(["tts", "tts_clone", "tts_design"],
                                          module="breeze")) as c:
-            add = lambda wav: c.post(
-                "/v1/voices/add",
-                data={"name": "Me", "description": "this is the transcript"},
-                files={"file": ("r.wav", wav, "audio/wav")})
+            def add(wav):
+                return c.post(
+                    "/v1/voices/add",
+                    data={"name": "Me", "description": "this is the transcript"},
+                    files={"file": ("r.wav", wav, "audio/wav")})
             short = add(wav_of(1))
             check("clone shorter than --ref-min-seconds is 400",
                   short.status_code == 400 and "ref-min-seconds" in short.text,

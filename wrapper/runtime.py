@@ -34,8 +34,12 @@ class Runtime:
         disable_ws_ping=False,
         timeout_s=None,
     ):
-        ready = lambda: self.state["ready"]
-        failed = lambda: self.state["error"]
+        def ready():
+            return self.state["ready"]
+
+        def failed():
+            return self.state["error"]
+
         # A base whose first load is legitimately hours long must be able to say so.
         deadline = {} if timeout_s is None else {"timeout_s": timeout_s}
         if load_on_main:

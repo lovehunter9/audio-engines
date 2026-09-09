@@ -319,7 +319,8 @@ class RuntimeHelperTest(unittest.TestCase):
                 side_effect=lambda *args, **kwargs: events.append(("uvicorn", kwargs)),
             ),
         ):
-            load = lambda: events.append("load")
+            def load():
+                events.append("load")
 
             def build_app(supports):
                 events.append(("build", supports))
