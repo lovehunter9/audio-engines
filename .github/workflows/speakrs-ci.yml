@@ -38,15 +38,6 @@ jobs:
     with:
       base: speakrs
       repo: audio-speakrs
-      # Still amd64 only, and the reason has moved. ONNX Runtime does publish no aarch64 CUDA
-      # release, but that half is now built from source, so the engine itself is no longer the
-      # blocker. What blocks it is bases/speakrs/deps.Dockerfile pinning an ENGINE_IMAGE digest
-      # that resolves for amd64 alone: with both slices enabled, the arm64 job fails at FROM.
-      #
-      # Remove this line when that digest points at an index carrying both architectures, and not
-      # before -- the two changes are one change, and doing this half first turns the arm64 job red
-      # without telling anyone why.
-      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || 'beclab' }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit
