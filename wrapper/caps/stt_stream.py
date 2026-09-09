@@ -36,27 +36,28 @@ ENFORCE_EAGER = _args.switch("--enforce-eager")
 # where a mid-batch cancellation can land, so the two paths have to be comparable in the
 # same image before either becomes the default.
 BATCH_ONE_SHOT = _args.switch("--batch-one-shot")
-# A cap proportional to how much audio there is. OFFLINE_MAX_TOKENS is one number for every
-# span, so a three second span is handed the same 4096 as a nine minute one -- and a span
-# that starts repeating runs all the way to that cap. One did: 3.3 seconds of audio produced
-# 4096 tokens and 60 seconds of decode, a third of a serial run and, once spans are batched,
-# 86% of one -- a batch cannot finish before its longest member. Measured output runs about
-# 3.4 tokens per audio second, so 12 leaves roughly triple headroom. 0 keeps the old
-# behaviour, which is what makes the two comparable in one image.
-TOKENS_PER_AUDIO_SEC = _args.number("--tokens-per-audio-sec", 0)
-TOKENS_FLOOR = _args.count("--tokens-floor", 64)
 # Ending a span that has started repeating, rather than folding the repetition out of the text
 # afterwards. A 2.2 second clip was measured producing 4096 tokens and six characters of
 # transcript: qwen-asr's parse_asr_output collapses a repeated pattern (threshold 20), so the
 # transcript reads correctly and only the clock suffers -- and once spans are batched, the whole
-# batch waits for that one. vLLM's scheduler can end such a request instead. JSON for
-# RepetitionDetectionParams; empty leaves the behaviour as it is.
+# batch waits for that one. vLLM's scheduler can end such a request instead.
 #
-# Two thresholds that have to be read together. min_pattern_size must be at least 2: "对对对"
-# is real Mandarin speech, and stopping there drops the rest of the span. min_count must clear
-# the 20 the downstream folding uses -- at 10 the request stops one repetition short of that
-# threshold, and what is left survives into the transcript.
-REPETITION_DETECTION = (_args.text("--repetition-detection", "") or "").strip()
+# On by default, and the defaults are built in rather than asked for. The two thresholds have
+# to be read together: min_pattern_size must be at least 2, since "对对对" is real Mandarin
+# speech and stopping there drops the rest of the span; min_count must clear the 20 the
+# downstream folding uses, since at 10 the request stops one repetition short of that
+# threshold and what is left survives into the transcript. A deployment has no way to arrive
+# at those, so it should not have to: same shape as --gpu-memory-utilization above, where the
+# flag exists but the default is derived.
+#
+# 🔴 These numbers belong to the MODEL, not to the machine. They were measured against
+# qwen3-asr, which is the only model this module serves (catalog.FAMILIES maps stt_stream to
+# qwen3-asr, and one instance is one model). A different card does not change them; a new
+# qwen3-asr release can, so re-measure on a model upgrade rather than assuming they carry
+# over. The override exists so that a re-measured value can ship without a new image.
+REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
+REPETITION_OFF = _args.switch("--no-repetition-detection")
+REPETITION_OVERRIDE = (_args.text("--repetition-detection", "") or "").strip()
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -197,16 +198,22 @@ def _repetition_params():
     Not imported at module load: a vLLM without RepetitionDetectionParams must still serve,
     and the failure has to be one log line rather than an engine that will not start.
     """
-    if not REPETITION_DETECTION:
+    if REPETITION_OFF:
         return None
     if not _repdet_cache:
         try:
             from vllm.sampling_params import RepetitionDetectionParams
 
-            _repdet_cache.append(RepetitionDetectionParams(**json.loads(REPETITION_DETECTION)))
-            _p("repetition detection: %s" % REPETITION_DETECTION)
+            params = dict(REPETITION_DEFAULTS)
+            if REPETITION_OVERRIDE:
+                params.update(json.loads(REPETITION_OVERRIDE))
+            _repdet_cache.append(RepetitionDetectionParams(**params))
+            _p("repetition detection: %s%s"
+               % (params, " (overridden)" if REPETITION_OVERRIDE else ""))
         except Exception as e:
-            _p("WARN --repetition-detection ignored (%s)" % e)
+            # An older vLLM has no such class. Serving without the detector is what this
+            # engine did before, so say it once and carry on rather than refusing to start.
+            _p("WARN repetition detection unavailable in this vLLM (%s)" % e)
             _repdet_cache.append(None)
     return _repdet_cache[0]
 
@@ -233,13 +240,6 @@ def _apply_repetition(sp):
     return restore
 
 
-def _token_budget(seconds):
-    if TOKENS_PER_AUDIO_SEC <= 0:
-        return OFFLINE_MAX_TOKENS
-    return max(TOKENS_FLOOR,
-               min(OFFLINE_MAX_TOKENS, int(seconds * TOKENS_PER_AUDIO_SEC) + TOKENS_FLOOR))
-
-
 def _offline_transcribe(audio):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
@@ -248,7 +248,7 @@ def _offline_transcribe(audio):
     restore_rep = None
     try:
         if sp is not None:
-            sp.max_tokens = _token_budget(len(audio) / 16000.0)
+            sp.max_tokens = OFFLINE_MAX_TOKENS
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
@@ -275,10 +275,7 @@ def _offline_transcribe_many(clips):
     restore_rep = None
     try:
         if sp is not None:
-            # One SamplingParams covers the whole call, so the budget follows the longest
-            # clip in the batch. That is looser than the per-clip cap the serial path gets,
-            # and still far tighter than a flat 4096.
-            sp.max_tokens = _token_budget(max(len(c) for c in clips) / 16000.0)
+            sp.max_tokens = OFFLINE_MAX_TOKENS
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=[(c, 16000) for c in clips],
                                  language=None, return_time_stamps=False)
