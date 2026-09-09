@@ -1701,6 +1701,47 @@ def t_breeze_split_speak():
           and "".join(pieces) == blob, [len(p) for p in pieces])
 
 
+def t_breeze_seeds_every_generation():
+    """Breeze seeds by calling out to the runtime, so a skipped call is not a default —
+    it is the previous request's leftover RNG, and no stability setting can pin it."""
+    import types
+
+    from wrapper.caps import breeze, tts_el
+
+    seen = []
+    runtime = types.ModuleType("breeze_infer.runtime")
+    runtime.set_all_seeds = lambda s: seen.append(int(s))
+    templates = types.ModuleType("breeze_infer.templates")
+    templates.get_template = lambda name: name
+    templates.prepare_inputs = lambda *a, **k: {}
+    parent = types.ModuleType("breeze_infer")
+    parent.runtime, parent.templates = runtime, templates
+    for name, mod in (("breeze_infer", parent), ("breeze_infer.runtime", runtime),
+                      ("breeze_infer.templates", templates)):
+        sys.modules[name] = mod
+
+    class OneChunk:
+        sample_rate = 24000
+
+        def iter_audio_chunks(self, inputs, request_id=None):
+            yield [0.0, 0.1, 0.0]
+
+    back = breeze.BreezeBackend(OneChunk(), None, None, None)
+    saved = tts_el.SEED
+    tts_el.SEED = None
+    try:
+        list(back._iter_generate("你好", "", seed=None))
+        check("an unasked-for seed still seeds, at upstream's own default",
+              seen == [breeze._UPSTREAM_SEED], seen)
+        seen.clear()
+        list(back._iter_generate("你好", "", seed=7))
+        check("an asked-for seed is the one used", seen == [7], seen)
+    finally:
+        tts_el.SEED = saved
+        for name in ("breeze_infer.templates", "breeze_infer.runtime", "breeze_infer"):
+            sys.modules.pop(name, None)
+
+
 def t_breeze_clone_slices():
     fake_soundfile()
     from wrapper.caps import tts_el
@@ -1723,8 +1764,8 @@ def t_breeze_clone_slices():
     cfgs.clear()
     audio, sr = be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
     check("newline clone speaks each line once", seen == ["第一句。", "第二句。"], seen)
-    from wrapper.caps import breeze as breeze_cap
-    zh_gap = int(breeze_cap._PAUSE_MS_ZH / 1000.0 * 24000)
+    from wrapper.caps import tts_long
+    zh_gap = int(tts_long.PAUSE_MS_ZH / 1000.0 * 24000)
     check("clone inserts a chinese pause between slices",
           len(audio) == 2400 + 2400 + zh_gap and sr == 24000, (len(audio), zh_gap))
     quiet = np.concatenate([
@@ -1733,7 +1774,7 @@ def t_breeze_clone_slices():
         np.zeros(800, dtype="float32"),
     ])
     mid = np.concatenate([np.ones(1600, dtype="float32"), np.zeros(4000, dtype="float32")])
-    joined, _ = breeze_cap._join([mid, quiet], 24000, pause_ms=0)
+    joined, _ = tts_long.join([mid, quiet], 24000, gap_ms=0)
     mid_kept = len(joined) - len(quiet)
     check("middle slice drops trailing silence only",
           1600 <= mid_kept <= 1600 + int(0.08 * 24000) + 2, mid_kept)
@@ -1742,7 +1783,7 @@ def t_breeze_clone_slices():
     seen.clear()
     cfgs.clear()
     audio, sr = be.clone("Hello.\nNext.", np.zeros(2400, dtype="float32"), 24000, "ref")
-    en_gap = int(breeze_cap._PAUSE_MS_EN / 1000.0 * 24000)
+    en_gap = int(tts_long.PAUSE_MS_EN / 1000.0 * 24000)
     check("clone inserts a shorter english pause",
           len(audio) == 2400 + 2400 + en_gap, (len(audio), en_gap))
     seen.clear()
@@ -1790,49 +1831,71 @@ def t_breeze_stream_chunks():
           np.array_equal(be.stream_next_slice(raw, 24000), raw))
 
 
+def _tempo_all(wave, sr, factor):
+    """One whole buffer through the shared streaming tempo, for the offline assertions."""
+    from wrapper.caps.tts_long import TempoStream
+
+    stream = TempoStream(sr, factor)
+    try:
+        parts = stream.write(wave, sr) + stream.finish()
+    finally:
+        stream.abort()
+    return np.concatenate(parts)
+
+
 def t_breeze_pace():
     import shutil
 
     if shutil.which("ffmpeg") is None:
-        print("  skip Breeze tempo checks: ffmpeg is not installed in the lint runner")
+        print("  skip tempo checks: ffmpeg is not installed in the lint runner")
         return
 
-    from wrapper.caps.breeze import BreezeBackend, _TempoStream, _atempo_chain
+    from wrapper.caps.tts_long import TempoStream, _atempo_chain, pace
     from wrapper.caps import tts_el
 
-    be = BreezeBackend(None, None, None, None)
+    # Both engines share one tempo filter; lengths and pitch are the contract.
+    note = 440.0
     t = np.arange(24000, dtype="float32") / 24000.0
-    w = (0.4 * np.sin(2.0 * np.pi * 440.0 * t)).astype("float32")
-    out, sr = be._pace(w, 24000, 2.0)
-    check("2x halves samples", 11500 <= len(out) <= 13000 and sr == 24000, len(out))
-    keep, _ = be._pace(w, 24000, 1.0)
-    check("1x keeps length", len(keep) == 24000, len(keep))
-    fast, _ = be._pace(w, 24000, 4.0)
-    check("4x is about a quarter", 5500 <= len(fast) <= 7000, len(fast))
-    slow, _ = be._pace(w, 24000, 0.5)
-    check("0.5x doubles samples", 45000 <= len(slow) <= 51000, len(slow))
-    very_slow, _ = be._pace(w, 24000, 0.25)
-    check("0.25x quadruples samples", 88000 <= len(very_slow) <= 102000, len(very_slow))
-    check("paced output fades to silence",
-          np.max(np.abs(out[-240:])) == 0.0 and np.max(np.abs(fast[-240:])) == 0.0)
+    tone = (0.4 * np.sin(2.0 * np.pi * note * t)).astype("float32")
 
-    active = out[:-240]
-    spectrum = np.abs(np.fft.rfft(active * np.hanning(len(active))))
-    hz = np.fft.rfftfreq(len(active), 1.0 / 24000.0)[int(np.argmax(spectrum))]
+    def heard(wave, sr):
+        crossings = int(np.count_nonzero(np.diff(np.signbit(wave))))
+        return crossings / 2.0 / (len(wave) / float(sr))
+
+    out, sr = pace(tone, 24000, 2.0)
+    check("2x halves samples", 11000 <= len(out) <= 13000 and sr == 24000, len(out))
+    check("2x is still the same note", abs(heard(out, 24000) - note) < 25.0, heard(out, 24000))
+    keep, _ = pace(tone, 24000, 1.0)
+    check("1x keeps length", len(keep) == 24000, len(keep))
+    fast, _ = pace(tone, 24000, 4.0)
+    check("4x is about a quarter", 5500 <= len(fast) <= 7000, len(fast))
+    slow, _ = pace(tone, 24000, 0.5)
+    check("0.5x doubles samples", 45000 <= len(slow) <= 51000, len(slow))
+    check("0.5x is still the same note", abs(heard(slow, 24000) - note) < 25.0, heard(slow, 24000))
+
+    # atempo is FireRed's, and it is the one that has to keep pitch across chunks.
+    t = np.arange(24000, dtype="float32") / 24000.0
+    tone = (0.4 * np.sin(2.0 * np.pi * 440.0 * t)).astype("float32")
+    paced = _tempo_all(tone, 24000, 2.0)
+    check("atempo halves samples", 11500 <= len(paced) <= 13000, len(paced))
+    check("atempo quarters at 4x", 5500 <= len(_tempo_all(tone, 24000, 4.0)) <= 7000)
+    check("atempo doubles at 0.5x", 45000 <= len(_tempo_all(tone, 24000, 0.5)) <= 51000)
+    check("atempo quadruples at 0.25x", 88000 <= len(_tempo_all(tone, 24000, 0.25)) <= 102000)
+
+    spectrum = np.abs(np.fft.rfft(paced * np.hanning(len(paced))))
+    hz = np.fft.rfftfreq(len(paced), 1.0 / 24000.0)[int(np.argmax(spectrum))]
     check("tempo keeps pitch", abs(hz - 440.0) < 8.0, hz)
 
-    high = (0.25 * np.sin(2.0 * np.pi * 7000.0 * t)).astype("float32")
-    high_fast, _ = be._pace(high, 24000, 2.0)
-    high_active = high_fast[:-240]
-    high_spectrum = np.abs(np.fft.rfft(high_active * np.hanning(len(high_active))))
-    high_hz = np.fft.rfftfreq(len(high_active), 1.0 / 24000.0)[int(np.argmax(high_spectrum))]
+    high = _tempo_all((0.25 * np.sin(2.0 * np.pi * 7000.0 * t)).astype("float32"), 24000, 2.0)
+    high_spectrum = np.abs(np.fft.rfft(high * np.hanning(len(high))))
+    high_hz = np.fft.rfftfreq(len(high), 1.0 / 24000.0)[int(np.argmax(high_spectrum))]
     check("tempo does not alias high frequencies", abs(high_hz - 7000.0) < 20.0, high_hz)
 
-    stream = _TempoStream(24000, 2.0)
+    stream = TempoStream(24000, 2.0)
     streamed = []
     live_chunks = 0
     try:
-        for chunk in np.array_split(w, 7):
+        for chunk in np.array_split(tone, 7):
             ready = stream.write(chunk, 24000)
             live_chunks += len(ready)
             streamed.extend(ready)
@@ -1841,8 +1904,8 @@ def t_breeze_pace():
         stream.abort()
     streamed = np.concatenate(streamed)
     check("tempo state crosses input chunk boundaries",
-          len(streamed) == len(out) and np.allclose(streamed, out),
-          (len(streamed), len(out), float(np.max(np.abs(streamed[:min(len(streamed), len(out))] - out[:min(len(streamed), len(out))])))))
+          len(streamed) == len(paced) and np.allclose(streamed, paced),
+          (len(streamed), len(paced)))
     check("tempo emits before the request finishes", live_chunks > 0, live_chunks)
     check("atempo extremes use portable chains",
           _atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
@@ -1938,17 +2001,89 @@ def t_live_stream_stops_iter():
     tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
     req = FlipReq()
 
+    hid_box = [None]
+
     async def run():
         resp = await tts_el._live_stream("p1", "hello stream", "", "mp3", None, req)
         check("stream opened", getattr(resp, "status_code", 200) == 200, getattr(resp, "status_code", None))
+        hid_box[0] = resp.headers.get("history-item-id")
         started.wait(2)
         req.gone = True
         async for _ in resp.body_iterator:
             pass
 
     asyncio.run(run())
-    time.sleep(0.2)
-    check("disconnect canceled later slices", "three" not in seen, seen)
+    # Wait for the reading thread to finish rather than guessing at it.
+    doc = {}
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        doc = tts_el._history().get(hid_box[0]) or {}
+        if doc.get("state") in ("created", "canceled"):
+            break
+        time.sleep(0.05)
+    # A response ending is not the reading ending; unread slices must still be spoken for Range.
+    check("disconnect keeps speaking for a resume", "three" in seen, seen)
+    check("a reading the client left is finished, not canceled",
+          doc.get("state") == "created", doc.get("state"))
+
+
+def t_live_stream_named_id():
+    """A client that names its reading can stop it before the request has landed."""
+    import asyncio
+    import tempfile
+
+    from wrapper.caps import tts_el
+
+    fake_soundfile()
+    backend = FakeELBackend()
+    root = tempfile.mkdtemp(prefix="el-named-")
+    tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
+
+    named = "hi" + "0" * 20
+    check("a name that is not an id is refused",
+          _raises_status(lambda: tts_el._named_id("../escape", "hi")) == 400, None)
+    check("a well-formed name is accepted", tts_el._named_id(named, "hi") == named, None)
+
+    async def speak(hid):
+        return await tts_el._live_stream("p1", "hello", "", "mp3", None, None, hid=hid)
+
+    resp = asyncio.run(speak(named))
+    check("the reading answers to the name it was given",
+          resp.headers.get("history-item-id") == named, resp.headers.get("history-item-id"))
+
+    # Stopped while the request is still in flight; the later reading is never spoken.
+    refused = "hi" + "1" * 20
+    tts_el._remember_refusal(refused)
+    stopped = asyncio.run(speak(refused))
+    check("a reading stopped before it started does not speak",
+          getattr(stopped, "status_code", None) == 499, getattr(stopped, "status_code", None))
+    check("the refusal is spent once", tts_el._was_refused(refused) is False, None)
+
+
+def t_live_grace_widens_for_followers():
+    """One bad minute must not kill a reading whose client has been coming back."""
+    import threading
+
+    from wrapper.caps import tts_el
+
+    live = tts_el._LiveReading("hi" + "2" * 20, threading.Event())
+    check("a reading nobody resumed keeps the short grace",
+          live.grace() == tts_el._RESUME_GRACE_SECONDS, live.grace())
+    live.followed = True
+    check("a followed reading is given the long grace",
+          live.grace() == tts_el._RESUME_GRACE_FOLLOWED_SECONDS, live.grace())
+    check("the long grace is the wider of the two",
+          tts_el._RESUME_GRACE_FOLLOWED_SECONDS > tts_el._RESUME_GRACE_SECONDS, None)
+
+
+def _raises_status(fn):
+    from fastapi import HTTPException
+
+    try:
+        fn()
+    except HTTPException as e:
+        return e.status_code
+    return None
 
 
 def t_breeze_clone_cancel():
@@ -2005,7 +2140,7 @@ def t_firered_clone_cancel():
     firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
     try:
         be = firered.FireRedBackend(FakeModel())
-        be._join = lambda waves, sr, fade_ms=50.0: (
+        be._join = lambda waves, sr, fade_ms=50.0, **kw: (
             np.concatenate([np.asarray(w, dtype="float32").reshape(-1) for w in waves]), sr)
         be._pace = lambda audio, sr, instruction="", speed=None: (audio, sr)
         ctx = TickCtx(cancel_after=3)
@@ -2092,14 +2227,17 @@ def t_voice_settings_map():
     base = 2.0
     d = tts_el.resolve_settings(tts_el._DEFAULT_SETTINGS, base, "")
     check("default knobs keep chart CFG", abs(d.cfg - base) < 1e-6, d.cfg)
-    check("default knobs keep seed", d.seed == int(tts_el.SEED), d.seed)
+    check("default knobs pass no seed of ours", d.seed is None, d.seed)
     check("default knobs add no instruction", d.instruction == "", d.instruction)
     high = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "similarity_boost": 1.0}, base, "")
     check("high similarity raises CFG", high.cfg > base, high.cfg)
     off = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "use_speaker_boost": False}, base, "")
     check("speaker_boost off lowers CFG", off.cfg < base, off.cfg)
+    steady = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS}, base, "")
+    check("a steady voice leaves the model the seed its authors chose",
+          steady.seed is None, steady.seed)
     low = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "stability": 0.1}, base, "")
-    check("low stability varies the seed", low.seed != int(tts_el.SEED), low.seed)
+    check("low stability varies the seed", low.seed is not None, low.seed)
     styled = tts_el.resolve_settings({**tts_el._DEFAULT_SETTINGS, "style": 0.8}, base, "")
     check("style wraps an English direction",
           "expressive" in styled.instruction.lower(), styled.instruction)
@@ -2126,8 +2264,8 @@ def t_firered_settings_apply():
     firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
     try:
         be = firered.FireRedBackend(FakeModel())
-        be._pace = lambda audio, sr, instruction="", speed=None: (audio, sr)
-        be._join = lambda waves, sr, fade_ms=50.0: (waves[0], sr)
+        be._pace = lambda audio, sr, speed=None: (audio, sr)
+        be._join = lambda waves, sr, text="", **kw: (waves[0], sr)
         be.clone("你好", np.zeros(80, dtype="float32"), 24000, "ref",
                  settings={**tts_el._DEFAULT_SETTINGS, "similarity_boost": 1.0})
         check("firered clone uses mapped CFG",
@@ -2146,16 +2284,269 @@ def t_firered_settings_apply():
         firered._as_torch = orig
 
 
-def t_firered_speed_for():
-    from wrapper.caps.firered import clamp_speed, speed_for
+def t_firered_speaker_boost():
+    """Boost has no flag on this model: the tail of the slice before goes into the
+    prompt, which is in-context, so the next slice keeps the voice it just heard."""
+    from wrapper.caps import firered, tts_el
 
-    check("clamp snaps to 0.1", clamp_speed(0.73) == 0.7)
-    check("clamp floors at 0.5", clamp_speed(0.1) == 0.5)
-    check("clamp caps at 2.0", clamp_speed(9) == 2.0)
-    check("default speak speed is below 1", speed_for("") < 1.0)
-    check("很慢 goes to 0.6 or slower", speed_for("语速很慢，带一点俏皮") <= 0.6)
-    check("very slow matches 很慢", speed_for("a very slow narrator") <= 0.6)
-    check("很快 skips the edit", speed_for("语速很快") == 1.0)
+    def run(boost):
+        seen = []
+
+        class FakeModel:
+            def _apply_frontend(self, text, **kw):
+                parts = [p + "。" for p in (text or "").split("。") if p]
+                return "".join(parts), "Chinese", parts
+
+            def generate_tts(self, **kw):
+                seen.append(kw)
+                return np.ones(24000, dtype="float32"), 24000
+
+        orig = firered._as_torch
+        firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+        try:
+            be = firered.FireRedBackend(FakeModel())
+            be._pace = lambda audio, sr, speed=None: (audio, sr)
+            be._join = lambda waves, sr, text="", **kw: (waves[0], sr)
+            be.clone("第一句。第二句。", np.zeros(240, dtype="float32"), 24000, "参考文本",
+                     settings={**tts_el._DEFAULT_SETTINGS, "use_speaker_boost": boost})
+        finally:
+            firered._as_torch = orig
+        return seen
+
+    on = run(True)
+    check("boost speaks each sentence once", len(on) == 2, [k.get("text") for k in on])
+    check("boost feeds the first sentence into the second prompt",
+          "第一句。" in str(on[-1].get("prompt_text")), on[-1].get("prompt_text"))
+    check("boost ends the prompt on the clean reference",
+          str(on[-1].get("prompt_text")).endswith("参考文本"),
+          on[-1].get("prompt_text"))
+    check("overlap trim never wipes a whole slice",
+          firered._strip_ctx_overlap("作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、",
+                                     "作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、")
+          == "作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、")
+    check("a short clip does not carry the unsaid rest of the sentence",
+          firered._spoken_text("作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、",
+                               np.zeros(4800, dtype="float32"), 24000) !=
+          "作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、")
+    check("boost feeds its audio in too",
+          len(on[-1]["prompt_audio"]) > len(on[0]["prompt_audio"]),
+          (len(on[0]["prompt_audio"]), len(on[-1]["prompt_audio"])))
+    off = run(False)
+    check("without boost every slice hears only the reference",
+          {str(k.get("prompt_text")) for k in off} == {"参考文本"},
+          [k.get("prompt_text") for k in off])
+
+
+def t_firered_split_paragraphs():
+    from wrapper.caps import firered
+
+    text = (
+        "京华九月，秋启新程。今天，2026年中国国际服务贸易交易会如约启幕，"
+        "以90个国家（地区）和国际组织设展办会、1830余家企业线下参展、"
+        "200余项新产品新成果集中发布的扩容升级之势，为全球服务贸易开放合作注入新动能。\n\n"
+        "作为全球服务贸易领域极具影响力的国际性开放合作平台，服贸会持续以展为桥、"
+        "以会聚力，清晰勾勒出中国服务贸易从规模扩容向质效跃升、从深耕内功向赋能全球的进阶轨迹。"
+    )
+    be = firered.FireRedBackend(type("M", (), {"redae": None})())
+    parts = be._sentences(text)
+    check("a new paragraph is not glued to the sentence before it",
+          any(p.startswith("作为全球") for p in parts), parts)
+    check("the 作为 paragraph starts a new slice",
+          any(p.startswith("作为全球") for p in parts), parts)
+    check("今天， is not a slice of its own",
+          not any(p.strip() == "今天，" for p in parts), parts)
+    check("today and 启幕 stay in one sentence slice",
+          any("今天，" in p and "启幕，" in p and "注入新动能" in p for p in parts), parts)
+    check("a long sentence is not recut on commas",
+          not any(p.strip() in ("今天，", "如约启幕，") for p in parts), parts)
+    check("FireRed join is not the Breeze 520 ms window",
+          firered._pause_ms("秋启新程。", text) == firered._SLICE_GAP_MS
+          and firered._SLICE_GAP_MS < 200,
+          firered._pause_ms("秋启新程。", text))
+
+    class Official:
+        redae = None
+
+        def _apply_frontend(self, text, **kw):
+            parts = []
+            buf = ""
+            for ch in text.replace("\n", ""):
+                buf += ch
+                if ch in "。！？" and buf.strip():
+                    parts.append(buf.strip())
+                    buf = ""
+            if buf.strip():
+                parts.append(buf.strip())
+            return "".join(parts), "Chinese", parts
+
+    glued = firered.FireRedBackend(Official())._sentences(text)
+    check("official long sentence keeps 今天 with 启幕",
+          any("今天，" in p and "启幕，" in p for p in glued), glued)
+    check("official glue still leaves 作为 as its own slice",
+          any(p.startswith("作为全球") for p in glued), glued)
+
+
+def t_firered_unsaid_requeues():
+    """generate_tts often stops at a comma. The leftover clause must get its own slice."""
+    from wrapper.caps import firered, tts_el
+
+    text = "但基础硬件出海，并不等于整套服务能力落地可用。"
+    short = np.ones(24000, dtype="float32")
+    rest = firered._unsaid(text, short, 24000)
+    check("a short clip requeues the clause after the comma",
+          rest.startswith("并不等于"), rest)
+    long = np.ones(96000, dtype="float32")
+    check("a finished sentence is not requeued",
+          firered._unsaid(text, long, 24000) == "")
+
+    seen = []
+
+    class FakeModel:
+        def generate_tts(self, **kw):
+            seen.append(kw.get("text"))
+            return np.ones(24000, dtype="float32"), 24000
+
+    orig = firered._as_torch
+    firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+    try:
+        be = firered.FireRedBackend(FakeModel())
+        be._pace = lambda audio, sr, speed=None: (audio, sr)
+        be._join = lambda waves, sr, text="", **kw: (waves[0], sr)
+        be.clone(text + "今年走了。", np.zeros(240, dtype="float32"), 24000, "参考文本",
+                 settings={**tts_el._DEFAULT_SETTINGS, "use_speaker_boost": True})
+    finally:
+        firered._as_torch = orig
+    check("clone asks for 并不等于 after a truncated generate",
+          any(isinstance(t, str) and t.startswith("并不等于") for t in seen), seen)
+
+
+def t_speed_is_applied_once():
+    """Speed is a filter here, not a request to the model. Doing both speaks it twice:
+    the model hurries, then the tempo filter hurries the hurried audio again."""
+    import inspect
+
+    from wrapper.caps import breeze, firered
+
+    for name, src in (("breeze", inspect.getsource(breeze)),
+                      ("firered", inspect.getsource(firered))):
+        calls = src.count("resolve_settings(")
+        waived = src.count("include_speed_direction=False")
+        check("%s never asks the model to hurry as well" % name, calls == waived,
+              "%d resolve_settings, %d waived" % (calls, waived))
+
+
+def t_design_alternates_are_opt_in():
+    """Offering a choice must not change what a caller who never asks for one gets."""
+    import tempfile
+
+    from fastapi.testclient import TestClient
+    from wrapper.caps import tts_el
+
+    base = tts_el.resolve_settings(None, tts_el.DESIGN_CFG, "")
+    check("no alternate asked for is the seed callers already had",
+          tts_el.resolve_settings(None, tts_el.DESIGN_CFG, "", seed_jitter=0).seed == base.seed,
+          base.seed)
+    later = tts_el.resolve_settings(None, tts_el.DESIGN_CFG, "", seed_jitter=1).seed
+    check("an alternate is a different voice", later != base.seed, (base.seed, later))
+
+    fake_soundfile()
+    backend = FakeELBackend()
+    root = tempfile.mkdtemp(prefix="el-takes-")
+    tts_el.install(backend, store=tts_el.VoiceStore(root, backend.presets()))
+    from wrapper.caps.breeze import build_app
+
+    with TestClient(build_app(["tts", "tts_clone", "tts_design"])) as c:
+        one = c.post("/v1/text-to-voice/design", json={"voice_description": "沉稳青年女声"})
+        check("a request that says nothing still gets exactly one voice",
+              one.status_code == 200 and len(one.json().get("previews") or []) == 1,
+              one.text[:160])
+        three = c.post("/v1/text-to-voice/design",
+                       json={"voice_description": "沉稳青年女声", "takes": 3})
+        got = three.json().get("previews") or []
+        check("asking for three offers three", len(got) == 3, len(got))
+        check("each one is savable on its own",
+              len({p.get("generated_voice_id") for p in got}) == 3,
+              [p.get("generated_voice_id") for p in got])
+        bad = c.post("/v1/text-to-voice/design",
+                     json={"voice_description": "沉稳青年女声", "takes": 9})
+        check("more than the engine offers is refused, not silently trimmed",
+              bad.status_code == 400, bad.status_code)
+
+
+def t_firered_designs_speak_their_sample():
+    """Voice design here is conditioned on the text it is handed, so designing again
+    at read time hands back a different speaker — often a different sex. The approved
+    sample is the only stable answer to who this voice is."""
+    from wrapper.caps.firered import FireRedBackend
+
+    check("a saved design speaks its frozen sample, not a fresh design",
+          FireRedBackend.prefer_design_speak is False,
+          FireRedBackend.prefer_design_speak)
+    check("a description of the speaker is not a direction for the sentence",
+          FireRedBackend.card_instruction_is_direction is False,
+          FireRedBackend.card_instruction_is_direction)
+
+
+def t_firered_design_anchors():
+    """A design has no wav to hold it steady, so every slice re-imagines the speaker.
+    Boost makes the first slice that missing reference for the ones after it."""
+    from wrapper.caps import firered, tts_el
+
+    def run(boost):
+        seen = []
+
+        class FakeModel:
+            def _apply_frontend(self, text, **kw):
+                parts = [p + "。" for p in (text or "").split("。") if p]
+                return "".join(parts), "Chinese", parts
+
+            def generate_voice_design(self, **kw):
+                seen.append(("design", kw))
+                return np.ones(240, dtype="float32"), 24000, "plan"
+
+            def generate_tts(self, **kw):
+                seen.append(("tts", kw))
+                return np.ones(240, dtype="float32"), 24000
+
+        orig = firered._as_torch
+        firered._as_torch = lambda audio: np.asarray(audio, dtype="float32")
+        try:
+            be = firered.FireRedBackend(FakeModel())
+            be._pace = lambda audio, sr, speed=None: (audio, sr)
+            list(be.iter_design("沉稳男声", "第一句。第二句。第三句。",
+                                settings={**tts_el._DEFAULT_SETTINGS,
+                                          "use_speaker_boost": boost}))
+        finally:
+            firered._as_torch = orig
+        return seen
+
+    on = run(True)
+    check("boost speaks each sentence once", len(on) == 3, [k for k, _ in on])
+    check("the first slice still invents the voice", on[0][0] == "design", on[0][0])
+    check("later slices speak against it instead of re-imagining it",
+          [k for k, _ in on[1:]] == ["tts", "tts"], [k for k, _ in on])
+    check("the anchor they hear is the first slice",
+          "第一句。" in str(on[1][1].get("prompt_text")), on[1][1].get("prompt_text"))
+    check("and it stays the anchor as the reading goes on",
+          "第一句。" in str(on[-1][1].get("prompt_text")), on[-1][1].get("prompt_text"))
+    off = run(False)
+    check("without boost every slice invents the voice again",
+          {k for k, _ in off} == {"design"}, [k for k, _ in off])
+
+
+def t_firered_speed_for():
+    """--speak-speed is the baseline this model needs; the EL knob multiplies it."""
+    from wrapper.caps import tts_el
+    from wrapper.caps.firered import clamp_speed, tempo_for
+
+    check("clamp floors at 0.25", clamp_speed(0.01) == 0.25)
+    check("clamp caps at 4.0", clamp_speed(9) == 4.0)
+    check("a default request slows the machine-gun pace down",
+          tempo_for(1.0) == tts_el.SPEAK_SPEED and tempo_for(1.0) < 1.0, tempo_for(1.0))
+    check("asking for faster multiplies the baseline rather than replacing it",
+          abs(tempo_for(2.0) - 2.0 * tts_el.SPEAK_SPEED) < 1e-9, tempo_for(2.0))
+    check("asking for slower stays inside what atempo can chain",
+          0.25 <= tempo_for(0.25) < tts_el.SPEAK_SPEED, tempo_for(0.25))
 
 
 def t_firered_design_speak():
@@ -2639,6 +3030,8 @@ def main():
                            ("tts job tick", t_tts_job_tick, "firered"),
                            ("stream ctx cancel", t_stream_ctx_cancel, "breeze"),
                            ("live stream stops iter", t_live_stream_stops_iter, "breeze"),
+                           ("live stream named id", t_live_stream_named_id, "breeze"),
+                           ("live grace widens for followers", t_live_grace_widens_for_followers, "breeze"),
                            ("breeze clone cancel", t_breeze_clone_cancel, "breeze"),
                            ("firered clone cancel", t_firered_clone_cancel, "firered"),
                            ("tts_el limits", t_tts_el_limits, "breeze"),
@@ -2649,6 +3042,13 @@ def main():
                            ("voice cards clone seed", t_voice_cards_clone_seed, "breeze"),
                            ("firered triplet pad", t_firered_triplet_pad, "firered"),
                            ("firered speed_for", t_firered_speed_for, "firered"),
+                           ("firered speaker boost", t_firered_speaker_boost, "firered"),
+                           ("firered split paragraphs", t_firered_split_paragraphs, "firered"),
+                           ("firered unsaid requeues", t_firered_unsaid_requeues, "firered"),
+                           ("speed is applied once", t_speed_is_applied_once, "breeze"),
+                           ("design alternates are opt-in", t_design_alternates_are_opt_in, "breeze"),
+                           ("firered designs speak their sample", t_firered_designs_speak_their_sample, "firered"),
+                           ("firered design anchors", t_firered_design_anchors, "firered"),
                            ("output format tokens", t_output_format, "firered"),
                            ("voice settings map", t_voice_settings_map, "firered"),
                            ("firered settings apply", t_firered_settings_apply, "firered"),

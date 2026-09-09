@@ -8,8 +8,10 @@ import logging
 import math
 import os
 import queue
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -22,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 
 from .. import hfgate
 from .. import tasks
+from .. import watchdog
 from ..audioio import decode, probe_seconds, seconds, wav_seconds
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
@@ -42,7 +45,9 @@ DESIGN_CFG = _args.number("--design-cfg", 1.2)
 # FireRed generate_tts/design is machine-gun; acoustic_edit 0.5–2.0 step 0.1, chart default 0.7. Breeze ignores this.
 SPEAK_SPEED = _args.number("--speak-speed", 0.7)
 CFG_SCALE = _args.number("--cfg-scale", 1.0)
-SEED = int(_args.number("--seed", 42))
+# No seed of ours: None leaves each model the seed its authors chose; --seed is for a specific run.
+_seed_arg = str(_args.text("--seed", "") or "").strip()
+SEED = int(float(_seed_arg)) if _seed_arg else None
 ATTN = str(_args.text("--attn-implementation", "") or "")
 DEFAULT_PREVIEW = str(_args.text("--preview-text", "") or "")
 USE_WETEXT = _args.switch("--use-wetext", True)
@@ -451,6 +456,22 @@ def _explain(e):
 
 def _new_id(prefix):
     return "%s%s" % (prefix, uuid.uuid4().hex[:20])
+
+
+_ID_RE = re.compile(r"\A(hi)[0-9a-f]{20}\Z")
+
+
+def _named_id(raw, prefix):
+    """A caller-chosen id, or None. The id becomes a directory name, so nothing
+    that is not exactly what _new_id would have minted is allowed near the store."""
+    name = str(raw or "").strip()
+    if not name:
+        return None
+    if not _ID_RE.match(name) or not name.startswith(prefix):
+        raise HTTPException(
+            status_code=400,
+            detail="history_item_id must look like %s + 20 hex digits" % prefix)
+    return name
 
 
 def voices_root():
@@ -935,9 +956,14 @@ class HistoryStore:
         return doc
 
     def begin(self, *, voice_id, voice_name, voice_category, text, settings,
-              content_type, output_format, source="TTS"):
-        """Register a reading before it has audio: `processing`, with a file append() grows."""
-        hid = _new_id("hi")
+              content_type, output_format, source="TTS", hid=None):
+        """Register a reading before it has audio: `processing`, with a file append() grows.
+
+        A caller may name the reading itself, which is what lets it be stopped before
+        the response that would have carried the name back has arrived. mkdir is the
+        claim: two requests naming the same id, one wins and the other is told so.
+        """
+        hid = hid or _new_id("hi")
         n = len(text or "")
         with self._lock:
             frm, to = self._chars, self._chars + n
@@ -1124,6 +1150,8 @@ async def _wait_for_bytes(hid, pos, request, deadline):
     while True:
         live = _live_get(hid)
         if live is not None:
+            # Asking for bytes through the item is a follower, which earns the longer grace.
+            live.followed = True
             live.touch()
         size = store.size(hid)
         if size > pos:
@@ -1266,14 +1294,16 @@ class Knobs:
 
     def __init__(self, cfg, seed, speed, instruction, context=False):
         self.cfg = float(cfg)
-        self.seed = int(seed)
+        # None: do not pass a seed at all, so the model uses the one it ships with.
+        self.seed = None if seed is None else int(seed)
         self.speed = float(speed)
         self.instruction = instruction or ""
         # Speaker boost also buys cross-slice context on backends that can carry it.
         self.context = bool(context)
 
 
-def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_direction=True):
+def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_direction=True,
+                     seed_jitter=0):
     """EL knobs → CFG / seed / instruction / acoustic-edit; the defaults are a no-op."""
     s = dict(_DEFAULT_SETTINGS)
     if isinstance(settings, dict):
@@ -1289,12 +1319,19 @@ def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_
     cfg *= (1.15 - 0.30 * stab)
     cfg *= (1.0 + 0.40 * style)
     cfg = round(max(0.3, min(8.0, cfg)), 4)
-    if stab >= 0.5:
+    # None means we pass no seed; the model keeps the constant its authors picked.
+    if SEED is not None:
         seed = int(SEED)
+    elif stab >= 0.5:
+        seed = None
     else:
         import random
-        span = max(1, int(round((0.5 - stab) * 10000)))
-        seed = (int(SEED) + span + random.randint(0, span)) & 0x7FFFFFFF
+        seed = random.randint(0, 0x7FFFFFFF)
+    # Alternate takes; take zero is untouched so a caller that never asks hears the same.
+    if seed_jitter:
+        import random
+        anchor = seed if seed is not None else random.randint(0, 0x7FFFFFFF)
+        seed = (anchor + int(seed_jitter) * 7919) & 0x7FFFFFFF
     return Knobs(cfg, seed, speed,
                  _settings_direction(s, instruction, text,
                                      include_speed=include_speed_direction), boost)
@@ -1421,6 +1458,26 @@ def _ensure_frozen(vid, ctx=None):
     store.freeze(vid, audio, sr, sample, extra=extra)
     wav_path, transcript, _stored = store.prompt(vid)
     return store.get(vid), wav_path, transcript
+
+
+_PREVIEW_TAKES_MAX = 3
+
+
+def _preview_takes(payload):
+    """How many voices to offer. Absent means one, which is what callers had."""
+    raw = (payload or {}).get("takes")
+    if raw is None:
+        raw = (payload or {}).get("num_previews")
+    if raw is None:
+        return 1
+    try:
+        takes = int(raw)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="takes must be a whole number")
+    if takes < 1 or takes > _PREVIEW_TAKES_MAX:
+        raise HTTPException(status_code=400,
+                            detail="takes must be between 1 and %d" % _PREVIEW_TAKES_MAX)
+    return takes
 
 
 def _preview_text(instruction):
@@ -1571,14 +1628,42 @@ def _raise_speak(e):
     raise HTTPException(status_code=500, detail="speech synthesis failed: %s" % text)
 
 
+# A wedged CUDA call holds the generation lock; only a stall this long trips a restart.
+_STALL_SECONDS = 600.0
+
 # The entrance cuts at five minutes, so a reading outlives its response and resumes with Range.
 _RESUME_GRACE_SECONDS = 90.0
+# A reader that came back for more has proved it is following; do not drop a long reading over one bad minute.
+_RESUME_GRACE_FOLLOWED_SECONDS = 900.0
 _RESUME_WAIT_SECONDS = 240.0
 _RESUME_POLL_SECONDS = 0.1
 
 _LIVE_STREAMS = {}
 _LIVE_LOCK = threading.Lock()
 _LIVE_WATCHDOG = []
+
+# Remember a stop that arrived before the start request, or the later reading runs unattended.
+_STOPPED_BEFORE_START = {}
+_STOPPED_BEFORE_START_MAX = 512
+_STOPPED_BEFORE_START_TTL = 900.0
+
+
+def _remember_refusal(hid):
+    now = time.time()
+    with _LIVE_LOCK:
+        for old, when in list(_STOPPED_BEFORE_START.items()):
+            if now - when > _STOPPED_BEFORE_START_TTL:
+                _STOPPED_BEFORE_START.pop(old, None)
+        while len(_STOPPED_BEFORE_START) >= _STOPPED_BEFORE_START_MAX:
+            _STOPPED_BEFORE_START.pop(next(iter(_STOPPED_BEFORE_START)), None)
+        _STOPPED_BEFORE_START[hid] = now
+
+
+def _was_refused(hid):
+    with _LIVE_LOCK:
+        if _STOPPED_BEFORE_START.pop(hid, None) is None:
+            return False
+    return True
 
 
 class _LiveReading:
@@ -1590,9 +1675,20 @@ class _LiveReading:
         # The request that started the reading is its first reader.
         self.readers = 1
         self.last_seen = time.time()
+        self.last_slice = time.time()
+        self.slices = 0
+        # Set once somebody comes back for bytes the first response did not carry.
+        self.followed = False
+
+    def grace(self):
+        return _RESUME_GRACE_FOLLOWED_SECONDS if self.followed else _RESUME_GRACE_SECONDS
 
     def touch(self):
         self.last_seen = time.time()
+
+    def slice_done(self):
+        self.last_slice = time.time()
+        self.slices += 1
 
 
 def _live_begin(hid, stop):
@@ -1616,19 +1712,60 @@ def _live_get(hid):
         return _LIVE_STREAMS.get(hid)
 
 
+def cuda_accounting():
+    """The allocator's own counters. No driver call, so this still answers when the driver
+    is what stopped answering -- which is exactly when it is worth reading."""
+    try:
+        import torch
+
+        if not torch.cuda.is_initialized():
+            return "cuda not initialized"
+        mib = 1 << 20
+        return ("cuda allocated=%.0f MiB reserved=%.0f MiB peak=%.0f MiB"
+                % (torch.cuda.memory_allocated() / mib,
+                   torch.cuda.memory_reserved() / mib,
+                   torch.cuda.max_memory_allocated() / mib))
+    except Exception as e:
+        return "cuda accounting unavailable: %s" % e
+
+
+def thread_stacks():
+    """Every thread's stack, for the one question a wedged engine cannot otherwise answer."""
+    import traceback
+
+    frames = sys._current_frames()
+    out = []
+    for th in threading.enumerate():
+        frame = frames.get(th.ident)
+        out.append("thread %s (id=%s, daemon=%s)" % (th.name, th.ident, th.daemon))
+        out.extend("".join(traceback.format_stack(frame)).rstrip().splitlines()
+                   if frame else ["  <no frame>"])
+        out.append("")
+    return "\n".join(out)
+
+
 def _live_watch():
-    """Cancel readings nobody came back for."""
+    """Cancel readings nobody came back for, and restart if one wedges the GPU."""
     while True:
         time.sleep(1.0)
         now = time.time()
         with _LIVE_LOCK:
             live_now = list(_LIVE_STREAMS.values())
         for live in live_now:
+            # Still registered means produce() has not finished; a long silence here is a wedge.
+            if now - live.last_slice > _STALL_SECONDS:
+                log.error("reading %s produced nothing for %.0fs after %s slices; the "
+                          "generation lock is wedged and only a restart frees it. %s. "
+                          "Every thread's stack follows.",
+                          live.hid, now - live.last_slice, live.slices, cuda_accounting())
+                log.error("%s", thread_stacks())
+                os._exit(watchdog.EXIT_CODE)
             if live.readers > 0 or live.stop.is_set():
                 continue
-            if now - live.last_seen > _RESUME_GRACE_SECONDS:
-                log.info("no reader resumed %s for %.0fs; canceling GPU work",
-                         live.hid, _RESUME_GRACE_SECONDS)
+            grace = live.grace()
+            if now - live.last_seen > grace:
+                log.info("no reader resumed %s for %.0fs (followed=%s); canceling GPU work",
+                         live.hid, grace, live.followed)
                 live.stop.set()
 
 
@@ -1666,7 +1803,7 @@ async def _poll_q(q, stop, request, timeout=0.2, live=None):
         return item
 
 
-async def _live_stream(vid, text, instruction, fmt, settings, request=None):
+async def _live_stream(vid, text, instruction, fmt, settings, request=None, hid=None):
     """Flush each slice as produced, and keep the whole reading under the id in the headers."""
     spec = _as_spec(fmt)
     # Concatenated WAV headers are not a file; the client wraps one RIFF.
@@ -1678,15 +1815,23 @@ async def _live_stream(vid, text, instruction, fmt, settings, request=None):
     sr_box = {"sr": spec.sr or _state.get("sample_rate") or 24000}
     mime = _FORMATS[wire.kind][2]
     meta = _store().get(vid)
-    record = _history().begin(
-        voice_id=(meta or {}).get("voice_id") or vid or "",
-        voice_name=(meta or {}).get("name") or "",
-        voice_category=(meta or {}).get("category") or "",
-        text=text or "",
-        settings=settings or {},
-        content_type=mime,
-        output_format=spec.token,
-    )
+    if hid and _was_refused(hid):
+        # Stopped while this request was still on its way; do not speak it.
+        return Response(status_code=499)
+    try:
+        record = _history().begin(
+            voice_id=(meta or {}).get("voice_id") or vid or "",
+            voice_name=(meta or {}).get("name") or "",
+            voice_category=(meta or {}).get("category") or "",
+            text=text or "",
+            settings=settings or {},
+            content_type=mime,
+            output_format=spec.token,
+            hid=hid,
+        )
+    except FileExistsError:
+        raise HTTPException(status_code=409,
+                            detail="history_item_id %r is already taken" % hid)
     hid = record["history_item_id"]
     live = _live_begin(hid, stop)
 
@@ -1698,6 +1843,7 @@ async def _live_stream(vid, text, instruction, fmt, settings, request=None):
             backend = _backend()
             for wave, sr in _iter_speak_voice(vid, text, instruction=instruction,
                                               ctx=ctx, settings=settings):
+                live.slice_done()
                 if stop.is_set():
                     log.info("stream stopped after %s slices", n)
                     return
@@ -1831,6 +1977,11 @@ def build_app(supports, module=None):
              task_api=True, task_legacy=False,
              sample_rate=_state.get("sample_rate") or 24000)
     _args.warn_unclaimed(log)
+
+    # Operator probe for a wedged generation; not part of the model's contract.
+    @app.get("/debug/stacks", include_in_schema=False)
+    def _debug_stacks():
+        return Response(content=thread_stacks(), media_type="text/plain")
 
     has_tts = "tts" in supports
     has_clone = "tts_clone" in supports
@@ -1974,6 +2125,10 @@ def build_app(supports, module=None):
             if live is not None:
                 live.stop.set()
             if not _history().delete(history_item_id):
+                # Named but not started yet: 404 would let it start with nobody left to stop it.
+                if live is None and _ID_RE.match(history_item_id or ""):
+                    _remember_refusal(history_item_id)
+                    return {"status": "ok"}
                 raise HTTPException(status_code=404,
                                     detail="unknown history_item_id %r" % history_item_id)
             return {"status": "ok"}
@@ -2053,24 +2208,29 @@ def build_app(supports, module=None):
             _check_design_text(instruction)
             text = str(payload.get("text") or "").strip() or _preview_text(instruction)
             async_ = request.query_params.get("async")
+            takes = _preview_takes(payload)
 
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="design")
-                with _gen_lock:
-                    audio, sr, extra = _backend().design(instruction, text, ctx=ctx)
-                gid, wav, sr = _store().put_preview(instruction, audio, sr, text, extra=extra)
-                ctx.meter(output_seconds=seconds(audio, sr))
-                ctx.progress(ratio=1.0, stage="done")
-                return {
-                    "previews": [{
+                previews = []
+                for take in range(takes):
+                    # Take 0 is the one this endpoint has always returned.
+                    with _gen_lock:
+                        audio, sr, extra = _backend().design(instruction, text, ctx=ctx,
+                                                             seed_jitter=take)
+                    gid, wav, sr = _store().put_preview(instruction, audio, sr, text, extra=extra)
+                    ctx.meter(output_seconds=seconds(audio, sr))
+                    ctx.progress(ratio=(take + 1) / float(takes), stage="design")
+                    previews.append({
                         "generated_voice_id": gid,
                         "audio_base_64": base64.b64encode(wav).decode("ascii"),
                         "media_type": "audio/wav",
                         "duration_secs": round(len(_to_mono(audio)) / float(sr), 3),
                         "language": None,
                         "plan": (extra or {}).get("plan"),
-                    }]
-                }
+                    })
+                ctx.progress(ratio=1.0, stage="done")
+                return {"previews": previews}
 
             return await tasks.dispatch(async_, "tts", MODEL_NAME, _work, fail="voice design failed")
 
@@ -2125,8 +2285,11 @@ def build_app(supports, module=None):
                 "mp3_44100_128")
             instructions = str(payload.get("instructions")
                                or payload.get("voice_description") or "").strip()
+            # Naming the reading up front lets a client stop it before this response returns the name.
+            named = _named_id(request.query_params.get("history_item_id")
+                              or payload.get("history_item_id"), "hi")
             return await _live_stream(voice_id, text, instructions, fmt,
-                                      _merged_settings(meta, payload), request)
+                                      _merged_settings(meta, payload), request, hid=named)
 
         @app.post("/v1/text-to-speech/{voice_id}")
         async def el_speak(voice_id: str, request: Request):

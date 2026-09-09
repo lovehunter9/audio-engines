@@ -2,15 +2,99 @@
 import logging
 import re
 
-from . import tts_el
+from . import tts_el, tts_long
 
 log = logging.getLogger("audio-firered")
 
-# Official generate_acoustic_edit: X in [0.5, 2.0], step 0.1.
-_SPEED_MIN = 0.5
-_SPEED_MAX = 2.0
-_SLOW_RE = re.compile(r"很慢|非常慢|缓慢|very\s+slow|extremely\s+slow", re.I)
-_FAST_RE = re.compile(r"很快|非常快|very\s+fast|extremely\s+fast", re.I)
+# Speed is ffmpeg atempo; generate_acoustic_edit stays off the speak path.
+_SPEED_MIN = 0.25
+_SPEED_MAX = 4.0
+# Speaker boost re-reads this much of the slice before, matching Breeze.
+_CTX_SECONDS = 10.0
+# generate_tts often stops early; do not claim more text than this audio could hold.
+_CHARS_PER_SEC = 6.0
+# Only re-queue leftover text when even a fast reading could not have finished it.
+_FAST_CHARS_PER_SEC = 10.0
+_MIN_OVERLAP = 8
+# Official 80 can glue the next paragraph; unstick on 。 / newline only, not commas.
+_SENT_END = "。．！？!?"
+_SENT_RE = re.compile(r".+?[%s]|.+$" % re.escape(_SENT_END), re.S)
+# FireRed joins at 80 ms; the Breeze 520 ms window is too long here.
+_SLICE_GAP_MS = 80.0
+
+
+def _pause_ms(prev, text):
+    return _SLICE_GAP_MS
+
+
+def _unstick(text):
+    """Keep official / sentence pieces. Only split a glued next sentence or paragraph."""
+    out = []
+    for line in re.split(r"\n+", text or ""):
+        line = line.strip()
+        if not line:
+            continue
+        bits = [p.strip() for p in _SENT_RE.findall(line) if p and p.strip()]
+        out.extend(bits or [line])
+    return out
+
+
+def _strip_ctx_overlap(ctx_text, text):
+    """Drop a shared suffix/prefix pair so the next slice does not speak the tail twice.
+
+    Never return empty: a wiped slice is a skipped sentence. Short matches are
+    punctuation, not a real overlap."""
+    ctx_text = (ctx_text or "").strip()
+    text = (text or "").strip()
+    if not ctx_text or not text:
+        return text
+    max_n = min(len(ctx_text), len(text))
+    for n in range(max_n, _MIN_OVERLAP - 1, -1):
+        if ctx_text[-n:] == text[:n]:
+            rest = text[n:].lstrip()
+            return rest if rest else text
+    return text
+
+
+def _spoken_text(text, wave, sr):
+    """Only the prefix this wave could have covered. A short clip must not carry the rest."""
+    import numpy as np
+
+    text = (text or "").strip()
+    w = np.asarray(wave, dtype="float32").reshape(-1)
+    if not text or not len(w):
+        return ""
+    n = min(len(text), max(0, int(len(w) / float(sr or 1) * _CHARS_PER_SEC)))
+    return text[:n]
+
+
+def _unsaid(text, wave, sr):
+    """Suffix generate_tts never reached. Snap to the last comma or stop in the covered prefix."""
+    import numpy as np
+
+    text = (text or "").strip()
+    w = np.asarray(wave, dtype="float32").reshape(-1)
+    if not text or not len(w):
+        return ""
+    covered = int(len(w) / float(sr or 1) * _FAST_CHARS_PER_SEC)
+    if covered >= max(0, len(text) - 2):
+        return ""
+    prefix = text[:max(1, covered)]
+    cut = 0
+    for i, ch in enumerate(prefix):
+        if ch in "，、" + _SENT_END:
+            cut = i + 1
+    rest = (text[cut:] if cut else text[covered:]).lstrip()
+    if not rest or rest == text or len(rest) < _MIN_OVERLAP:
+        return ""
+    return rest
+
+
+def _queue_rest(sents, i, origin, speak, wave, sr):
+    rest = _unsaid(speak, wave, sr)
+    if rest and rest != speak and len(sents) < origin * 2 + 6:
+        sents.insert(i + 1, rest)
+    return len(sents)
 
 
 def _as_wave(audio, sr):
@@ -35,19 +119,13 @@ def _as_torch(audio):
 
 
 def clamp_speed(x):
-    x = max(_SPEED_MIN, min(_SPEED_MAX, float(x)))
-    return round(x * 10.0) / 10.0
+    return max(_SPEED_MIN, min(_SPEED_MAX, float(x)))
 
 
-def speed_for(instruction=""):
-    """Map a design instruction onto official acoustic-edit speed (0.5–2.0)."""
-    factor = clamp_speed(tts_el.SPEAK_SPEED)
-    text = instruction or ""
-    if _SLOW_RE.search(text):
-        return min(factor, 0.6)
-    if _FAST_RE.search(text):
-        return 1.0
-    return factor
+def tempo_for(speed):
+    """FireRed reads at a machine-gun pace of its own, so --speak-speed sets the baseline
+    the model needs to sound normal, and the caller's EL speed multiplies that."""
+    return clamp_speed(float(tts_el.SPEAK_SPEED) * float(speed if speed is not None else 1.0))
 
 
 def as_tts_triplet(out):
@@ -72,11 +150,18 @@ def patch_backend_tts_triplet():
     return wrapped
 
 
+def _seed_kw(kn):
+    """Absent means absent: the model then uses the seed its authors wrote for it."""
+    return {} if kn.seed is None else {"seed": int(kn.seed)}
+
+
 class FireRedBackend:
     sample_rate = 24000
     uses_shared_pack = True
-    # generate_tts has no instruction; design-identity cards keep generate_voice_design + plan, clones speak the wav.
-    prefer_design_speak = True
+    # Designs speak the approved sample; re-designing per reading is a different speaker.
+    prefer_design_speak = False
+    # A design blurb describes the speaker, not how to read this sentence.
+    card_instruction_is_direction = False
 
     def __init__(self, model):
         self.model = model
@@ -91,120 +176,256 @@ class FireRedBackend:
         return tts_el.premade_cards(self, "firered")
 
     def _sentences(self, text):
-        """Official core splits at token_max_n=80 and runs wetext. Keep that."""
+        """Keep official TN/80 split, then unstick a glued next sentence or paragraph."""
         apply = getattr(self.model, "_apply_frontend", None)
-        if apply is None:
-            return [text]
-        _joined, _lang, sentences = apply(text)
-        return [s for s in (sentences or []) if s and str(s).strip()] or [text]
+        chunks = []
+        if apply is not None:
+            _joined, _lang, parts = apply(text)
+            chunks = [str(p).strip() for p in (parts or []) if p and str(p).strip()]
+        if not chunks:
+            return _unstick(text) or [text]
+        out = []
+        for p in chunks:
+            out.extend(_unstick(p) or [p])
+        return out or [text]
 
-    def _join(self, waves, sr, fade_ms=50.0):
+    def _join(self, waves, sr, text="", texts=None):
+        # Official 50 ms fade. Do not insert the 520 ms Breeze sentence window.
         import numpy as np
 
-        if len(waves) == 1:
-            return waves[0], sr
-        try:
-            import torch
-            from fireredtts3.core import cross_fade
+        raw = [np.asarray(w, dtype="float32").reshape(-1) for w in waves]
+        last = len(raw) - 1
+        parts = []
+        for i, w in enumerate(raw):
+            wave = w if i == last else tts_long.trim_tail(w, sr)
+            if not len(wave):
+                continue
+            prev = texts[i] if texts and i < len(texts) else ""
+            parts.append((wave, prev))
+        if not parts:
+            return np.zeros(0, dtype="float32"), sr
+        if len(parts) == 1:
+            return parts[0][0], sr
+        fade = max(1, int(tts_long.JOIN_FADE_MS / 1000.0 * sr))
+        out = parts[0][0]
+        for i, (wave, _prev) in enumerate(parts[1:], 1):
+            gap_ms = _pause_ms(parts[i - 1][1], text)
+            gap = np.zeros(max(0, int(gap_ms / 1000.0 * sr)), dtype="float32")
+            out = np.concatenate([out, gap, tts_long.fade_head(wave, fade)])
+        return np.clip(out, -1.0, 1.0), sr
 
-            out = _as_torch(waves[0])
-            fade = int(fade_ms / 1000.0 * sr)
-            for wave in waves[1:]:
-                out = cross_fade(out, _as_torch(wave), fade)
-            return _as_wave(out, sr)
-        except Exception:
-            return np.concatenate([np.asarray(w, dtype="float32").reshape(-1) for w in waves]), sr
+    def _pace(self, audio, sr, speed):
+        return tts_long.pace(audio, sr, tempo_for(speed))
 
-    def _pace(self, audio, sr, instruction="", speed=None):
-        factor = clamp_speed(speed) if speed is not None else speed_for(instruction)
-        if abs(factor - 1.0) < 0.05:
-            return audio, sr
-        # Official example: "adjust the speed to 0.5x"; max_gen_steps is 400.
-        paced, out_sr = self.model.generate_acoustic_edit(
-            instruction="adjust the speed to {:.1f}x".format(factor),
-            audio_in=_as_torch(audio),
-            audio_in_sr=int(sr),
-            n_timesteps=int(tts_el.N_TIMESTEPS),
-            inference_cfg=1.2,
-            seed=int(tts_el.SEED),
-        )
-        log.info("acoustic_edit speed %.1fx after synth", factor)
-        return _as_wave(paced, out_sr)
+    def _carry(self, text, wave, sr):
+        """Keep the tail of what this wave actually covered, not the whole slice text."""
+        spoken = _spoken_text(text, wave, sr)
+        if not spoken:
+            return None
+        tail_text, tail = tts_long.tail_pair(spoken, wave, sr, _CTX_SECONDS)
+        return (tail_text, tail, int(sr)) if len(tail) and tail_text else None
+
+    def _ctx_prompt(self, audio, sr, text, carry):
+        """SB stays on official generate_tts. Tail first, clean reference last.
+
+        DiT only conditions on the last 8 latent frames. Putting the synthetic
+        tail at the end made each slice continue from degraded audio (the metal).
+        The backbone still sees the tail earlier in the prompt for continuity."""
+        import numpy as np
+
+        tail_text, tail, tail_sr = carry
+        head = tts_long.collect(audio)
+        sr_out = int(sr)
+        if int(tail_sr) != sr_out:
+            tail, _ = tts_el._resample(tts_long.collect(tail), int(tail_sr), sr_out)
+        return (tail_text or "") + (text or ""), _as_torch(np.concatenate([tail, head])), sr_out
+
+    def _speak(self, waves, i, total, text, tempo, prev=""):
+        """One finished slice on its way out: silence trimmed, pause ahead of it, faded
+        in, and through the one tempo filter that spans the whole reading."""
+        import numpy as np
+
+        wave, sr = waves
+        if i + 1 < total:
+            wave = tts_long.trim_tail(wave, sr)
+        if i:
+            gap = max(0, int(_pause_ms(prev, text) / 1000.0 * sr))
+            if gap:
+                for paced in tempo.write(np.zeros(gap, dtype="float32"), sr):
+                    yield paced, self.sample_rate
+            wave = tts_long.fade_head(wave, max(1, int(tts_long.JOIN_FADE_MS / 1000.0 * sr)))
+        for paced in tempo.write(wave, sr):
+            yield paced, self.sample_rate
 
     def iter_clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         # Split here so cancel/progress land between sentences; stream paces each slice.
         ctx = kw.get("ctx")
+        direction = str(kw.get("instruction") or "").strip()
+        if direction:
+            # Clone has no instruction+reference mode; direction is ignored.
+            log.warning("voice direction ignored on a cloned voice: %r", direction[:60])
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
-                                     str(kw.get("instruction") or ""), text=text)
+                                     direction, text=text,
+                                     include_speed_direction=False)
         already = hasattr(self.model, "_apply_frontend")
         sents = self._sentences(text)
-        total = len(sents)
+        origin = len(sents)
+        total = origin
         prompt = _as_torch(prompt_audio)
         extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
         pace_each = bool(kw.get("pace_each"))
-        for i, sent in enumerate(sents):
-            tts_el.job_tick(ctx, i, total)
-            audio, sr, _ = as_tts_triplet(self.model.generate_tts(
-                prompt_text=prompt_text or "",
-                prompt_audio=prompt,
-                prompt_audio_sr=int(prompt_sr),
-                text=sent,
-                n_timesteps=int(tts_el.N_TIMESTEPS),
-                inference_cfg=float(kn.cfg),
-                seed=int(kn.seed),
-                **extra,
-            ))
-            wave, sr_out = _as_wave(audio, sr)
-            if pace_each:
-                wave, sr_out = self._pace(wave, sr_out, instruction=kn.instruction, speed=kn.speed)
-            tts_el.job_tick(ctx, i + 1, total)
-            yield wave, sr_out
+        tempo = tts_long.TempoStream(self.sample_rate, tempo_for(kn.speed)) if pace_each else None
+        carry = None
+        spans = []
+        prev = ""
+        slice_out = kw.get("slice_out")
+        try:
+            i = 0
+            while i < len(sents):
+                sent = sents[i]
+                total = len(sents)
+                tts_el.job_tick(ctx, i, total)
+                p_text, p_audio, p_sr = prompt_text or "", prompt, int(prompt_sr)
+                speak = sent
+                if carry is not None:
+                    speak = _strip_ctx_overlap(carry[0], sent)
+                    p_text, p_audio, p_sr = self._ctx_prompt(
+                        prompt_audio, prompt_sr, prompt_text, carry)
+                audio, sr, _ = as_tts_triplet(self.model.generate_tts(
+                    prompt_text=p_text,
+                    prompt_audio=p_audio,
+                    prompt_audio_sr=p_sr,
+                    text=speak,
+                    n_timesteps=int(tts_el.N_TIMESTEPS),
+                    inference_cfg=float(kn.cfg),
+                    **_seed_kw(kn),
+                    **extra,
+                ))
+                wave, sr_out = _as_wave(audio, sr)
+                spans.append(len(wave) / float(sr_out or 1))
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                if kn.context and i + 1 < total:
+                    carry = self._carry(speak, wave, sr_out)
+                if slice_out is not None:
+                    slice_out.append(speak)
+                if tempo is not None:
+                    yield from self._speak((wave, sr_out), i, total, text, tempo, prev)
+                else:
+                    yield wave, sr_out
+                prev = sent
+                i += 1
+                tts_el.job_tick(ctx, i, total)
+            if tempo is not None:
+                for paced in tempo.finish():
+                    yield paced, self.sample_rate
+        finally:
+            if tempo is not None:
+                tempo.abort()
+            if spans:
+                # generate_tts can stop at max_gen_steps with no signal that the sentence was cut.
+                log.info("firered read %d slices, %.1fs total, longest %.1fs, boost=%s",
+                         len(spans), sum(spans), max(spans), bool(kn.context))
+            tts_long.vram(log, "clone")
         tts_el.job_tick(ctx, total, total)
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         waves, sr_out = [], self.sample_rate
         kw = dict(kw)
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
-                                     str(kw.get("instruction") or ""), text=text)
+                                     str(kw.get("instruction") or ""), text=text,
+                                     include_speed_direction=False)
         kw["pace_each"] = False
+        slice_out = []
+        kw["slice_out"] = slice_out
         for wave, sr_out in self.iter_clone(text, prompt_audio, prompt_sr, prompt_text, **kw):
             waves.append(wave)
-        return self._pace(*self._join(waves, sr_out),
-                          instruction=kn.instruction, speed=kn.speed)
+        joined, sr_out = self._join(waves, sr_out, text, texts=slice_out)
+        return self._pace(joined, sr_out, kn.speed)
 
     def iter_design(self, instruction, text, **kw):
         # Re-plan once and reuse it so later sentences keep 口音 / 语速 / 音色.
         ctx = kw.get("ctx")
         extra_out = kw.get("extra_out")
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
-                                     instruction, text=text)
+                                     instruction, text=text, include_speed_direction=False,
+                                     seed_jitter=int(kw.get("seed_jitter") or 0))
         speak_as = kn.instruction or instruction
         plan_out = None
         already = hasattr(self.model, "_apply_frontend")
         sents = self._sentences(text)
-        total = len(sents)
+        origin = len(sents)
+        total = origin
         extra = {"do_clean": False, "do_tn": False, "do_split": False} if already else {}
         pace_each = bool(kw.get("pace_each"))
-        for i, sent in enumerate(sents):
-            tts_el.job_tick(ctx, i, total, stage="design")
-            audio, sr, seg_plan = self.model.generate_voice_design(
-                instruction=speak_as,
-                text=sent,
-                n_timesteps=int(tts_el.N_TIMESTEPS),
-                inference_cfg=float(kn.cfg),
-                seed=int(kn.seed),
-                **extra,
-            )
-            if seg_plan and plan_out is None:
-                plan_out = seg_plan
-                speak_as = seg_plan
-                if extra_out is not None:
-                    extra_out.append({"plan": plan_out})
-            wave, sr_out = _as_wave(audio, sr)
-            if pace_each:
-                wave, sr_out = self._pace(wave, sr_out, kn.instruction, speed=kn.speed)
-            tts_el.job_tick(ctx, i + 1, total, stage="design")
-            yield wave, sr_out
+        tempo = tts_long.TempoStream(self.sample_rate, tempo_for(kn.speed)) if pace_each else None
+        slice_out = kw.get("slice_out")
+        # Later design slices speak against the first slice; generate_tts cannot take instruction+reference.
+        anchor = None
+        carry = None
+        prev = ""
+        try:
+            i = 0
+            while i < len(sents):
+                sent = sents[i]
+                total = len(sents)
+                tts_el.job_tick(ctx, i, total, stage="design")
+                seg_plan = None
+                speak = sent
+                if kn.context and anchor is not None:
+                    a_text, a_wave, a_sr = anchor
+                    if carry is None:
+                        p_text, p_audio, p_sr = a_text, _as_torch(a_wave), a_sr
+                    else:
+                        speak = _strip_ctx_overlap(carry[0], sent)
+                        p_text, p_audio, p_sr = self._ctx_prompt(a_wave, a_sr, a_text, carry)
+                    audio, sr, _ = as_tts_triplet(self.model.generate_tts(
+                        prompt_text=p_text,
+                        prompt_audio=p_audio,
+                        prompt_audio_sr=p_sr,
+                        text=speak,
+                        n_timesteps=int(tts_el.N_TIMESTEPS),
+                        inference_cfg=float(kn.cfg),
+                        **_seed_kw(kn),
+                        **extra,
+                    ))
+                else:
+                    audio, sr, seg_plan = self.model.generate_voice_design(
+                        instruction=speak_as,
+                        text=sent,
+                        n_timesteps=int(tts_el.N_TIMESTEPS),
+                        inference_cfg=float(kn.cfg),
+                        **_seed_kw(kn),
+                        **extra,
+                    )
+                if seg_plan and plan_out is None:
+                    plan_out = seg_plan
+                    speak_as = seg_plan
+                    if extra_out is not None:
+                        extra_out.append({"plan": plan_out})
+                wave, sr_out = _as_wave(audio, sr)
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                if anchor is None:
+                    anchor = (speak, wave, sr_out)
+                elif kn.context and i + 1 < total:
+                    carry = self._carry(speak, wave, sr_out)
+                if slice_out is not None:
+                    slice_out.append(speak)
+                if tempo is not None:
+                    yield from self._speak((wave, sr_out), i, total, text, tempo, prev)
+                else:
+                    yield wave, sr_out
+                prev = sent
+                i += 1
+                tts_el.job_tick(ctx, i, total, stage="design")
+            if tempo is not None:
+                for paced in tempo.finish():
+                    yield paced, self.sample_rate
+        finally:
+            if tempo is not None:
+                tempo.abort()
+            if total > 1:
+                log.info("firered designed %d slices, anchored=%s", total, bool(kn.context))
+            tts_long.vram(log, "design")
         tts_el.job_tick(ctx, total, total, stage="design")
         if extra_out is not None and not extra_out:
             extra_out.append({"plan": plan_out})
@@ -214,21 +435,22 @@ class FireRedBackend:
         waves, sr_out = [], self.sample_rate
         kw = dict(kw)
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
-                                     instruction, text=text)
+                                     instruction, text=text, include_speed_direction=False,
+                                     seed_jitter=int(kw.get("seed_jitter") or 0))
         kw["pace_each"] = False
         kw["extra_out"] = extra_box
+        slice_out = []
+        kw["slice_out"] = slice_out
         for wave, sr_out in self.iter_design(instruction, text, **kw):
             waves.append(wave)
-        wave, sr = self._join(waves, sr_out)
-        wave, sr = self._pace(wave, sr, kn.instruction, speed=kn.speed)
+        wave, sr = self._join(waves, sr_out, text, texts=slice_out)
+        wave, sr = self._pace(wave, sr, kn.speed)
         extra = extra_box[0] if extra_box else {"plan": None}
         return wave, sr, extra
 
     def stream_gap(self, text, sr):
-        import numpy as np
-
-        n = max(0, int(0.050 * sr))
-        return np.zeros(n, dtype="float32")
+        # Slice pauses are laid inside iter_clone / iter_design so they share the tempo filter.
+        return None
 
 
 def _load():
@@ -241,6 +463,7 @@ def _load():
     instruct = FireRedTTS3Instruct(
         path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
     )
+    tts_long.vram(log, "loaded")
     return FireRedBackend(instruct)
 
 
