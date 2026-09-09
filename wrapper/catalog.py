@@ -19,6 +19,13 @@ BASES = {
     "nemo": [
         (("diar_stream",), "diar_stream"),
     ],
+    # speakrs: the pyannote community-1 pipeline rewritten in Rust, inference on ONNX Runtime.
+    # A separate image because its dependencies share nothing with the torch stack, per the one
+    # image per engine family rule. pyannote keeps its own diar: which of the two an installation
+    # runs is decided by the image its chart deploys, not here.
+    "speakrs": [
+        (("diar",), "diar_speakrs"),
+    ],
     # Qwen3-TTS in-process: which routes a checkpoint can honour is read off the weights
     # (e.g. CustomVoice -> tts, Base -> tts_clone, VoiceDesign -> tts, etc.).
     "qwen3tts": [
@@ -54,6 +61,7 @@ FAMILIES = {
     "whisper": "faster-whisper",
     "vad": "silero-vad",
     "diar": "pyannote",
+    "diar_speakrs": "speakrs",
     "embed": "pyannote",
     "enhance": "speechbrain",
     "diar_stream": "nemo-sortformer",
@@ -87,6 +95,10 @@ _MOUNTS = {
         ("POST", "/v1/audio/vad", "Voice activity detection (speech segments)", True),
     ],
     ("diar", "diar"): [
+        ("POST", "/v1/audio/diarization",
+         "Speaker diarization (who spoke when; exclusive=1 for non-overlapping turns)", True),
+    ],
+    ("diar_speakrs", "diar"): [
         ("POST", "/v1/audio/diarization",
          "Speaker diarization (who spoke when; exclusive=1 for non-overlapping turns)", True),
     ],

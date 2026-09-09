@@ -43,8 +43,36 @@ def memory_fraction(reserve=0.85, lo=0.1, hi=0.9):
     return min(hi, max(lo, quota * reserve / visible))
 
 
+def _nvml_stats():
+    """(used, total, util) straight from NVML, or None when there is no device to ask.
+
+    The fallback for an image that carries no torch: an engine whose runtime links CUDA itself
+    (ggml, ONNX Runtime) has no reason to install a whole torch stack for four gauges. NVML also
+    needs no CUDA context of its own, so it costs no GPU memory to ask.
+    """
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        try:
+            if pynvml.nvmlDeviceGetCount() <= 0:
+                return None
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            try:
+                util = float(pynvml.nvmlDeviceGetUtilizationRates(handle).gpu) / 100.0
+            except Exception:
+                util = 0.0
+            return int(mem.used), int(mem.total), util
+        finally:
+            pynvml.nvmlShutdown()
+    except Exception:
+        return None
+
+
 def gpu_metrics_text():
     present, used, total, util = 0, 0, 0, 0.0
+    slice_scoped = True
     try:
         import torch
 
@@ -59,6 +87,18 @@ def gpu_metrics_text():
                 util = 0.0
     except Exception:
         present = 0
+    if not present:
+        # torch is absent or saw no device; ask NVML before reporting zeros. Zeros would read as
+        # "a card is there and idle", which is the one answer that must not be guessed.
+        #
+        # The two paths do NOT measure the same thing, and the help text says so rather than
+        # pretending otherwise: torch goes through the CUDA driver, which is where memory
+        # virtualization intercepts, so it sees this container's slice. NVML is a different
+        # interface and may report the whole card, including memory other pods are using.
+        stats = _nvml_stats()
+        if stats is not None:
+            present, slice_scoped = 1, False
+            used, total, util = stats
     lines = []
 
     def g(name, help_, val):
@@ -66,9 +106,12 @@ def gpu_metrics_text():
         lines.append("# TYPE %s gauge" % name)
         lines.append("%s %s" % (name, val))
 
+    scope = ("on this engine's device slice" if slice_scoped
+             else "on the whole device as NVML reports it, which may include other pods")
     g("gpu_present", "1 if a CUDA device is visible to this engine, else 0", present)
-    g("gpu_mem_used_bytes", "GPU memory in use on this engine's device slice (bytes)", used)
-    g("gpu_mem_total_bytes", "GPU memory CUDA reports to this engine (bytes)", total)
+    g("gpu_mem_used_bytes", "GPU memory in use %s (bytes)" % scope, used)
+    g("gpu_mem_total_bytes", "GPU memory reported to this engine %s (bytes)"
+      % ("by CUDA" if slice_scoped else "by NVML"), total)
     g("gpu_util_ratio", "GPU compute utilization 0..1 (0 when unavailable)", "%.4f" % util)
     return "\n".join(lines) + "\n"
 

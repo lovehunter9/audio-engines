@@ -19,6 +19,8 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
         "async_supported": True,
     },
     ("diar", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
+    # Same capability, same route, different engine: speakrs serves diar from its own image.
+    ("diar_speakrs", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("diar_stream", "diar_stream", "WS", "/v1/audio/diarize/stream"): {
         "async_supported": False,
     },
@@ -385,6 +387,19 @@ class RuntimeHelperTest(unittest.TestCase):
                 "supports": ["align"],
                 "watchdog": "Qwen3-ForcedAligner",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
+            },
+            "diar_speakrs": {
+                "supports": ["diar"],
+                "watchdog": "speakrs engine",
+                "model": "speakrs-community-1",
+                "repo": "speakrs-community-1",
+                "state": {
+                    "ready": False,
+                    "error": None,
+                    "pipeline": None,
+                    "device": "cpu",
+                    "params": {},
+                },
             },
             "diar": {
                 "supports": ["diar"],

@@ -344,6 +344,162 @@ def t_diar():
               r.status_code == 400, (r.status_code, r.text[:120]))
 
 
+def t_diar_speakrs_models_dir():
+    import shutil
+    import tempfile
+    from wrapper.caps import diar_speakrs as ds
+
+    root = tempfile.mkdtemp(prefix="hfcache-")
+    try:
+        os.environ["HF_HUB_CACHE"] = root
+        repo = "avencera/speakrs-models"
+        snaps = os.path.join(root, "models--avencera--speakrs-models", "snapshots")
+        # The engine is Rust and has no huggingface_hub to resolve this layout for it.
+        for name, when in (("older", 1000000), ("newer", 2000000)):
+            d = os.path.join(snaps, name)
+            os.makedirs(d)
+            os.utime(d, (when, when))
+        # llm-init writes the resolved path for engines that share its run directory. Guessing
+        # when we have been told is how the two answers drift apart.
+        told_dir = tempfile.mkdtemp(prefix="rundir-")
+        try:
+            with open(os.path.join(told_dir, "model_path"), "w") as f:
+                f.write("/somewhere/llm-init/decided\n")
+            ds.RUN_DIR = told_dir
+            check("diar_speakrs prefers the path llm-init wrote over the cache layout",
+                  ds._models_dir(repo) == "/somewhere/llm-init/decided", ds._models_dir(repo))
+        finally:
+            shutil.rmtree(told_dir, ignore_errors=True)
+            ds.RUN_DIR = "/nonexistent-run-dir"
+
+        check("diar_speakrs resolves the HF snapshot directory",
+              ds._models_dir(repo) == os.path.join(snaps, "newer"), ds._models_dir(repo))
+
+        # A re-download leaves the previous revision in place; the fresh one is the one llm-init
+        # signalled on, so picking the older would load weights nobody asked for.
+        shutil.rmtree(snaps)
+        flat = os.path.join(root, "models--avencera--speakrs-models")
+        check("diar_speakrs falls back to the repo directory when there are no snapshots",
+              ds._models_dir(repo) == flat, ds._models_dir(repo))
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+        os.environ.pop("HF_HUB_CACHE", None)
+
+
+def t_diar_speakrs():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import diar_speakrs as ds
+
+    sent = []
+
+    def fake_run(payload):
+        sent.append(payload)
+        return {"ok": True, "device": "cuda",
+                "segments": [[0.0, 1.5, "SPEAKER_00"], [1.5, 3.0, "SPEAKER_01"]]}
+
+    ds._child.run = fake_run
+    ds._state.update(ready=True, error=None, device="cuda", params={})
+    with TestClient(ds.build_app(["diar"])) as c:
+        advertises_tasks(c, "diar_speakrs")
+        doc = both_ways(c, "/v1/audio/diarization", WAV, {}, "diar_speakrs",
+                        meters=("input",))
+        # both_ways hands back the task document; the diarization itself is its result.
+        body = doc["result"]
+        check("diar_speakrs names the speakers it found",
+              body["num_speakers"] == 2 and body["speakers"] == ["SPEAKER_00", "SPEAKER_01"],
+              (body["num_speakers"], body["speakers"]))
+        check("diar_speakrs reports the device the engine ran on",
+              body["device"] == "cuda", body["device"])
+
+        # The whole reason this engine cannot stand in for pyannote everywhere. Accepting the
+        # constraint and quietly ignoring it would leave a caller unable to tell that it was
+        # dropped, so the only honest answer is a 400 naming the parameters it refused.
+        for field in ("num_speakers", "min_speakers", "max_speakers"):
+            r = c.post("/v1/audio/diarization", files=WAV, data={field: "3"})
+            check("diar_speakrs refuses %s rather than ignoring it" % field,
+                  r.status_code == 400 and field in r.json()["detail"],
+                  (r.status_code, r.json()))
+
+        # Seconds on the wire, frames to the engine: every other engine in this repo states
+        # durations in seconds, and speakrs states them in frames.
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV, data={"min_duration_off": "0.5"})
+        check("diar_speakrs converts seconds to frames for the engine",
+              sent[-1]["min_duration_off_frames"] == 30, sent[-1]["min_duration_off_frames"])
+
+        # 🔴 Unset and zero must stay different: speakrs' fast modes default this filter to 3
+        # frames, so sending 0 for "the caller said nothing" would silently switch it off.
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs sends null, not 0, for a knob nobody set",
+              sent[-1]["min_duration_off_frames"] is None, sent[-1]["min_duration_off_frames"])
+        sent.clear()
+        c.post("/v1/audio/diarization", files=WAV, data={"min_duration_off": "0"})
+        check("diar_speakrs sends 0 when a caller really asked for 0",
+              sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
+
+        # The engine holds the whole clip decoded, so an unbounded upload is an OOM kill, which
+        # reaches the caller as a dropped connection rather than as something it can act on.
+        ds.MAX_AUDIO_SECONDS = 1.0
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs refuses audio longer than it can hold",
+              r.status_code == 413 and "memory" in r.json()["detail"],
+              (r.status_code, r.json()))
+        r = c.post("/v1/audio/diarization", files=WAV, data={"async": "1"})
+        check("diar_speakrs refuses it before a task exists, not inside one",
+              r.status_code == 413, (r.status_code, r.text[:120]))
+        ds.MAX_AUDIO_SECONDS = 14400.0
+
+        # A container the header readers cannot parse may still be one the engine decodes, and it
+        # is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
+        # demuxers, so it measures what the engine can read.
+        real_probe, real_sub = ds.probe_seconds, ds.subprocess
+        ds.probe_seconds = lambda _p: None
+        ds.subprocess = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="7200.0\n", stderr=""),
+            SubprocessError=real_sub.SubprocessError)
+        ds.MAX_AUDIO_SECONDS = 60.0
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs falls back to ffprobe when the header readers cannot",
+              r.status_code == 413 and "7200s" in r.json()["detail"],
+              (r.status_code, r.json()))
+
+        # ffprobe absent or unable: unknown stays a real answer rather than a refusal, because a
+        # file nothing can measure is one the engine will fail on cheaply, before spending memory.
+        ds.subprocess = types.SimpleNamespace(
+            run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="bad"),
+            SubprocessError=real_sub.SubprocessError)
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs lets an unmeasurable clip through rather than refusing it",
+              r.status_code == 200, (r.status_code, r.text[:120]))
+        ds.probe_seconds, ds.subprocess = real_probe, real_sub
+        ds.MAX_AUDIO_SECONDS = 14400.0
+
+        sent.clear()
+        doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
+        check("diar_speakrs passes exclusive through and echoes what ran",
+              sent[-1]["exclusive"] is True and doc["exclusive"] is True,
+              (sent[-1]["exclusive"], doc["exclusive"]))
+
+        # A dead child must read as "not ready", never as an empty result: zero segments is a
+        # legitimate answer for silent audio, so it can never double as an error.
+        def dead(_payload):
+            raise RuntimeError("engine process exited with code 1")
+
+        ds._child.run = dead
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs fails the job when the engine is gone",
+              r.status_code == 500, (r.status_code, r.text[:120]))
+
+    ds._child.run = fake_run
+    ds._state.update(ready=False, error="engine failed to load the model")
+    with TestClient(ds.build_app(["diar"])) as c:
+        r = c.post("/v1/audio/diarization", files=WAV)
+        check("diar_speakrs 503s while the engine is loading",
+              r.status_code == 503 and "load" in r.json()["detail"],
+              (r.status_code, r.json()))
+
+
 def t_embed():
     from fastapi.testclient import TestClient
     from wrapper.caps import embed
@@ -2497,7 +2653,9 @@ def main():
                            ("voice settings map", t_voice_settings_map, "firered"),
                            ("firered settings apply", t_firered_settings_apply, "firered"),
                            ("firered design instruction", t_firered_design_instruction, "firered"),
-                           ("firered design speak", t_firered_design_speak, "firered")):
+                           ("firered design speak", t_firered_design_speak, "firered"),
+                           ("diar_speakrs", t_diar_speakrs, "speakrs"),
+                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:
