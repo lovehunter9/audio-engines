@@ -1977,12 +1977,9 @@ def t_breeze_pace():
 
     stream = TempoStream(24000, 2.0)
     streamed = []
-    live_chunks = 0
     try:
         for chunk in np.array_split(tone, 7):
-            ready = stream.write(chunk, 24000)
-            live_chunks += len(ready)
-            streamed.extend(ready)
+            streamed.extend(stream.write(chunk, 24000))
         streamed.extend(stream.finish())
     finally:
         stream.abort()
@@ -1990,6 +1987,22 @@ def t_breeze_pace():
     check("tempo state crosses input chunk boundaries",
           len(streamed) == len(paced) and np.allclose(streamed, paced),
           (len(streamed), len(paced)))
+
+    # A separate stream, because this one is about latency rather than samples:
+    # audio has to come back out while the request is still being spoken, not
+    # only once the whole utterance has been synthesized. Each write drains for
+    # ten milliseconds, which a loaded machine can lose every time, so keep
+    # feeding until something comes back or the deadline says the filter really
+    # is holding everything to the end.
+    live = TempoStream(24000, 2.0)
+    live_chunks = 0
+    deadline = time.time() + 10.0
+    try:
+        while live_chunks == 0 and time.time() < deadline:
+            for chunk in np.array_split(tone, 7):
+                live_chunks += len(live.write(chunk, 24000))
+    finally:
+        live.abort()
     check("tempo emits before the request finishes", live_chunks > 0, live_chunks)
     check("atempo extremes use portable chains",
           _atempo_chain(0.25) == "atempo=0.5,atempo=0.5"
