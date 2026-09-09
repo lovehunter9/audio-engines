@@ -20,7 +20,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs, cache_dir
-from ..audioio import probe_seconds, spill, unlink
+from ..audioio import unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-diar-speakrs")
@@ -106,11 +107,9 @@ MIN_DURATION_ON = _args.text("--min-duration-on")
 EXCLUSIVE = _args.switch("--exclusive", False)
 # speakrs takes the whole clip as one resident f32 buffer -- run(audio: &[f32]) -- so memory grows
 # with duration and nothing streams: an hour is 230 MB, three hours 690 MB, on top of the model.
-# Passing the file path instead of the bytes saved one copy, not the buffer itself. Unbounded, a
-# long enough upload gets the container OOM-killed, which reaches the caller as a dropped
-# connection rather than an error it can act on. Four hours is past any real meeting; a deployment
-# that knows its own memory ceiling can move it.
-MAX_AUDIO_SECONDS = _args.number("--max-audio-seconds", 14400)
+# Passing the file path instead of the bytes saved one copy, not the buffer itself. Four hours is
+# past any real meeting; a deployment that knows its own memory ceiling can move it.
+BOUNDS = Bounds(_args, seconds=14400)
 _args.warn_unclaimed(log)
 
 # Wire name -> (child field, converter). Kept in one place so the request path, the ENGINE_ARGS
@@ -122,38 +121,6 @@ TUNABLES = {
 }
 
 _state = _runtime.state
-
-
-def _duration(path):
-    """Seconds, preferring the header readers and falling back to ffprobe.
-
-    The two disagree by construction, and that gap is the whole reason for the fallback:
-    probe_seconds reads through soundfile and the stdlib wave module, while the engine decodes
-    through ffmpeg. A container the first pair cannot parse may be one the engine reads happily,
-    and that is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
-    demuxers, so what it can measure is what the engine can decode.
-
-    Local rather than in audioio because it is the only cap that needs it: every other one decodes
-    the clip itself and knows the length from the samples.
-
-    None survives as an answer. ffprobe may be absent from an image, and a file neither reader can
-    measure is one the engine almost certainly cannot decode either -- it fails on its own, before
-    any memory is spent.
-    """
-    seconds = probe_seconds(path)
-    if seconds is not None:
-        return seconds
-    try:
-        out = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", path],
-            capture_output=True, text=True, timeout=30)
-        if out.returncode == 0:
-            return round(float(out.stdout.strip()), 3)
-        log.info("ffprobe could not measure %s: %s", path, (out.stderr or "").strip()[:200])
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        log.info("ffprobe unusable (%s); duration stays unknown", e)
-    return None
 
 
 class _Child:
@@ -329,20 +296,9 @@ def build_app(supports):
         tuning = _tunables({"min_duration_off": min_duration_off,
                             "min_duration_on": min_duration_on,
                             "clustering_threshold": clustering_threshold})
-        data = await file.read()
-        path = await _to_thread(spill, data, file.filename)
-        # Read off the header, not a decode: this cap never holds samples, the child does. None is
-        # a real answer -- a container this cannot probe may still be one the engine reads -- so it
-        # passes rather than being refused, and bills as "not measured".
-        seconds = await _to_thread(_duration, path)
-        if seconds is not None and seconds > MAX_AUDIO_SECONDS:
-            unlink(path)
-            raise HTTPException(status_code=413,
-                                detail="audio is %.0fs; this engine holds the whole clip in memory "
-                                       "and accepts at most %.0fs" % (seconds, MAX_AUDIO_SECONDS))
-        if seconds is None:
-            log.warning("could not read the duration of %s: it is neither billed nor length-checked",
-                        file.filename)
+        # Read off the header, not a decode: this cap never holds samples, the child does.
+        path, seconds = await BOUNDS.spill(
+            file, "this engine holds the whole clip in memory")
 
         def _work(ctx):
             ctx.meter(input_seconds=seconds)
@@ -373,12 +329,6 @@ def build_app(supports):
                                     cleanup=lambda: unlink(path), fail="diarization failed")
 
     return app
-
-
-async def _to_thread(fn, *a):
-    import asyncio
-
-    return await asyncio.to_thread(fn, *a)
 
 
 def run(supports):

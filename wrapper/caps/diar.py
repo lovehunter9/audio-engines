@@ -1,5 +1,4 @@
 # Speaker diarization with pyannote.audio.
-import asyncio
 import contextlib
 import copy
 import math
@@ -13,7 +12,8 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics, quota_mib
 from ..contract import register, EngineArgs
-from ..audioio import decode, spill, unlink
+from ..audioio import decode, unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-diar")
@@ -34,6 +34,10 @@ EMB_BATCH = _args.text("--embedding-batch-size", "auto")
 MIN_DURATION_OFF = _args.text("--min-duration-off")
 CLUSTERING_THRESHOLD = _args.text("--clustering-threshold")
 EXCLUSIVE = _args.switch("--exclusive", False)
+# The clip is decoded whole into a float32 tensor and moved to the device, and the clustering is
+# over the whole recording, so nothing about this pipeline streams. Same ceiling as the speakrs
+# diarizer, so the two engines behind one capability refuse the same recording.
+BOUNDS = Bounds(_args, seconds=14400)
 _args.warn_unclaimed(log)
 
 # Wire name -> where it lives in the pipeline's nested parameter dict.
@@ -307,8 +311,8 @@ def build_app(supports):
         want_exclusive = EXCLUSIVE if exclusive is None else tasks.truthy(exclusive)
         tuning = _floats({"min_duration_off": min_duration_off,
                           "clustering_threshold": clustering_threshold}, _state["params"])
-        data = await file.read()
-        path = await asyncio.to_thread(spill, data, file.filename)
+        path, _seconds = await BOUNDS.spill(
+            file, "this pipeline decodes the whole clip onto the device")
 
         def _work(ctx):
             kw = {}

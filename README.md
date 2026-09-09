@@ -69,6 +69,16 @@ understands under the **upstream's own spelling** — `--gpu-memory-utilization`
 `--max-model-len`, `--beam-size`, `--compute-type` — and whatever is left over is
 handed to a child engine's argv, or logged as ignored where there is no child.
 
+Two flags are claimed by every capability that holds a whole clip at once — `diar`
+(both engines), `speaker_embed`, `enhance`, `vad`. `--max-upload-mb` (default 1024)
+bounds the request while it is still arriving; `--max-audio-seconds` bounds what it
+decodes into, read off the header rather than by decoding it, and defaults to four
+hours everywhere except `speaker_embed`, which embeds the whole clip in one pass and
+stops at thirty minutes. Past either, the answer is `413`. Without them a long enough
+upload is an OOM kill, which reaches the caller as a dropped connection rather than
+as something it can act on. A deployment that knows its own memory ceiling moves
+them; see `wrapper/limits.py`.
+
 A new knob is therefore a new flag, never a new env. The only envs an engine reads
 are the platform's own (`MODEL_NAME`, `MODEL_SOURCE`, `MODEL_SUPPORTS`,
 `ENGINE_PORT`, `ENGINE_ARGS`, `REQUIRED_GPU_MEMORY`, `HF_*`, `LOG_LEVEL`) plus

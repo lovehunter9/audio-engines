@@ -1,12 +1,14 @@
+import glob
 import importlib
 import json
 import os
 import re
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from wrapper import catalog, contract, gpu, tasks
@@ -609,8 +611,6 @@ class SharedHelperTest(unittest.TestCase):
         self.assertEqual(upsampled.tolist(), [0.0, 0.5, 1.0, 1.0])
 
     def test_segments_parser_keeps_existing_400_details(self):
-        from fastapi import HTTPException
-
         from wrapper.batch import parse_segments
 
         try:
@@ -628,6 +628,103 @@ class SharedHelperTest(unittest.TestCase):
         self.assertEqual(not_array.exception.status_code, 400)
         self.assertEqual(not_array.exception.detail, "`segments` must be a JSON array")
         self.assertEqual(parse_segments('[{"start": 0, "end": 1}]'), [{"start": 0, "end": 1}])
+
+
+class _FakeUpload:
+    """An UploadFile as far as the spill path is concerned: a name and chunked reads."""
+
+    def __init__(self, total, filename="clip.wav", chunk=None):
+        self.filename = filename
+        self._left = total
+        self._chunk = chunk or (1 << 20)
+        self.reads = 0
+
+    async def read(self, size=-1):
+        self.reads += 1
+        want = self._chunk if size is None or size < 0 else min(size, self._chunk)
+        want = min(want, self._left)
+        self._left -= want
+        return b"\0" * want
+
+
+class UploadBoundsTest(unittest.IsolatedAsyncioTestCase):
+    """What one request may bring to the caps that hold a whole clip at once.
+
+    Both bounds have to be enforced before the thing they are protecting against has happened.
+    A byte count checked after `await file.read()` is a check on memory already spent, and a
+    duration checked after the decode is one the OOM kill beat to it.
+    """
+
+    def _bounds(self, raw):
+        from wrapper.contract import EngineArgs
+        from wrapper.limits import Bounds
+
+        return Bounds(EngineArgs(raw), seconds=14400)
+
+    async def test_an_oversized_upload_stops_being_read_when_it_crosses_the_limit(self):
+        from wrapper import limits
+
+        bounds = self._bounds("--max-upload-mb 1")
+        upload = _FakeUpload(total=64 * limits.MIB, chunk=1 << 20)
+        with self.assertRaises(HTTPException) as refused:
+            await bounds.spill(upload)
+        self.assertEqual(refused.exception.status_code, 413)
+        # Two reads: the one that fits and the one that crosses. The other 62 MiB never arrive,
+        # which is the difference between this and a size check on an already-read body.
+        self.assertEqual(upload.reads, 2)
+
+    async def test_a_refused_upload_leaves_nothing_behind(self):
+        from wrapper import limits
+
+        bounds = self._bounds("--max-upload-mb 1")
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "upload-*")))
+        with self.assertRaises(HTTPException):
+            await bounds.spill(_FakeUpload(total=4 * limits.MIB))
+        after = set(glob.glob(os.path.join(tempfile.gettempdir(), "upload-*")))
+        self.assertEqual(after - before, set())
+
+    async def test_a_short_file_that_decodes_into_hours_is_refused_on_its_duration(self):
+        """The byte bound cannot catch this one: a compressed container is a fraction of its PCM."""
+        bounds = self._bounds("--max-audio-seconds 60")
+        upload = _FakeUpload(total=4096, filename="meeting.opus")
+        with mock.patch("wrapper.limits.duration", return_value=9000.0):
+            with self.assertRaises(HTTPException) as refused:
+                await bounds.spill(upload)
+        self.assertEqual(refused.exception.status_code, 413)
+        self.assertIn("9000s", refused.exception.detail)
+        self.assertIn("60s", refused.exception.detail)
+
+    async def test_an_unmeasurable_container_is_passed_through_rather_than_refused(self):
+        """A reader that cannot measure a file is not evidence about the engine that decodes it."""
+        from wrapper.audioio import unlink
+
+        bounds = self._bounds("--max-audio-seconds 60")
+        with mock.patch("wrapper.limits.duration", return_value=None):
+            path, seconds = await bounds.spill(_FakeUpload(total=2048))
+        try:
+            self.assertIsNone(seconds)
+            self.assertTrue(os.path.exists(path))
+        finally:
+            unlink(path)
+
+    async def test_the_bounds_are_engine_args_a_deployment_can_move(self):
+        bounds = self._bounds("--max-audio-seconds 30 --max-upload-mb 7")
+        self.assertEqual(bounds.seconds, 30.0)
+        self.assertEqual(bounds.megabytes, 7.0)
+
+    def test_every_cap_that_holds_a_whole_clip_declares_a_bound(self):
+        """The point of the shared helper is that no cap here is the one that forgot.
+
+        Read as source rather than imported: these modules import torch and pyannote at module
+        scope, which the test image does not carry.
+        """
+        for module in ("diar", "diar_speakrs", "embed", "enhance", "vad"):
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            with open(os.path.join(root, "wrapper", "caps", module + ".py")) as f:
+                src = f.read()
+            self.assertIn("Bounds(_args", src, "%s declares no upload bound" % module)
+            self.assertNotIn("await file.read()", src,
+                             "%s reads the whole upload before bounding it" % module)
 
 
 class TaskDurationTest(unittest.TestCase):

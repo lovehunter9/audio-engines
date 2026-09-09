@@ -439,8 +439,11 @@ def t_diar_speakrs():
               sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
 
         # The engine holds the whole clip decoded, so an unbounded upload is an OOM kill, which
-        # reaches the caller as a dropped connection rather than as something it can act on.
-        ds.MAX_AUDIO_SECONDS = 1.0
+        # reaches the caller as a dropped connection rather than as something it can act on. The
+        # bound lives in wrapper/limits.py now; every cap that holds a whole clip shares it.
+        from wrapper import limits
+
+        ds.BOUNDS.seconds = 1.0
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs refuses audio longer than it can hold",
               r.status_code == 413 and "memory" in r.json()["detail"],
@@ -448,17 +451,17 @@ def t_diar_speakrs():
         r = c.post("/v1/audio/diarization", files=WAV, data={"async": "1"})
         check("diar_speakrs refuses it before a task exists, not inside one",
               r.status_code == 413, (r.status_code, r.text[:120]))
-        ds.MAX_AUDIO_SECONDS = 14400.0
+        ds.BOUNDS.seconds = 14400.0
 
         # A container the header readers cannot parse may still be one the engine decodes, and it
         # is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
         # demuxers, so it measures what the engine can read.
-        real_probe, real_sub = ds.probe_seconds, ds.subprocess
-        ds.probe_seconds = lambda _p: None
-        ds.subprocess = types.SimpleNamespace(
+        real_probe, real_sub = limits.probe_seconds, limits.subprocess
+        limits.probe_seconds = lambda _p: None
+        limits.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(returncode=0, stdout="7200.0\n", stderr=""),
             SubprocessError=real_sub.SubprocessError)
-        ds.MAX_AUDIO_SECONDS = 60.0
+        ds.BOUNDS.seconds = 60.0
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs falls back to ffprobe when the header readers cannot",
               r.status_code == 413 and "7200s" in r.json()["detail"],
@@ -466,14 +469,24 @@ def t_diar_speakrs():
 
         # ffprobe absent or unable: unknown stays a real answer rather than a refusal, because a
         # file nothing can measure is one the engine will fail on cheaply, before spending memory.
-        ds.subprocess = types.SimpleNamespace(
+        limits.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="bad"),
             SubprocessError=real_sub.SubprocessError)
         r = c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs lets an unmeasurable clip through rather than refusing it",
               r.status_code == 200, (r.status_code, r.text[:120]))
-        ds.probe_seconds, ds.subprocess = real_probe, real_sub
-        ds.MAX_AUDIO_SECONDS = 14400.0
+        limits.probe_seconds, limits.subprocess = real_probe, real_sub
+        ds.BOUNDS.seconds = 14400.0
+
+        # An upload too big to hold is refused while it is still arriving; the seconds bound
+        # cannot help here, because nothing has been written to measure yet.
+        ds.BOUNDS.megabytes = 0.001  # ~1 KiB
+        big = {"file": ("big.wav", b"RIFF" + b"\0" * 4096, "audio/wav")}
+        r = c.post("/v1/audio/diarization", files=big)
+        check("diar_speakrs refuses an upload past its byte bound",
+              r.status_code == 413 and "MiB" in r.json()["detail"],
+              (r.status_code, r.json()))
+        ds.BOUNDS.megabytes = 1024.0
 
         sent.clear()
         doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()

@@ -1,5 +1,4 @@
 # Speaker embedding with pyannote.audio: one fixed-length vector for the whole clip.
-import asyncio
 import os
 import logging
 
@@ -8,8 +7,9 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
-from ..contract import register
-from ..audioio import decode, spill, unlink
+from ..contract import register, EngineArgs
+from ..audioio import decode, unlink
+from ..limits import Bounds
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-embed")
@@ -18,6 +18,14 @@ _runtime = Runtime(inference=None, device="cpu", dim=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
+
+# window="whole" is one forward pass over the entire clip, with no chunking anywhere to bound it,
+# which makes this the least tolerant cap here. The answer is one vector for the whole recording,
+# so the long clips the other caps are sized for have no meaning at this endpoint: an enrollment
+# sample is seconds, and half an hour is already far past anything a speaker vector says.
+_args = EngineArgs()
+BOUNDS = Bounds(_args, seconds=1800)
+_args.warn_unclaimed(log)
 
 _state = _runtime.state
 
@@ -58,8 +66,8 @@ def build_app(supports):
                          async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
-        data = await file.read()
-        path = await asyncio.to_thread(spill, data, file.filename)
+        path, _seconds = await BOUNDS.spill(
+            file, "this model embeds the whole clip in one pass")
 
         def _work(ctx):
             import numpy as np
