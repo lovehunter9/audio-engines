@@ -512,6 +512,77 @@ def t_diar_speakrs():
               r.status_code == 503 and "load" in r.json()["detail"],
               (r.status_code, r.json()))
 
+    # Everything this container serves lives in that child, so a pod that outlives it is an
+    # endpoint answering 503 to everyone until somebody notices and deletes it. The load
+    # watchdog does not cover this: it only fires while a model is still loading.
+    from wrapper import watchdog
+
+    exits, real_exit, real_grace = [], ds._exit, ds._EXIT_GRACE_S
+    ds._exit, ds._EXIT_GRACE_S = exits.append, 0.0
+    ds._child._proc = types.SimpleNamespace(wait=lambda: 9)
+    try:
+        ds._stopping.clear()
+        ds._child._reap()
+        check("diar_speakrs exits so k8s restarts a container whose engine died",
+              exits == [watchdog.EXIT_CODE], exits)
+
+        # The same exit during a rollout would turn every normal shutdown into an error.
+        exits.clear()
+        ds._stopping.set()
+        ds._child._reap()
+        check("diar_speakrs does not call a shutdown a crash", exits == [], exits)
+    finally:
+        ds._exit, ds._EXIT_GRACE_S = real_exit, real_grace
+        ds._stopping.clear()
+        ds._child._proc = None
+
+
+def t_diar_stream_offline():
+    """llm-init downloads, the engine loads offline.
+
+    Reaching for the hub when the cache is empty fails minutes later with a network error that
+    names none of the actual fault, and on the machines where it succeeds the engine serves
+    weights nobody downloaded.
+    """
+    from wrapper.caps import diar_stream
+
+    # The image carries torch and NeMo; a test box does not, and the point here is which branch
+    # _load takes before it ever touches a model.
+    fetched = []
+    mods = {
+        "torch": {"cuda": types.SimpleNamespace(is_available=lambda: False)},
+        "nemo": {},
+        "nemo.collections": {},
+        "nemo.collections.asr": {},
+        "nemo.collections.asr.models": {
+            "SortformerEncLabelModel": types.SimpleNamespace(
+                restore_from=lambda **k: None,
+                from_pretrained=lambda *a, **k: fetched.append(a) or None)},
+    }
+    saved = {name: sys.modules.get(name) for name in mods}
+    for name, attrs in mods.items():
+        mod = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        sys.modules[name] = mod
+
+    real_find = diar_stream._find_nemo
+    diar_stream._find_nemo = lambda: None
+    try:
+        diar_stream._state["error"] = None
+        diar_stream._load()
+    finally:
+        diar_stream._find_nemo = real_find
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+    check("diar_stream does not reach for the hub when the cache is empty", fetched == [], fetched)
+    err = diar_stream._state["error"] or ""
+    check("diar_stream fails naming the empty cache rather than reaching for the hub",
+          "shared cache" in err and "offline" in err, err[:160])
+
 
 def t_embed():
     from fastapi.testclient import TestClient
@@ -3068,7 +3139,8 @@ def main():
                            ("firered design instruction", t_firered_design_instruction, "firered"),
                            ("firered design speak", t_firered_design_speak, "firered"),
                            ("diar_speakrs", t_diar_speakrs, "speakrs"),
-                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs")):
+                           ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs"),
+                           ("diar_stream offline", t_diar_stream_offline, "nemo")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

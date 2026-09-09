@@ -7,7 +7,8 @@
 # Why a pipe and a file path, not a socket and a request body: the upload is already spilled to a
 # temp file by the time a job runs, and both processes see the same filesystem, so the path moves
 # no audio. This removes one copy of a hundreds-of-megabytes clip, not the memory it needs -- the
-# engine still holds the whole thing decoded, which is what MAX_AUDIO_SECONDS below bounds.
+# engine still holds the whole thing decoded, which is what BOUNDS below caps.
+import contextlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import time
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .. import tasks
+from .. import watchdog
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs, cache_dir
 from ..audioio import unlink
@@ -157,6 +159,10 @@ class _Child:
             self._argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=None,  # inherit: the child's log belongs in the container log, interleaved
             text=True, bufsize=1,
+            # Its own process group, so the SIGTERM that ends this pod reaches the child through
+            # us rather than beside us. Otherwise a normal shutdown and a crash look identical
+            # from the reaper, and it has to treat one of them wrongly.
+            start_new_session=True,
         )
         threading.Thread(target=self._reap, daemon=True).start()
         hello = self._readline("startup")
@@ -166,16 +172,29 @@ class _Child:
         return hello
 
     def _reap(self):
-        """A child that dies takes the engine with it; say so loudly rather than hanging.
+        """A child that dies takes the engine with it, and nothing here can put it back.
 
-        Restarting it here would be wrong: the model takes a long time to load, so a crash loop
-        would answer 503 for minutes while looking alive. The watchdog already handles a process
-        that is neither ready nor failed, and k8s rebuilds the container.
+        Everything this container serves runs in that process, so once it is gone the pod is an
+        endpoint that answers 503 to every request, forever: the load watchdog only fires while a
+        model is still loading, and a wrapper that once loaded is "failed with a reason", which
+        is deliberately left alone. Recovery took someone noticing and deleting the pod.
+
+        Exiting hands that to the thing that already does it. k8s restarts the container, backs
+        off if the crash repeats, and a CrashLoopBackOff says what a permanently unhealthy
+        endpoint does not. Reloading in-process was the alternative and is worse in the same
+        way the old comment says: minutes of model load behind a port that reports ready.
         """
         rc = self._proc.wait()
         _state["ready"] = False
         _state["error"] = "engine process exited with code %d" % rc
-        log.error("engine process exited with code %d", rc)
+        if _stopping.is_set():
+            log.info("engine process exited with code %d during shutdown", rc)
+            return
+        log.error("engine process exited with code %d; exiting so the container is restarted", rc)
+        # Long enough for the job that was in flight to come back as a 500 rather than as a
+        # connection the caller has to guess about.
+        time.sleep(_EXIT_GRACE_S)
+        _exit(watchdog.EXIT_CODE)
 
     def _readline(self, what):
         line = self._proc.stdout.readline()
@@ -208,6 +227,14 @@ class _Child:
 
 _child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE,
                  "--models-dir", _models_dir(MODEL_REPO)])
+
+# Set once this process is on its way out, so the child dying with us is not read as a crash.
+_stopping = threading.Event()
+
+# Indirections, so a test can watch the decision without the test runner being the thing that
+# exits, and without waiting out the grace period.
+_exit = os._exit
+_EXIT_GRACE_S = 2.0
 
 
 def _seed():
@@ -263,8 +290,16 @@ def _load():
         log.exception("engine load failed: %s", e)
 
 
+@contextlib.asynccontextmanager
+async def _lifespan(_app):
+    yield
+    # Uvicorn runs this when it starts shutting down, which is the only warning the reaper gets
+    # that the exit it is about to see is ours.
+    _stopping.set()
+
+
 def build_app(supports):
-    app = FastAPI(title="audio-diarization (speakrs)")
+    app = FastAPI(title="audio-diarization (speakrs)", lifespan=_lifespan)
     mount_metrics(app)
 
     register(app, model_name=MODEL_NAME, module="diar_speakrs", served=supports, repo=MODEL_REPO,

@@ -80,13 +80,20 @@ def _load():
 
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         path = _find_nemo()
-        if path:
-            _p("restoring Sortformer from cached .nemo: %s" % path)
-            model = SortformerEncLabelModel.restore_from(
-                restore_path=path, map_location=dev, strict=False)
-        else:
-            _p("no cached .nemo found; from_pretrained(%s) (needs network/token)" % MODEL_REPO)
-            model = SortformerEncLabelModel.from_pretrained(MODEL_REPO, map_location=dev)
+        if not path:
+            # llm-init downloads, the engine loads offline. Reaching for the hub here breaks that
+            # split in the least visible way available: the pod has no token and usually no route
+            # out, so the download fails minutes later with a network error, and the real fault --
+            # weights that never landed in the shared cache -- is not in that message anywhere.
+            # Where it does succeed it is worse, because the engine then serves weights nobody
+            # downloaded, under whatever revision the hub is on today.
+            raise RuntimeError(
+                "no %s .nemo in the shared cache; llm-init downloads the weights and this "
+                "engine loads them offline. Check that the model finished downloading and "
+                "that HF_HUB_CACHE points at the same volume llm-init wrote to." % MODEL_REPO)
+        _p("restoring Sortformer from cached .nemo: %s" % path)
+        model = SortformerEncLabelModel.restore_from(
+            restore_path=path, map_location=dev, strict=False)
         model.eval()
         sm = model.sortformer_modules
         sm.chunk_len = CHUNK_LEN
