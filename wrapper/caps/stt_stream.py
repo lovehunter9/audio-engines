@@ -55,6 +55,15 @@ BATCH_ONE_SHOT = _args.switch("--batch-one-shot")
 # qwen3-asr, and one instance is one model). A different card does not change them; a new
 # qwen3-asr release can, so re-measure on a model upgrade rather than assuming they carry
 # over. The override exists so that a re-measured value can ship without a new image.
+# Backstop for builds whose vLLM predates the detector: 0.16 on arm64 has no
+# RepetitionDetectionParams, the lazy import says so and serving continues -- and there the
+# runaway span has nothing bounding it. A cap proportional to the audio bounds it. Where the
+# detector does run this adds nothing (13.0s with both against 13.2s for the detector alone)
+# and its headroom is a guess, 12 tokens per audio second over a measured 3.4, which a
+# faster-talking corpus would turn into truncated speech. So it applies only where the
+# detector cannot: no flag, no choice to get wrong, and the right behaviour on both arches.
+TOKENS_PER_AUDIO_SEC = 12
+TOKENS_FLOOR = 64
 REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
 REPETITION_OFF = _args.switch("--no-repetition-detection")
 REPETITION_OVERRIDE = (_args.text("--repetition-detection", "") or "").strip()
@@ -240,6 +249,15 @@ def _apply_repetition(sp):
     return restore
 
 
+def _token_budget(seconds):
+    # Asks _repetition_params() rather than the flags: what matters is whether the detector
+    # is actually running, and a build without the class decides that for us.
+    if _repetition_params() is not None:
+        return OFFLINE_MAX_TOKENS
+    return max(TOKENS_FLOOR,
+               min(OFFLINE_MAX_TOKENS, int(seconds * TOKENS_PER_AUDIO_SEC) + TOKENS_FLOOR))
+
+
 def _offline_transcribe(audio):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
@@ -248,7 +266,7 @@ def _offline_transcribe(audio):
     restore_rep = None
     try:
         if sp is not None:
-            sp.max_tokens = OFFLINE_MAX_TOKENS
+            sp.max_tokens = _token_budget(len(audio) / 16000.0)
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
@@ -275,7 +293,9 @@ def _offline_transcribe_many(clips):
     restore_rep = None
     try:
         if sp is not None:
-            sp.max_tokens = OFFLINE_MAX_TOKENS
+            # One SamplingParams covers the whole call, so the budget follows the
+            # longest clip in the batch.
+            sp.max_tokens = _token_budget(max(len(c) for c in clips) / 16000.0)
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=[(c, 16000) for c in clips],
                                  language=None, return_time_stamps=False)
