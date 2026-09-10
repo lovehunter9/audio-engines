@@ -300,7 +300,8 @@ async def _lifespan(_app):
 
 def build_app(supports):
     app = FastAPI(title="audio-diarization (speakrs)", lifespan=_lifespan)
-    mount_metrics(app)
+    # This image carries no torch, so the gauges come from NVML; see gpu.mount_metrics.
+    mount_metrics(app, nvml_fallback=True)
 
     register(app, model_name=MODEL_NAME, module="diar_speakrs", served=supports, repo=MODEL_REPO,
              is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True,
