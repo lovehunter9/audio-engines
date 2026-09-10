@@ -30,30 +30,28 @@ Every image MUST expose, on the engine port (default `8000`):
 | `GET /health` \| `/healthz` \| `/readyz` | The engine's own health (200 ready / 503 loading). |
 | `POST\|GET /v1/audio/*` | The actual capability endpoints; an unsupported op returns its own `404`. |
 
-Engine-spec v2 has `schema_version: 2`, a non-empty `model`,
+Engine-spec reports `schema_version: 1` with a non-empty `model`,
 `implements` (what the image can do), `declares` (what `MODEL_SUPPORTS`
 asked for), `serves` (what this process mounted), and a non-empty
-`endpoints[]`. Each usable endpoint has `method`, `path`, `available`, and
-the stable `operation_id`, `protocol`, `transport`, sync/async flags,
-input/output modalities, parameters, formats, sample rates, limits and
-resource scope. Optional `capability`, `description`, `reason`, `deprecated`
-and extension fields remain additive. `base` is
-an audio extension naming the engine family; it is not required by the shared
-contract, so OCR legitimately omits it. The Intel `ov` image still bakes
-`AUDIO_BASE=ov` for dispatch, but `/api/engine-spec` reports `base: qwen` —
-the same routes — so llm-init treats the report as recognized and drops the
-LLM static catalog (chat / embeddings / Anthropic). Model Console continues accepting v1
-reports while Router clients migrate to the v2 operation directory.
+`endpoints[]`. Chart-pinned `llm-init` **v1.7.12** only treats
+`schema_version == 1` as authoritative and then drops undeclared static
+proxy rows (chat / embeddings / Anthropic). A `schema_version: 2` report
+is still relayed as extra Engine-reported rows, but **does not** remove
+that fallback — which is why an Intel image that only bumped `base` to
+`qwen` left Model Console unchanged. Newer llm-init accepts 1 or 2.
 
-A structurally valid recognized report with at least one usable endpoint row is
-authoritative for `llm-init`'s proxied data-plane catalog: undeclared static
-proxy rows are removed. Reports with an unknown or missing version can still
-relay well-formed endpoint rows for compatibility, but cannot remove the
-static fallback; malformed v1 reports are ignored. If the engine is
-unavailable, the static `MODEL_MODE=audio` / `MODEL_MODE=ocr` task directory
-remains visible. A reported `model` that differs from configured `MODEL_NAME`
-is added to `/api/endpoints` `reasons` as a diagnostic and does not by itself
-change `available`.
+Each usable endpoint has `method`, `path`, `available`, and the additive
+`operation_id`, `protocol`, `transport`, sync/async flags, input/output
+modalities, parameters, formats, sample rates, limits and resource scope.
+Optional `capability`, `description`, `reason`, `deprecated` and extension
+fields remain additive. `base` is an audio extension naming the engine
+family; it is not required by the shared contract, so OCR legitimately
+omits it. The Intel `ov` image still bakes `AUDIO_BASE=ov` for dispatch,
+but `/api/engine-spec` reports `base: qwen` (same routes as the CUDA
+image). If the engine is unavailable, the static `MODEL_MODE=audio` /
+`MODEL_MODE=ocr` task directory remains visible. A reported `model` that
+differs from configured `MODEL_NAME` is added to `/api/endpoints`
+`reasons` as a diagnostic and does not by itself change `available`.
 
 `llm-init` does the model **download** (into the shared HF cache) and writes a
 sentinel; the engine container waits for that sentinel, then serves **offline**

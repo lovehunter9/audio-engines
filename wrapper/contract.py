@@ -50,7 +50,8 @@ def base_name():
     return (os.environ.get("AUDIO_BASE") or "").strip()
 
 
-# llm-init drops its LLM static catalog only for families it already knows.
+# Display family only. Chart-pinned llm-init v1.7.12 drops the LLM catalog
+# when schema_version is 1, not because base is a known family name.
 # ov is the Intel build of the same qwen routes; dispatch still keys on AUDIO_BASE.
 _SPEC_BASE = {"ov": "qwen"}
 
@@ -340,7 +341,10 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     declared, _bad = parse_supports()
     capabilities = [COARSE_CAPABILITY] + list(served)
     spec = {
-        "schema_version": 2,
+        # v1: llm-init v1.7.12 only treats schema_version==1 as authoritative
+        # and will then drop undeclared static proxy rows (chat / embeddings).
+        # Newer llm-init still accepts 1. Row-level operation_id etc. stay additive.
+        "schema_version": 1,
         "base": spec_base(),
         "model": model_name,
         "implements": catalog.implements(base),
