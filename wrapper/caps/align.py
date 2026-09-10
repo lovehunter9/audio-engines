@@ -46,104 +46,108 @@ def _resolve_hf_dir(repo):
     return snapshot_download(**kw)
 
 
-def _resolve_hf_dir_any(*repo_ids):
-    """Try each hub id / local path; llm-init may only have cached the non -hf repo."""
-    last = None
-    for repo in repo_ids:
-        if not repo:
-            continue
-        try:
-            return _resolve_hf_dir(repo)
-        except Exception as e:
-            last = e
-            _p("cache miss for %s: %s" % (repo, e))
-    if last is not None:
-        raise last
-    raise FileNotFoundError("no model repo ids given")
+def _xml_has_input(path, name, limit=1048576):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(limit)
+    except OSError:
+        return False
+    return name.encode("ascii") in head
 
 
-def _ov_hub_id(repo):
-    """OpenVINO export uses the HuggingFace-native forced-aligner checkpoint."""
-    repo = (repo or "").strip().rstrip("/")
-    if repo.endswith("-hf"):
-        return repo
-    if "ForcedAligner" in repo:
-        return repo + "-hf"
-    return repo
-
-
-def _looks_like_ov_aligner_ir(path):
+def _looks_like_ov_ir(path):
+    """Same IR shape as STT: encoder + decoder with beam_idx (asr-with-past)."""
     if not path or not os.path.isdir(path):
         return False
     enc = os.path.join(path, "openvino_encoder_model.xml")
     dec = os.path.join(path, "openvino_decoder_model.xml")
-    return os.path.isfile(enc) and os.path.isfile(dec)
+    if not (os.path.isfile(enc) and os.path.isfile(dec)):
+        return False
+    return _xml_has_input(dec, "beam_idx")
 
 
-def _ensure_ov_aligner(hub_id, device):
-    base = (MODEL_REPO or "").strip().rstrip("/")
-    src = _resolve_hf_dir_any(hub_id, base)
-    ov_dir = os.path.join(src, "openvino")
-    if _looks_like_ov_aligner_ir(ov_dir):
-        return ov_dir, src
+def _ov_export_cmd(src, dest):
+    # Same command as stt_stream: local snapshot cannot infer the HF task.
+    return [
+        "optimum-cli", "export", "openvino",
+        "--model", src,
+        "--task", "automatic-speech-recognition-with-past",
+        "--trust-remote-code",
+        dest,
+    ]
 
-    if os.path.isdir(ov_dir) and not _looks_like_ov_aligner_ir(ov_dir):
+
+def _ensure_ov_ir(src):
+    nested = os.path.join(src, "openvino")
+    if _looks_like_ov_ir(src):
+        return src
+    if _looks_like_ov_ir(nested):
+        return nested
+    dest = nested
+    if os.path.isdir(dest) and not _looks_like_ov_ir(dest):
         import shutil
-        _p("removing unusable export dir %s" % ov_dir)
-        shutil.rmtree(ov_dir)
+        _p("removing unusable export dir %s" % dest)
+        shutil.rmtree(dest)
+    _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
+    os.makedirs(dest, exist_ok=True)
+    import subprocess
 
-    _p("no OpenVINO IR in %s; exporting forced aligner (first start is slow)" % src)
-    os.makedirs(ov_dir, exist_ok=True)
-    offline = os.environ.pop("HF_HUB_OFFLINE", None)
-    try:
-        from optimum.intel import OVModelForQwen3ASRForcedAligner
-
-        kw = dict(export=True, device=device)
-        if HF_TOKEN:
-            kw["token"] = HF_TOKEN
-        export_src = src if os.path.isdir(src) else hub_id
-        try:
-            model = OVModelForQwen3ASRForcedAligner.from_pretrained(export_src, **kw)
-        except Exception as e:
-            if export_src == src and hub_id != src:
-                _p("export from cached %s failed (%s); trying hub %s" % (src, e, hub_id))
-                model = OVModelForQwen3ASRForcedAligner.from_pretrained(hub_id, **kw)
-            else:
-                raise
-        model.save_pretrained(ov_dir)
-        del model
-    finally:
-        if offline is not None:
-            os.environ["HF_HUB_OFFLINE"] = offline
-
-    if not _looks_like_ov_aligner_ir(ov_dir):
+    cmd = _ov_export_cmd(src, dest)
+    _p("running: %s" % " ".join(cmd))
+    subprocess.check_call(cmd)
+    if not _looks_like_ov_ir(dest):
         raise RuntimeError(
-            "optimum export finished but %s is not a forced-aligner OpenVINO IR" % ov_dir
+            "optimum-cli export finished but %s is not a Qwen3 ASR IR "
+            "(need openvino_encoder_model.xml + openvino_decoder_model.xml with beam_idx)"
+            % dest
         )
-    return ov_dir, src
+    return dest
+
+
+def _register_qwen3_asr():
+    from qwen_asr.core.transformers_backend import Qwen3ASRConfig, Qwen3ASRProcessor
+    from transformers import AutoConfig, AutoProcessor
+
+    AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
+    AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
 
 
 def _load_ov():
-    from optimum.intel import OVModelForQwen3ASRForcedAligner
+    from optimum.intel import OVModelForSpeechSeq2Seq
+    from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
     from transformers import AutoProcessor
 
-    hub_id = _ov_hub_id(MODEL_REPO)
+    src = _resolve_hf_dir(MODEL_REPO)
+    model_dir = _ensure_ov_ir(src)
     device = ovutil.device()
-    _p("loading OpenVINO forced aligner hub=%s device=%s" % (hub_id, device))
-    ov_dir, proc_dir = _ensure_ov_aligner(hub_id, device)
+    _p("loading OpenVINO forced aligner src=%s ir=%s device=%s" % (src, model_dir, device))
+    _register_qwen3_asr()
     kw = dict(device=device)
     if HF_TOKEN:
         kw["token"] = HF_TOKEN
-    model = OVModelForQwen3ASRForcedAligner.from_pretrained(ov_dir, **kw)
-    processor = AutoProcessor.from_pretrained(proc_dir)
+    model = OVModelForSpeechSeq2Seq.from_pretrained(model_dir, **kw)
+    processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
+    cfg = getattr(model, "config", None)
+    ts_id = int(getattr(cfg, "timestamp_token_id", 0) or 0)
+    ts_seg = float(getattr(cfg, "timestamp_segment_time", 0) or 0)
+    if not ts_id or not ts_seg:
+        import json
+
+        with open(os.path.join(src, "config.json")) as f:
+            raw = json.load(f)
+        ts_id = ts_id or int(raw.get("timestamp_token_id") or 0)
+        ts_seg = ts_seg or float(raw.get("timestamp_segment_time") or 0)
     _state.update(
         model=model,
         processor=processor,
+        aligner_processor=Qwen3ForceAlignProcessor(),
+        timestamp_token_id=ts_id,
+        timestamp_segment_time=ts_seg,
         device=device,
         backend="openvino",
         ready=True,
     )
-    log.info("Qwen3-ForcedAligner %s loaded (openvino %s)", hub_id, device)
+    log.info("Qwen3-ForcedAligner %s loaded (openvino %s)", MODEL_REPO, device)
 
 
 def _load():
@@ -187,26 +191,45 @@ def _units(res):
              "end": _field(u, "end_time", "end")} for u in (res[0] if res else [])]
 
 
+def _ov_logits(model, inputs):
+    thinker = getattr(model, "thinker", None)
+    if thinker is not None:
+        return thinker(**inputs).logits
+    return model(**inputs).logits
+
+
 def _align_ov(path, text, language):
     import librosa
 
-    wav, sr = librosa.load(path, sr=16000, mono=True)
+    wav, _sr = librosa.load(path, sr=16000, mono=True)
     lang = ovutil.language(language)
-    processor = _state["processor"]
-    model = _state["model"]
-    aligner_inputs, word_lists = processor.prepare_forced_aligner_inputs(
-        audio=wav,
-        transcript=text,
-        language=lang,
+    word_list, aligner_input = _state["aligner_processor"].encode_timestamp(text, lang)
+    inputs = _state["processor"](
+        text=[aligner_input],
+        audio=[wav],
+        return_tensors="pt",
+        padding=True,
     )
-    outputs = model(**aligner_inputs)
-    ts = processor.decode_forced_alignment(
-        logits=outputs.logits,
-        input_ids=aligner_inputs["input_ids"],
-        word_lists=word_lists,
-        timestamp_token_id=model.config.timestamp_token_id,
-    )
-    return [ts[0] if ts else []]
+    logits = _ov_logits(_state["model"], inputs)
+    if hasattr(logits, "argmax") and hasattr(logits, "detach"):
+        output_ids = logits.argmax(dim=-1)
+        input_ids = inputs["input_ids"][0]
+        output_id = output_ids[0]
+        masked = output_id[input_ids == _state["timestamp_token_id"]]
+        timestamp_ms = (masked * _state["timestamp_segment_time"]).detach().cpu().numpy()
+    else:
+        import numpy as np
+
+        output_ids = np.argmax(np.asarray(logits), axis=-1)
+        input_ids = np.asarray(inputs["input_ids"][0])
+        output_id = output_ids[0]
+        masked = output_id[input_ids == _state["timestamp_token_id"]]
+        timestamp_ms = masked * _state["timestamp_segment_time"]
+    items = _state["aligner_processor"].parse_timestamp(word_list, timestamp_ms)
+    for it in items:
+        it["start_time"] = round(it["start_time"] / 1000.0, 3)
+        it["end_time"] = round(it["end_time"] / 1000.0, 3)
+    return [items]
 
 
 def _align(path, text, language):
