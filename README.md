@@ -39,7 +39,10 @@ input/output modalities, parameters, formats, sample rates, limits and
 resource scope. Optional `capability`, `description`, `reason`, `deprecated`
 and extension fields remain additive. `base` is
 an audio extension naming the engine family; it is not required by the shared
-contract, so OCR legitimately omits it. Model Console continues accepting v1
+contract, so OCR legitimately omits it. The Intel `ov` image still bakes
+`AUDIO_BASE=ov` for dispatch, but `/api/engine-spec` reports `base: qwen` —
+the same routes — so llm-init treats the report as recognized and drops the
+LLM static catalog (chat / embeddings / Anthropic). Model Console continues accepting v1
 reports while Router clients migrate to the v2 operation directory.
 
 A structurally valid recognized report with at least one usable endpoint row is
