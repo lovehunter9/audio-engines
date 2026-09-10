@@ -589,9 +589,9 @@ class OpenVINOModeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
                 self.assertEqual(q._ov_device(), "GPU.1")
 
-    def test_ov_base_implements_stt_pair_not_align(self):
-        self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream"])
-        self.assertIsNone(catalog.module_of("ov", "align"))
+    def test_ov_base_implements_stt_and_align(self):
+        self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream", "align"])
+        self.assertEqual(catalog.module_of("ov", "align"), "align")
         self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
 
     def test_nvidia_mode_does_not_flip_cuda_metrics_to_dri(self):

@@ -11,6 +11,7 @@ BASES = {
     # stt_stream is decoder-token streaming after the utterance, not vLLM incremental audio.
     "ov": [
         (("stt", "stt_stream"), "stt_stream"),
+        (("align",), "align"),
     ],
     "fasterwhisper": [
         (("stt",), "whisper"),
