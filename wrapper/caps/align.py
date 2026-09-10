@@ -8,9 +8,10 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .. import hfgate
 from .. import tasks
+from .. import ovutil
 from ..batch import parse_segments
 from ..gpu import mount_metrics
-from ..contract import register
+from ..contract import register, EngineArgs
 from ..audioio import probe_seconds, spill, unlink
 from ..runtime import Runtime
 
@@ -24,7 +25,100 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or None
 # align() REQUIRES language but tolerates an unknown one: "auto" aligns byte-identically to "en".
 DEFAULT_LANGUAGE = "auto"
 
+_args = EngineArgs()
+_args.warn_unclaimed(log)
+
 _state = _runtime.state
+
+
+def _p(msg):
+    print("[align] " + msg, flush=True)
+
+
+def _resolve_hf_dir(repo):
+    if os.path.isdir(repo):
+        return repo
+    from huggingface_hub import snapshot_download
+
+    kw = {"repo_id": repo, "local_files_only": True}
+    if HF_TOKEN:
+        kw["token"] = HF_TOKEN
+    return snapshot_download(**kw)
+
+
+def _ov_hub_id(repo):
+    """OpenVINO export uses the HuggingFace-native forced-aligner checkpoint."""
+    repo = (repo or "").strip().rstrip("/")
+    if repo.endswith("-hf"):
+        return repo
+    if "ForcedAligner" in repo:
+        return repo + "-hf"
+    return repo
+
+
+def _looks_like_ov_aligner_ir(path):
+    if not path or not os.path.isdir(path):
+        return False
+    enc = os.path.join(path, "openvino_encoder_model.xml")
+    dec = os.path.join(path, "openvino_decoder_model.xml")
+    return os.path.isfile(enc) and os.path.isfile(dec)
+
+
+def _ensure_ov_aligner(hub_id, device):
+    src = _resolve_hf_dir(hub_id)
+    ov_dir = os.path.join(src, "openvino")
+    if _looks_like_ov_aligner_ir(ov_dir):
+        return ov_dir, src
+
+    if os.path.isdir(ov_dir) and not _looks_like_ov_aligner_ir(ov_dir):
+        import shutil
+        _p("removing unusable export dir %s" % ov_dir)
+        shutil.rmtree(ov_dir)
+
+    _p("no OpenVINO IR in %s; exporting forced aligner (first start is slow)" % src)
+    os.makedirs(ov_dir, exist_ok=True)
+    offline = os.environ.pop("HF_HUB_OFFLINE", None)
+    try:
+        from optimum.intel import OVModelForQwen3ASRForcedAligner
+
+        kw = dict(export=True, device=device)
+        if HF_TOKEN:
+            kw["token"] = HF_TOKEN
+        model = OVModelForQwen3ASRForcedAligner.from_pretrained(hub_id, **kw)
+        model.save_pretrained(ov_dir)
+        del model
+    finally:
+        if offline is not None:
+            os.environ["HF_HUB_OFFLINE"] = offline
+
+    if not _looks_like_ov_aligner_ir(ov_dir):
+        raise RuntimeError(
+            "optimum export finished but %s is not a forced-aligner OpenVINO IR" % ov_dir
+        )
+    return ov_dir, src
+
+
+def _load_ov():
+    from optimum.intel import OVModelForQwen3ASRForcedAligner
+    from transformers import AutoProcessor
+
+    hub_id = _ov_hub_id(MODEL_REPO)
+    device = ovutil.device()
+    _p("loading OpenVINO forced aligner hub=%s device=%s" % (hub_id, device))
+    ov_dir, proc_dir = _ensure_ov_aligner(hub_id, device)
+    kw = dict(device=device)
+    if HF_TOKEN:
+        kw["token"] = HF_TOKEN
+    model = OVModelForQwen3ASRForcedAligner.from_pretrained(ov_dir, **kw)
+    processor = AutoProcessor.from_pretrained(proc_dir)
+    _state.update(
+        model=model,
+        processor=processor,
+        device=device,
+        backend="openvino",
+        ready=True,
+    )
+    log.info("Qwen3-ForcedAligner %s loaded (openvino %s)", hub_id, device)
 
 
 def _load():
@@ -42,7 +136,7 @@ def _load():
         except TypeError:
             kw.pop("token", None)
             model = Qwen3ForcedAligner.from_pretrained(MODEL_REPO, **kw)
-        _state.update(model=model, device=dev, ready=True)
+        _state.update(model=model, device=dev, backend="torch", ready=True)
         log.info("Qwen3-ForcedAligner %s loaded on %s", MODEL_REPO, dev)
     except Exception as e:
         _state["error"] = hfgate.explain(MODEL_REPO, e)
@@ -68,7 +162,31 @@ def _units(res):
              "end": _field(u, "end_time", "end")} for u in (res[0] if res else [])]
 
 
+def _align_ov(path, text, language):
+    import librosa
+
+    wav, sr = librosa.load(path, sr=16000, mono=True)
+    lang = ovutil.language(language)
+    processor = _state["processor"]
+    model = _state["model"]
+    aligner_inputs, word_lists = processor.prepare_forced_aligner_inputs(
+        audio=wav,
+        transcript=text,
+        language=lang,
+    )
+    outputs = model(**aligner_inputs)
+    ts = processor.decode_forced_alignment(
+        logits=outputs.logits,
+        input_ids=aligner_inputs["input_ids"],
+        word_lists=word_lists,
+        timestamp_token_id=model.config.timestamp_token_id,
+    )
+    return [ts[0] if ts else []]
+
+
 def _align(path, text, language):
+    if _state.get("backend") == "openvino":
+        return _align_ov(path, text, language)
     # Older builds of the aligner take positional arguments only.
     try:
         return _state["model"].align(audio=path, text=text, language=language)
@@ -108,9 +226,6 @@ def build_app(supports):
 
             def _work_batch(ctx):
                 out = []
-                # Metered per slice below, not once for the decoded upload: a
-                # long recording sent with two short segments is two seconds of
-                # alignment, and billing the file would charge for the rest.
                 ctx.progress(stage="align", done=0, total=len(segs))
                 for i, seg in enumerate(segs, 1):
                     ctx.checkpoint()
@@ -156,7 +271,6 @@ def build_app(supports):
         lang = (language or "").strip() or DEFAULT_LANGUAGE
 
         def _work(ctx):
-            # The aligner opens the file itself, so nothing here holds samples to count.
             ctx.meter(input_seconds=probe_seconds(path))
             ctx.progress(ratio=0.0, stage="align")
             res = _align(path, text, lang)
@@ -171,4 +285,21 @@ def build_app(supports):
 
 
 def run(supports):
-    _runtime.serve(supports, _load, build_app, "Qwen3-ForcedAligner")
+    ov = ovutil.is_ov()
+
+    def load():
+        try:
+            (_load_ov if ov else _load)()
+        except Exception as e:
+            _state["error"] = hfgate.explain(MODEL_REPO, e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("forced-aligner load failed: %s", e)
+
+    _runtime.serve(
+        supports,
+        load,
+        build_app,
+        "openvino-genai forced aligner" if ov else "Qwen3-ForcedAligner",
+        load_on_main=ov,
+        **({"timeout_s": 5400} if ov else {}),
+    )
