@@ -1011,5 +1011,50 @@ class BreezeAttnFallbackTest(unittest.TestCase):
         self.assertEqual(_fallback_attn("", "flash_attention_2"), "eager")
 
 
+class NvmlFallbackIsOptIn(unittest.TestCase):
+    """NVML answers only for a caller that asked for it.
+
+    The two sources do not measure the same thing: CUDA is intercepted by memory
+    virtualization and reports this container's slice, NVML reports the whole card. An
+    engine that never asked for the second one must not start reporting it because its
+    image gained nvidia-ml-py -- the gauge names and shape stay identical, so nothing
+    about that day would look like a change.
+    """
+
+    def _gauges(self, text):
+        return {line.split()[0]: line.split()[1]
+                for line in text.splitlines() if line and not line.startswith("#")}
+
+    def _metrics(self, **kwargs):
+        """The body /metrics returns with NVML answering and torch unavailable.
+
+        torch is forced absent rather than left to the host: on a machine that has it with a
+        working card, the torch branch answers first and both cases below would pass without
+        exercising anything.
+        """
+        app = FastAPI()
+        gpu.mount_metrics(app, **kwargs)
+        with mock.patch.dict(sys.modules, {"torch": None}):
+            with mock.patch.object(gpu, "_nvml_stats", return_value=(7, 11, 0.5)):
+                with TestClient(app) as client:
+                    return client.get("/metrics").text
+
+    def test_default_caller_reports_zeros_even_when_nvml_would_answer(self):
+        body = self._metrics()
+        gauges = self._gauges(body)
+        self.assertEqual(gauges["gpu_present"], "0")
+        self.assertEqual(gauges["gpu_mem_used_bytes"], "0")
+        self.assertEqual(gauges["gpu_mem_total_bytes"], "0")
+        self.assertNotIn("as NVML reports it", body)
+
+    def test_opted_in_caller_reports_what_nvml_says(self):
+        body = self._metrics(nvml_fallback=True)
+        gauges = self._gauges(body)
+        self.assertEqual(gauges["gpu_present"], "1")
+        self.assertEqual(gauges["gpu_mem_used_bytes"], "7")
+        self.assertEqual(gauges["gpu_mem_total_bytes"], "11")
+        self.assertIn("as NVML reports it", body)
+
+
 if __name__ == "__main__":
     unittest.main()

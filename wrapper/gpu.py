@@ -70,7 +70,7 @@ def _nvml_stats():
         return None
 
 
-def gpu_metrics_text():
+def gpu_metrics_text(nvml_fallback=False):
     present, used, total, util = 0, 0, 0, 0.0
     slice_scoped = True
     try:
@@ -87,7 +87,7 @@ def gpu_metrics_text():
                 util = 0.0
     except Exception:
         present = 0
-    if not present:
+    if not present and nvml_fallback:
         # torch is absent or saw no device; ask NVML before reporting zeros. Zeros would read as
         # "a card is there and idle", which is the one answer that must not be guessed.
         #
@@ -116,14 +116,20 @@ def gpu_metrics_text():
     return "\n".join(lines) + "\n"
 
 
-def mount_metrics(app):
-    # Register GET /metrics on a FastAPI/Starlette app (Prometheus text exposition).
+def mount_metrics(app, nvml_fallback=False):
+    """Register GET /metrics on a FastAPI/Starlette app (Prometheus text exposition).
+
+    nvml_fallback is opt-in because the two sources do not measure the same thing (see
+    gpu_metrics_text). Defaulting it on would change what an existing engine's gauges mean
+    the day someone adds nvidia-ml-py to its image for an unrelated reason, and nothing
+    about that day would look like a change: same gauge names, same shape, wider scope.
+    """
     from fastapi.responses import PlainTextResponse
 
     @app.get("/metrics")
     def _metrics():
         return PlainTextResponse(
-            gpu_metrics_text(), media_type="text/plain; version=0.0.4"
+            gpu_metrics_text(nvml_fallback), media_type="text/plain; version=0.0.4"
         )
 
     return app

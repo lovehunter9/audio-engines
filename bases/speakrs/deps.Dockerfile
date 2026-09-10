@@ -4,6 +4,16 @@
 # it: the runtime ONNX Runtime links against is chosen there, and a CUDA 12 base under a CUDA 13
 # runtime is missing libcudart.so.13 outright. The two are one change in two files.
 #
+# Which cards that leaves, recorded here because this line is where CUDA 13 is chosen. The two
+# architectures ship different CUDA builds of ONNX Runtime, so the answer differs:
+#   amd64  the official onnxruntime CUDA 13 release. cuobjdump --list-elf on the provider
+#          library reports sm_75 80 86 89 90 100 120 and no PTX at all, so Pascal (GTX 10
+#          series, P100) and Volta (V100) do not run and nothing JITs for them either.
+#   arm64  built for GB10 alone (CMAKE_CUDA_ARCHITECTURES=121); no other arm64 accelerator
+#          is in scope.
+# Neither is a flag that can be flipped here -- both are decided where the engine image is
+# built, in beclab/speakrs-diarization.
+#
 # No torch. speakrs runs on ONNX Runtime, which links CUDA itself, so a torch stack here would be
 # several gigabytes bought for nothing; the four /metrics gauges come from NVML instead (the same
 # trade audio-crispasr already makes).
@@ -16,7 +26,8 @@
 # engine image by digest puts the engine's identity inside the hashed file, so rebuilding the
 # engine forces a new line here, which forces a new deps tag. The chain holds without anyone
 # remembering to bump anything.
-ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:fd39309ba31673d92e0afa10fd7f2e080af32711524dea67baeb2be29443c87c
+# Built from beclab/speakrs-diarization c4044bb, released there as v0.0.30.
+ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:4756962a1db76298f72819dcbfa6999f4a67476ea1c6717796dfbfe351aacc8b
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04
