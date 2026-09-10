@@ -3023,7 +3023,7 @@ def t_ov():
     pcm = b"\x00\x00" * (SR // 10)
     with TestClient(q.build_app(["stt", "stt_stream"])) as c:
         spec = c.get("/api/engine-spec").json()
-        check("ov base does not advertise align",
+        check("ov base does not advertise align when only stt is served",
               not [e for e in spec["endpoints"] if e.get("capability") == "align"])
         check("ov still advertises the WS stream",
               ("WS", "/v1/audio/stream") in mounted(c))

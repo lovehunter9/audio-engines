@@ -47,17 +47,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
-# No CUDA torch. optimum[openvino] may pull a CPU torch; that is only for first-start IR export.
+# No CUDA torch. CPU torch is only for first-start OpenVINO IR export.
 # Do not `pip install --upgrade pip`: Ubuntu's pip has no RECORD file and the upgrade aborts the build.
-# Qwen3-ASR export: GenAI's documented combo is transformers 4.57.6 + qwen-asr (registers
-# model_type qwen3_asr). A floating transformers cannot load the local snapshot, and
-# qwen-asr's vllm extra is NOT installed.
+# ASR: openvino_genai.ASRPipeline + optimum export (qwen3_asr in transformers 5.13).
+# Align: OVModelForQwen3ASRForcedAligner from openvino-dev-samples/optimum-intel until upstream merges.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
         openvino-genai \
-        "optimum[openvino]" \
-        "transformers==4.57.6" \
-        "qwen-asr==0.0.6" \
         huggingface_hub \
         librosa \
         soundfile \
@@ -66,11 +62,19 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         python-multipart \
         websockets \
         numpy \
+        "safetensors>=0.8.0" \
+        "transformers>=5.13,<5.14" \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "qwen-asr==0.0.6" \
     && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+from optimum.intel import OVModelForQwen3ASRForcedAligner; \
 print('openvino', openvino.__version__); \
 print('openvino_genai', getattr(openvino_genai, '__version__', 'ok')); \
 print('transformers', transformers.__version__); \
-print('qwen_asr', 'ok')"
+print('qwen_asr', 'ok'); \
+print('forced_aligner', OVModelForQwen3ASRForcedAligner.__name__)"
 
 LABEL org.opencontainers.image.title="audio-ov-deps" \
       audio.compute_runtime="26.22.38646.4"
