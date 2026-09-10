@@ -105,22 +105,26 @@ def _xml_has_input(path, name, limit=1048576):
 
 
 def _looks_like_ov_ir(path):
-    """Same IR shape as STT: encoder + decoder with beam_idx (asr-with-past)."""
+    """One-shot align IR: encoder + decoder, no stateful KV / beam_idx."""
     if not path or not os.path.isdir(path):
         return False
     enc = os.path.join(path, "openvino_encoder_model.xml")
     dec = os.path.join(path, "openvino_decoder_model.xml")
     if not (os.path.isfile(enc) and os.path.isfile(dec)):
         return False
-    return _xml_has_input(dec, "beam_idx")
+    return not _xml_has_input(dec, "beam_idx")
 
 
 def _ov_export_cmd(src, dest):
-    # Same command as stt_stream: local snapshot cannot infer the HF task.
+    # Align is one thinker forward, not ASR generate. Skip -with-past / stateful
+    # decoder so export fits the 4Gi intel iGPU envelope.
     return [
         "optimum-cli", "export", "openvino",
         "--model", src,
-        "--task", "automatic-speech-recognition-with-past",
+        "--task", "automatic-speech-recognition",
+        "--disable-stateful",
+        "--disable-convert-tokenizer",
+        "--weight-format", "fp16",
         "--trust-remote-code",
         dest,
     ]
@@ -146,8 +150,8 @@ def _ensure_ov_ir(src):
     subprocess.check_call(cmd)
     if not _looks_like_ov_ir(dest):
         raise RuntimeError(
-            "optimum-cli export finished but %s is not a Qwen3 ASR IR "
-            "(need openvino_encoder_model.xml + openvino_decoder_model.xml with beam_idx)"
+            "optimum-cli export finished but %s is not a one-shot align IR "
+            "(need encoder+decoder xml without beam_idx)"
             % dest
         )
     return dest
