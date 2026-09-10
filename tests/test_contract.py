@@ -585,16 +585,20 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.module_of("ov", "align"), "align")
         self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
 
-    def test_ov_engine_spec_reports_qwen_so_llm_init_drops_the_llm_catalog(self):
+    def test_ov_engine_spec_is_v1_so_llm_init_1_7_12_drops_the_llm_catalog(self):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
                                           "MODEL_SUPPORTS": "supports_align"}, clear=False):
             app = FastAPI()
             contract.register(app, model_name="Qwen/Qwen3-ForcedAligner-0.6B",
                               module="align", served=["align"], is_ready=lambda: True)
             spec = TestClient(app).get("/api/engine-spec").json()
+        self.assertEqual(spec["schema_version"], 1)
         self.assertEqual(spec["base"], "qwen")
+        self.assertEqual(spec["model"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertIsInstance(spec["implements"], list)
         self.assertEqual(spec["serves"], ["align"])
         self.assertEqual(spec["declares"], ["align"])
+        self.assertTrue(spec["endpoints"])
         by_cap = {e.get("capability"): e for e in spec["endpoints"] if e.get("capability")}
         self.assertTrue(by_cap["align"]["available"])
         self.assertFalse(by_cap["stt"]["available"])
@@ -1060,7 +1064,7 @@ class EngineSurfaceTest(unittest.TestCase):
     def test_engine_spec_has_the_versioned_contract_shape(self):
         spec = self.client.get("/api/engine-spec").json()
 
-        self.assertEqual(spec["schema_version"], 2)
+        self.assertEqual(spec["schema_version"], 1)
         self.assertEqual(spec["base"], "qwen")
         self.assertEqual(spec["model"], "test-model")
         self.assertEqual(spec["implements"], ["stt", "stt_stream", "align"])
