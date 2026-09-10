@@ -505,9 +505,18 @@ class RuntimeHelperTest(unittest.TestCase):
                 self.assertTrue(callable(args[1]))
                 self.assertTrue(callable(args[2]))
                 self.assertEqual(args[3], expected["watchdog"])
-                if name != "stt_stream":
+                if name not in ("stt_stream", "align"):
                     self.assertIs(args[1], module._load)
                     self.assertIs(args[2], module.build_app)
+                elif name == "align":
+                    with (
+                        mock.patch.object(module, "_load", side_effect=RuntimeError("load failed")),
+                        mock.patch.object(module, "_p"),
+                        mock.patch.object(module.log, "exception"),
+                    ):
+                        args[1]()
+                    self.assertEqual(module._state["error"], "load failed")
+                    self.assertFalse(module._state["ready"])
                 else:
                     with (
                         mock.patch.object(
