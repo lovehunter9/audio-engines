@@ -622,6 +622,42 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertFalse(by_cap["stt"]["available"])
         self.assertFalse(by_cap["stt_stream"]["available"])
 
+    def test_align_ov_export_is_token_classification(self):
+        from wrapper.caps import align as a
+
+        cmd = a._ov_export_cmd("/src", "/dest")
+        self.assertEqual(cmd[cmd.index("--task") + 1], "token-classification")
+        self.assertNotIn("automatic-speech-recognition", cmd)
+
+    def test_align_ov_ir_rejects_asr_task_cache_without_marker(self):
+        from wrapper.caps import align as a
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+            self.assertFalse(a._looks_like_ov_ir(td))
+            with open(os.path.join(td, a._ALIGN_IR_MARKER), "w") as f:
+                f.write(a._ALIGN_IR_TASK + "\n")
+            self.assertTrue(a._looks_like_ov_ir(td))
+
+    def test_ov_logits_calls_the_model_not_the_thinker(self):
+        from wrapper.caps import align as a
+
+        class Fake:
+            def __init__(self):
+                self.thinker = mock.Mock(side_effect=TypeError(
+                    "OVModelForSeq2SeqLM.forward() got multiple values for "
+                    "keyword argument 'input_ids'"))
+
+            def __call__(self, **kw):
+                if "input_ids" in kw and "input_features" in kw:
+                    return mock.Mock(logits="ok")
+                raise TypeError("missing aligner inputs")
+
+        self.assertEqual(a._ov_logits(Fake(), {"input_ids": 1, "input_features": 2}), "ok")
+
     def test_nvidia_mode_does_not_flip_cuda_metrics_to_dri(self):
         text = gpu.gpu_metrics_text()
         self.assertIn("gpu_present 0", text)

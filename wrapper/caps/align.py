@@ -104,30 +104,63 @@ def _xml_has_input(path, name, limit=1048576):
     return name.encode("ascii") in head
 
 
+# Written after a token-classification export. The previous ASR-task IR also
+# has encoder+decoder xml without beam_idx, so filenames alone would keep it.
+_ALIGN_IR_MARKER = "align.task"
+_ALIGN_IR_TASK = "token-classification"
+
+
 def _looks_like_ov_ir(path):
-    """One-shot align IR: encoder + decoder, no stateful KV / beam_idx."""
+    """Forced-aligner IR: token-classification, encoder+decoder, no beam_idx."""
     if not path or not os.path.isdir(path):
+        return False
+    try:
+        with open(os.path.join(path, _ALIGN_IR_MARKER)) as f:
+            task = f.read().strip()
+    except OSError:
+        return False
+    if task != _ALIGN_IR_TASK:
         return False
     enc = os.path.join(path, "openvino_encoder_model.xml")
     dec = os.path.join(path, "openvino_decoder_model.xml")
+    single = os.path.join(path, "openvino_model.xml")
+    if os.path.isfile(single):
+        return True
     if not (os.path.isfile(enc) and os.path.isfile(dec)):
         return False
     return not _xml_has_input(dec, "beam_idx")
 
 
+def _write_align_ir_marker(dest):
+    with open(os.path.join(dest, _ALIGN_IR_MARKER), "w") as f:
+        f.write(_ALIGN_IR_TASK + "\n")
+
+
 def _ov_export_cmd(src, dest):
-    # Align is one thinker forward, not ASR generate. Skip -with-past / stateful
-    # decoder so export fits the 4Gi intel iGPU envelope.
+    # Official OVModelForQwen3ASRForcedAligner._export: token-classification,
+    # no KV cache. ASR-task export built a seq2seq decoder; thinker(**inputs)
+    # then passed input_ids twice into OVModelForSeq2SeqLM.forward.
     return [
         "optimum-cli", "export", "openvino",
         "--model", src,
-        "--task", "automatic-speech-recognition",
+        "--task", "token-classification",
         "--disable-stateful",
         "--disable-convert-tokenizer",
         "--weight-format", "fp16",
         "--trust-remote-code",
         dest,
     ]
+
+
+def _export_align_ir(src, dest):
+    from optimum.intel import OVModelForQwen3ASRForcedAligner
+
+    kw = dict(export=True, device="CPU")
+    if HF_TOKEN:
+        kw["token"] = HF_TOKEN
+    ov = OVModelForQwen3ASRForcedAligner.from_pretrained(src, **kw)
+    ov.save_pretrained(dest)
+    return dest
 
 
 def _ensure_ov_ir(src):
@@ -141,17 +174,22 @@ def _ensure_ov_ir(src):
         import shutil
         _p("removing unusable export dir %s" % dest)
         shutil.rmtree(dest)
-    _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
+    _p("no OpenVINO align IR in %s; exporting to %s (first start is slow)" % (src, dest))
     os.makedirs(dest, exist_ok=True)
-    import subprocess
+    try:
+        _export_align_ir(src, dest)
+    except Exception as e:
+        _p("class export failed (%s); falling back to optimum-cli" % e)
+        import subprocess
 
-    cmd = _ov_export_cmd(src, dest)
-    _p("running: %s" % " ".join(cmd))
-    subprocess.check_call(cmd)
+        cmd = _ov_export_cmd(src, dest)
+        _p("running: %s" % " ".join(cmd))
+        subprocess.check_call(cmd)
+    _write_align_ir_marker(dest)
     if not _looks_like_ov_ir(dest):
         raise RuntimeError(
-            "optimum-cli export finished but %s is not a one-shot align IR "
-            "(need encoder+decoder xml without beam_idx)"
+            "align export finished but %s is not a token-classification IR "
+            "(need align.task marker and encoder/decoder or openvino_model.xml)"
             % dest
         )
     return dest
@@ -166,7 +204,7 @@ def _register_qwen3_asr():
 
 
 def _load_ov():
-    from optimum.intel import OVModelForSpeechSeq2Seq
+    from optimum.intel import OVModelForQwen3ASRForcedAligner
     from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
     from transformers import AutoProcessor
 
@@ -178,7 +216,7 @@ def _load_ov():
     kw = dict(device=device)
     if HF_TOKEN:
         kw["token"] = HF_TOKEN
-    model = OVModelForSpeechSeq2Seq.from_pretrained(model_dir, **kw)
+    model = OVModelForQwen3ASRForcedAligner.from_pretrained(model_dir, **kw)
     processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
     cfg = getattr(model, "config", None)
     ts_id = int(getattr(cfg, "timestamp_token_id", 0) or 0)
@@ -317,10 +355,11 @@ def _units(res):
 
 
 def _ov_logits(model, inputs):
-    thinker = getattr(model, "thinker", None)
-    if thinker is not None:
-        return thinker(**inputs).logits
-    return model(**inputs).logits
+    # ForcedAligner.forward takes input_ids + input_features. Do not call
+    # thinker / SpeechSeq2Seq: that remaps input_features onto input_ids and
+    # then **kwargs still carries the text input_ids.
+    payload = dict(inputs) if not isinstance(inputs, dict) else inputs
+    return model(**payload).logits
 
 
 def _align(path, text, language):
@@ -348,14 +387,29 @@ def _align_ov(path, text, language):
 
     wav, _sr = librosa.load(path, sr=16000, mono=True)
     lang = ovutil.language(language)
+    processor = _state["processor"]
+    model = _state["model"]
+    prepare = getattr(processor, "prepare_forced_aligner_inputs", None)
+    decode = getattr(processor, "decode_forced_alignment", None)
+    if prepare is not None and decode is not None:
+        inputs, word_lists = prepare(audio=wav, transcript=text, language=lang)
+        outputs = model(**dict(inputs))
+        items = decode(
+            logits=outputs.logits,
+            input_ids=inputs["input_ids"],
+            word_lists=word_lists,
+            timestamp_token_id=_state["timestamp_token_id"],
+            timestamp_segment_time=_state["timestamp_segment_time"],
+        )[0]
+        return [items]
     word_list, aligner_input = _state["aligner_processor"].encode_timestamp(text, lang)
-    inputs = _state["processor"](
+    inputs = processor(
         text=[aligner_input],
         audio=[wav],
         return_tensors="pt",
         padding=True,
     )
-    logits = _ov_logits(_state["model"], inputs)
+    logits = _ov_logits(model, inputs)
     if hasattr(logits, "argmax") and hasattr(logits, "detach"):
         output_ids = logits.argmax(dim=-1)
         input_ids = inputs["input_ids"][0]
