@@ -709,9 +709,19 @@ def t_qwen():
     from wrapper.caps import stt_stream as q
 
     q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
+    # One result per clip, saying how many samples that clip carried. The real engine
+    # answers per clip; a stub that answers once hides a group handed back short.
+    calls = []
+
+    def fake_transcribe(audio=None, language=None, return_time_stamps=None):
+        # Two shapes reach here: the serial path hands one (clip, sr) tuple, the batched
+        # path a list of them.
+        clips = audio if isinstance(audio, list) else [audio]
+        calls.append(len(clips))
+        return [types.SimpleNamespace(text=str(len(c))) for c, _sr in clips]
+
     q._state.update(ready=True, asr=types.SimpleNamespace(
-        transcribe=lambda audio=None, language=None, return_time_stamps=None:
-            [types.SimpleNamespace(text="ni hao")],
+        transcribe=fake_transcribe,
         sampling_params=types.SimpleNamespace(max_tokens=32)))
     with TestClient(q.build_app(["stt", "stt_stream"])) as c:
         advertises_tasks(c, "qwen stt")
@@ -725,6 +735,39 @@ def t_qwen():
         both_ways(c, "/v1/audio/transcriptions", WAV,
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
                   meters=("input",))
+        batch_over_cap(c, q, calls)
+
+
+def batch_over_cap(c, q, calls):
+    """A request larger than --batch-max-spans is split, and nothing moves or goes missing.
+
+    The cap bounds memory in one generate() call, so a caller sending more spans than it
+    gets grouped. What the caller must not be able to tell is that this happened: same
+    count, same order, every span answered. Distinct span lengths make each one
+    identifiable, since the stub answers with the sample count it was handed.
+    """
+    spans = [(0.0, 0.1), (0.1, 0.4), (0.4, 0.5), (0.5, 1.1),
+             (1.1, 1.2), (1.2, 1.9), (1.9, 2.0)]
+    want = [str(int(round(e * SR)) - int(round(s * SR))) for s, e in spans]
+    body = ",".join('{"start":%s,"end":%s}' % (s, e) for s, e in spans)
+
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 3
+    try:
+        del calls[:]
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": "[" + body + "]"})
+        doc = r.json()
+    finally:
+        q.MAX_BATCH_SPANS = was
+
+    check("over-cap batch answers 200", r.status_code == 200, r.status_code)
+    got = doc.get("results") or []
+    check("every span comes back", len(got) == len(spans), len(got))
+    check("no span is left unanswered", all(x is not None for x in got), got)
+    check("spans keep the order they were sent in",
+          [x.get("text") for x in got] == want, [x.get("text") for x in got])
+    check("the request was split at the cap, not sent whole", calls == [3, 3, 1], calls)
 
 
 class FakeTTS:

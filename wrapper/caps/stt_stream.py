@@ -35,6 +35,12 @@ ENFORCE_EAGER = _args.switch("--enforce-eager")
 # How many spans one generate() may carry. 1 is one call per span, which is what ships
 # today, so the default changes nothing for anybody.
 #
+# 32 is the value measured to be worth turning on: through note, a 40 minute Chinese
+# meeting spent 144.5s at 1 and 37.9s at 32, inside the 16Gi the chart allots, and the
+# transcript scored 17.32% against 17.21% CER on the corpus TextGrid -- 0.12 points over
+# the same 235 spans. Turning it on by default is a separate decision from landing the
+# bound, and waits on arm64, which takes a different path here and has not been run.
+#
 # A count rather than a switch, and a count rather than audio seconds, because memory in one
 # generate() tracks the number of sequences: each carries its own mel features, KV blocks and
 # output buffer, and _offline_transcribe_many sizes max_tokens from the LONGEST clip in the
@@ -409,6 +415,13 @@ def build_app(supports):
                             ctx.checkpoint()
                             try:
                                 texts = _offline_transcribe_many([c for _, c in group])
+                                # zip stops at the shorter side, so a short answer would
+                                # leave spans sitting at None and reach the caller as null
+                                # results rather than as a failure. Fail the group instead.
+                                if len(texts) != len(group):
+                                    raise RuntimeError(
+                                        "engine returned %d results for %d spans"
+                                        % (len(texts), len(group)))
                                 for (i, _), t in zip(group, texts):
                                     out[i] = {"text": t}
                             except tasks.Cancelled:
