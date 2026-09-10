@@ -589,6 +589,21 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.module_of("ov", "align"), "align")
         self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
 
+    def test_ov_engine_spec_reports_qwen_so_llm_init_drops_the_llm_catalog(self):
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
+                                          "MODEL_SUPPORTS": "supports_align"}, clear=False):
+            app = FastAPI()
+            contract.register(app, model_name="Qwen/Qwen3-ForcedAligner-0.6B",
+                              module="align", served=["align"], is_ready=lambda: True)
+            spec = TestClient(app).get("/api/engine-spec").json()
+        self.assertEqual(spec["base"], "qwen")
+        self.assertEqual(spec["serves"], ["align"])
+        self.assertEqual(spec["declares"], ["align"])
+        by_cap = {e.get("capability"): e for e in spec["endpoints"] if e.get("capability")}
+        self.assertTrue(by_cap["align"]["available"])
+        self.assertFalse(by_cap["stt"]["available"])
+        self.assertFalse(by_cap["stt_stream"]["available"])
+
     def test_nvidia_mode_does_not_flip_cuda_metrics_to_dri(self):
         text = gpu.gpu_metrics_text()
         self.assertIn("gpu_present 0", text)
