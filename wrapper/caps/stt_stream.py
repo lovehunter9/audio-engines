@@ -32,10 +32,23 @@ GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
 # Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
 ENFORCE_EAGER = _args.switch("--enforce-eager")
-# One generate() for the whole batch instead of one per span. Off by default: this changes
-# where a mid-batch cancellation can land, so the two paths have to be comparable in the
-# same image before either becomes the default.
-BATCH_ONE_SHOT = _args.switch("--batch-one-shot")
+# How many spans one generate() may carry. 1 is one call per span, which is what ships
+# today, so the default changes nothing for anybody.
+#
+# A count rather than a switch, and a count rather than audio seconds, because memory in one
+# generate() tracks the number of sequences: each carries its own mel features, KV blocks and
+# output buffer, and _offline_transcribe_many sizes max_tokens from the LONGEST clip in the
+# call, so every sequence in a mixed batch is budgeted for that one.
+#
+# 🔴 The caller already caps a request by audio seconds and that is not the binding limit.
+# audio-bench sends 600 seconds as 20 fixed 30s windows; note sends the same 600 seconds as
+# roughly 59 diarized turns (median 1.6s), and a 40 minute meeting as ~190. Handing all of
+# them over at once OOM-killed this container at its 16Gi limit -- on material the bench had
+# already covered, because the bench's spans are 20x longer. A cap here is the only place the
+# bound can hold, since a caller cannot know this engine's ceiling.
+#
+# It also bounds cancellation: a cancel arriving mid-call waits for one group, not the request.
+MAX_BATCH_SPANS = max(1, _args.count("--batch-max-spans", 1))
 # Ending a span that has started repeating, rather than folding the repetition out of the text
 # afterwards. A 2.2 second clip was measured producing 4096 tokens and six characters of
 # transcript: qwen-asr's parse_asr_output collapses a repeated pattern (threshold 20), so the
@@ -373,10 +386,10 @@ def build_app(supports):
 
                 def _work_batch(ctx):
                     ctx.progress(stage="transcribe", done=0, total=len(segs))
-                    if BATCH_ONE_SHOT:
-                        # Slice every span first, then hand the whole list over once. The
-                        # spans in one request are independent -- the caller batches them
-                        # precisely because nothing downstream depends on their order.
+                    if MAX_BATCH_SPANS > 1:
+                        # Slice every span first, then hand them over in groups. The spans in
+                        # one request are independent -- the caller batches them precisely
+                        # because nothing downstream depends on their order.
                         out = [None] * len(segs)
                         spans = []
                         for i, seg in enumerate(segs):
@@ -387,23 +400,27 @@ def build_app(supports):
                             else:
                                 ctx.meter(input_seconds=(hi - lo) / 16000.0)
                                 spans.append((i, audio[lo:hi]))
-                        if spans:
-                            # The only checkpoint there can be: one generate() covers the
-                            # whole batch, so a cancellation arriving mid-call is not seen
-                            # until it returns. That is the cost of this path.
+                        done = len(segs) - len(spans)
+                        for at in range(0, len(spans), MAX_BATCH_SPANS):
+                            group = spans[at:at + MAX_BATCH_SPANS]
+                            # One generate() covers a whole group, so a cancellation arriving
+                            # mid-call is not seen until that group returns. Bounding the
+                            # group is what bounds that wait.
                             ctx.checkpoint()
                             try:
-                                texts = _offline_transcribe_many([c for _, c in spans])
-                                for (i, _), t in zip(spans, texts):
+                                texts = _offline_transcribe_many([c for _, c in group])
+                                for (i, _), t in zip(group, texts):
                                     out[i] = {"text": t}
                             except tasks.Cancelled:
                                 raise
                             except Exception as e:
-                                # No per-span outcome exists when the single call fails, so
-                                # every span carries the same error and the caller retries
+                                # No per-span outcome exists when a call fails, so every span
+                                # in that group carries the same error and the caller retries
                                 # the batch -- which is what it already does today.
-                                for i, _ in spans:
+                                for i, _ in group:
                                     out[i] = {"error": "stt failed: %s" % e}
+                            done += len(group)
+                            ctx.progress(done=done, total=len(segs))
                         ctx.progress(done=len(segs), total=len(segs))
                         return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
                     out = []
