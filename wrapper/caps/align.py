@@ -46,6 +46,22 @@ def _resolve_hf_dir(repo):
     return snapshot_download(**kw)
 
 
+def _resolve_hf_dir_any(*repo_ids):
+    """Try each hub id / local path; llm-init may only have cached the non -hf repo."""
+    last = None
+    for repo in repo_ids:
+        if not repo:
+            continue
+        try:
+            return _resolve_hf_dir(repo)
+        except Exception as e:
+            last = e
+            _p("cache miss for %s: %s" % (repo, e))
+    if last is not None:
+        raise last
+    raise FileNotFoundError("no model repo ids given")
+
+
 def _ov_hub_id(repo):
     """OpenVINO export uses the HuggingFace-native forced-aligner checkpoint."""
     repo = (repo or "").strip().rstrip("/")
@@ -65,7 +81,8 @@ def _looks_like_ov_aligner_ir(path):
 
 
 def _ensure_ov_aligner(hub_id, device):
-    src = _resolve_hf_dir(hub_id)
+    base = (MODEL_REPO or "").strip().rstrip("/")
+    src = _resolve_hf_dir_any(hub_id, base)
     ov_dir = os.path.join(src, "openvino")
     if _looks_like_ov_aligner_ir(ov_dir):
         return ov_dir, src
@@ -84,7 +101,15 @@ def _ensure_ov_aligner(hub_id, device):
         kw = dict(export=True, device=device)
         if HF_TOKEN:
             kw["token"] = HF_TOKEN
-        model = OVModelForQwen3ASRForcedAligner.from_pretrained(hub_id, **kw)
+        export_src = src if os.path.isdir(src) else hub_id
+        try:
+            model = OVModelForQwen3ASRForcedAligner.from_pretrained(export_src, **kw)
+        except Exception as e:
+            if export_src == src and hub_id != src:
+                _p("export from cached %s failed (%s); trying hub %s" % (src, e, hub_id))
+                model = OVModelForQwen3ASRForcedAligner.from_pretrained(hub_id, **kw)
+            else:
+                raise
         model.save_pretrained(ov_dir)
         del model
     finally:
