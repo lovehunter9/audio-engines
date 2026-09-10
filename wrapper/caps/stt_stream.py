@@ -42,31 +42,36 @@ BATCH_ONE_SHOT = _args.switch("--batch-one-shot")
 # transcript reads correctly and only the clock suffers -- and once spans are batched, the whole
 # batch waits for that one. vLLM's scheduler can end such a request instead.
 #
-# On by default, and the defaults are built in rather than asked for. The two thresholds have
-# to be read together: min_pattern_size must be at least 2, since "对对对" is real Mandarin
-# speech and stopping there drops the rest of the span; min_count must clear the 20 the
-# downstream folding uses, since at 10 the request stops one repetition short of that
-# threshold and what is left survives into the transcript. A deployment has no way to arrive
-# at those, so it should not have to: same shape as --gpu-memory-utilization above, where the
-# flag exists but the default is derived.
+# Off unless asked for, in three steps. Absent is what an engine already deployed does today,
+# so merging this changes nothing for anybody; the bare flag turns it on without anyone having
+# to know a threshold; a JSON value merges into the built-in ones for whoever re-measured.
+#
+# The thresholds are built in rather than required because neither is a deployment's choice.
+# They have to be read together: min_pattern_size must be at least 2, since "对对对" is real
+# Mandarin speech and stopping there drops the rest of the span; min_count must clear the 20
+# the downstream folding uses, since at 10 the request stops one repetition short of that
+# threshold and what is left survives into the transcript.
 #
 # 🔴 These numbers belong to the MODEL, not to the machine. They were measured against
 # qwen3-asr, which is the only model this module serves (catalog.FAMILIES maps stt_stream to
 # qwen3-asr, and one instance is one model). A different card does not change them; a new
 # qwen3-asr release can, so re-measure on a model upgrade rather than assuming they carry
 # over. The override exists so that a re-measured value can ship without a new image.
-# Backstop for builds whose vLLM predates the detector: 0.16 on arm64 has no
-# RepetitionDetectionParams, the lazy import says so and serving continues -- and there the
-# runaway span has nothing bounding it. A cap proportional to the audio bounds it. Where the
-# detector does run this adds nothing (13.0s with both against 13.2s for the detector alone)
-# and its headroom is a guess, 12 tokens per audio second over a measured 3.4, which a
-# faster-talking corpus would turn into truncated speech. So it applies only where the
-# detector cannot: no flag, no choice to get wrong, and the right behaviour on both arches.
+#
+# The cap below is what protection looks like where the detector cannot run: vLLM 0.16 on
+# arm64 has no RepetitionDetectionParams, the lazy import says so and serving continues, and
+# there a runaway span has nothing bounding it. It substitutes for the detector rather than
+# adding to it -- 13.0s with both against 13.2s for the detector alone -- and its headroom is
+# a guess, 12 tokens per audio second over a measured 3.4, which a faster-talking corpus would
+# turn into truncated speech. So it applies on exactly one condition: protection was asked for
+# and this build cannot supply it. Asking for nothing gets the stock budget on both arches.
 TOKENS_PER_AUDIO_SEC = 12
 TOKENS_FLOOR = 64
 REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
-REPETITION_OFF = _args.switch("--no-repetition-detection")
 REPETITION_OVERRIDE = (_args.text("--repetition-detection", "") or "").strip()
+# switch() reads the bare form and text() the JSON one; a JSON value is not "on" to switch(),
+# so both have to be consulted to answer "was it asked for at all".
+REPETITION_ON = _args.switch("--repetition-detection") or bool(REPETITION_OVERRIDE)
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -82,7 +87,9 @@ OFFLINE_MAX_INPUT_SEC = 540
 OFFLINE_MAX_TOKENS = 4096
 
 _state = _runtime.state
-# One slot, filled on first use: see _repetition_params.
+# One slot each, filled on first use. Two rather than one because the backstop asks what the
+# build CAN do and the detector asks what was REQUESTED: see _detector_class, _repetition_params.
+_repdet_class = []
 _repdet_cache = []
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
@@ -201,29 +208,48 @@ def _decode_to_16k_mono(raw, filename):
     return y.astype("float32")
 
 
-def _repetition_params():
-    """The detector this build can use, or None. Built once; a build without it says so once.
+def _detector_class():
+    """The detector class this vLLM has, or None. Probed once, and says so once.
+
+    Asked independently of the flags, because the backstop below turns on what this build
+    CANNOT do rather than on what was requested.
 
     Not imported at module load: a vLLM without RepetitionDetectionParams must still serve,
     and the failure has to be one log line rather than an engine that will not start.
     """
-    if REPETITION_OFF:
-        return None
-    if not _repdet_cache:
+    if not _repdet_class:
         try:
             from vllm.sampling_params import RepetitionDetectionParams
 
-            params = dict(REPETITION_DEFAULTS)
-            if REPETITION_OVERRIDE:
-                params.update(json.loads(REPETITION_OVERRIDE))
-            _repdet_cache.append(RepetitionDetectionParams(**params))
-            _p("repetition detection: %s%s"
-               % (params, " (overridden)" if REPETITION_OVERRIDE else ""))
+            _repdet_class.append(RepetitionDetectionParams)
         except Exception as e:
             # An older vLLM has no such class. Serving without the detector is what this
             # engine did before, so say it once and carry on rather than refusing to start.
             _p("WARN repetition detection unavailable in this vLLM (%s)" % e)
+            _repdet_class.append(None)
+    return _repdet_class[0]
+
+
+def _repetition_params():
+    """The configured detector, or None when it was not asked for or cannot run."""
+    if not REPETITION_ON:
+        return None
+    if not _repdet_cache:
+        cls = _detector_class()
+        if cls is None:
             _repdet_cache.append(None)
+        else:
+            try:
+                params = dict(REPETITION_DEFAULTS)
+                if REPETITION_OVERRIDE:
+                    params.update(json.loads(REPETITION_OVERRIDE))
+                _repdet_cache.append(cls(**params))
+                _p("repetition detection: %s%s"
+                   % (params, " (overridden)" if REPETITION_OVERRIDE else ""))
+            except Exception as e:
+                # A malformed override is the operator's typo, not a reason to stop serving.
+                _p("WARN --repetition-detection ignored (%s)" % e)
+                _repdet_cache.append(None)
     return _repdet_cache[0]
 
 
@@ -250,9 +276,13 @@ def _apply_repetition(sp):
 
 
 def _token_budget(seconds):
-    # Asks _repetition_params() rather than the flags: what matters is whether the detector
-    # is actually running, and a build without the class decides that for us.
-    if _repetition_params() is not None:
+    # Two conditions, and both have to hold before the stock budget is replaced: protection
+    # was asked for, and this build cannot supply it. Asking for nothing therefore leaves the
+    # budget exactly where a deployment already has it, on either arch -- which is the whole
+    # point of the flag being off by default. Keying this on "is the detector running" instead
+    # would mean turning the detector off silently turned this on, so there would be no way
+    # left to ask for the engine's own behaviour.
+    if not REPETITION_ON or _detector_class() is not None:
         return OFFLINE_MAX_TOKENS
     return max(TOKENS_FLOOR,
                min(OFFLINE_MAX_TOKENS, int(seconds * TOKENS_PER_AUDIO_SEC) + TOKENS_FLOOR))
