@@ -126,14 +126,24 @@ class EngineArgs:
         val = self._vals.get(key)
         return default if val is None or val is True else str(val)
 
-    def _bare(self, name):
-        """The flag was given with no value at all -- `--flag` where `--flag N` was meant.
+    def given(self, name):
+        """Was this flag present at all, with or without a value.
 
-        text() cannot show this: it answers the default for a valueless flag, exactly as it
-        does for a flag nobody passed. A number that needs a value has to tell the two apart,
-        or the likeliest typo of all is the one that reports nothing.
+        text() cannot answer it: a valueless flag and an absent one both come back as the
+        default, so anything that wants to say "you set this and it does nothing here" has
+        to ask separately.
         """
-        return self._vals.get(self._key(name)) is True
+        return self._key(name) in self._vals
+
+    def _bare(self, name):
+        """The flag carries no usable value -- `--flag`, or `--flag=` with nothing after it.
+
+        Both spellings mean the same mistake and neither survives text(), which answers the
+        default for them exactly as for a flag nobody passed. A number that needs a value has
+        to tell those apart, or the likeliest typo of all is the one that reports nothing.
+        """
+        val = self._vals.get(self._key(name))
+        return val is True or (isinstance(val, str) and not val.strip())
 
     def number(self, name, default):
         raw = self.text(name)
@@ -157,6 +167,12 @@ class EngineArgs:
             self._unreadable.append((name, raw, default))
             return int(default)
 
+    # The spellings a value may use to mean on and off. Public because a cap that has to tell
+    # "off" from "a value I do not recognise" needs the same lists switch() decides by, and a
+    # second copy of them drifts the day one side gains a spelling.
+    ON_WORDS = ("1", "true", "yes", "on")
+    OFF_WORDS = ("0", "false", "no", "off")
+
     def switch(self, name, default=False):
         key = self._key(name)
         self._claimed.add(key)
@@ -165,7 +181,7 @@ class EngineArgs:
             return bool(default)
         if val is True:
             return True
-        return str(val).strip().lower() in ("1", "true", "yes", "on")
+        return str(val).strip().lower() in self.ON_WORDS
 
     def passthrough(self):
         """The flags no cap claimed, ready to hand to a child engine's argv."""

@@ -739,6 +739,48 @@ def t_qwen():
         repetition_fallback(q)
         repetition_request_spellings(q)
         malformed_span_is_isolated(c, q, calls)
+        one_bad_span_does_not_sink_its_group(c, q, calls)
+
+
+def one_bad_span_does_not_sink_its_group(c, q, calls):
+    """A span the engine refuses must cost only itself, not the group it happened to land in.
+
+    A batched call has no per-span outcome, so the first version marked the whole group --
+    measured against a real engine, one 0.5 ms span failed all five of its group. Retrying
+    cannot help either: grouping is by index, so the retry rebuilds the same group around
+    the same span. Halving a failed group ends the search on the span responsible.
+    """
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 8
+    bad = {"n": 0}
+    real = q._offline_transcribe_many
+
+    def refusing(clips):
+        # The engine refuses any call that carries the pathological clip, as a real one does.
+        bad["n"] += 1
+        if any(len(cl) == 8 for cl in clips):
+            raise RuntimeError("engine refused this batch")
+        return real(clips)
+
+    q._offline_transcribe_many = refusing
+    try:
+        del calls[:]
+        # index 2 is 8 samples long: hi > lo so it is handed to the engine, and a real one
+        # refuses it -- 0.5 ms is not enough audio to build mel features from.
+        spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.2005), (0.4, 0.5), (0.5, 0.6)]
+        body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": "[" + body + "]"})
+        doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q._offline_transcribe_many = real
+        q.MAX_BATCH_SPANS = was
+    got = doc.get("results") or []
+    errs = [i for i, e in enumerate(got) if "error" in e]
+    check("a refused span still leaves one entry per request entry", len(got) == 5, len(got))
+    check("only the span the engine refused carries the error", errs == [2], errs)
+    check("its neighbours keep their transcripts",
+          len(got) == 5 and all("text" in got[i] for i in (0, 1, 3, 4)), got)
 
 
 def malformed_span_is_isolated(c, q, calls):
@@ -786,14 +828,28 @@ def repetition_request_spellings(q):
         ("--repetition-detection false",            False, ""),
         ("--repetition-detection 0",                False, ""),
         ("--repetition-detection off",              False, ""),
+        # 🔴 Words nobody listed. These are the ones a word list lets through, and each of
+        # them used to read as "on" -- the same bug as `false`, one spelling further out.
+        ("--repetition-detection disabled",         False, ""),
+        ("--repetition-detection none",             False, ""),
+        ("--repetition-detection never",            False, ""),
+        ("--repetition-detection nope",             False, ""),
         ('--repetition-detection {"min_count":30}', True,  '{"min_count":30}'),
+        ('--repetition-detection [1,2]',            True,  '[1,2]'),
     ]
     for raw, want_on, want_override in cases:
-        on, override = q.repetition_request(EngineArgs(raw))
+        on, override, note = q.repetition_request(EngineArgs(raw))
         check("spelling %r asks for it: %s" % (raw or "(nothing)", want_on),
               on == want_on, on)
         check("spelling %r overrides: %r" % (raw or "(nothing)", want_override),
               override == want_override, override)
+    for raw in ("--repetition-detection disabled", "--repetition-detection nope"):
+        check("an unrecognised word %r is reported, not silently obeyed" % raw.split()[-1],
+              q.repetition_request(EngineArgs(raw))[2] is not None)
+    for raw in ("--repetition-detection", "--repetition-detection false",
+                '--repetition-detection {"min_count":30}'):
+        check("a spelling this engine knows says nothing extra: %r" % raw,
+              q.repetition_request(EngineArgs(raw))[2] is None)
 
 
 def repetition_fallback(q):

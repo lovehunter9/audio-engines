@@ -695,6 +695,27 @@ class EngineArgsTest(unittest.TestCase):
             log.lines,
         )
 
+    def test_a_flag_whose_value_is_only_whitespace_says_so_too(self):
+        """`--flag=` is the same mistake as `--flag`, and has to report the same way.
+
+        Fixing one spelling and not the other is how the first round of this went: the
+        warning existed and the likeliest typo still slipped past it.
+        """
+        for raw in ("--batch-max-spans=", "--batch-max-spans= ", "--batch-max-spans"):
+            args = self._args(raw)
+            self.assertEqual(args.count("--batch-max-spans", 1), 1, raw)
+            log = _CollectingLog()
+            args.warn_unclaimed(log)
+            self.assertTrue(any("--batch-max-spans" in line for line in log.lines),
+                            (raw, log.lines))
+
+    def test_given_separates_a_valueless_flag_from_an_absent_one(self):
+        self.assertTrue(self._args("--repetition-fallback-tokens-per-sec").given(
+            "--repetition-fallback-tokens-per-sec"))
+        self.assertTrue(self._args("--repetition-fallback-tokens-per-sec 30").given(
+            "--repetition-fallback-tokens-per-sec"))
+        self.assertFalse(self._args("").given("--repetition-fallback-tokens-per-sec"))
+
     def test_an_absent_flag_is_not_an_unreadable_one(self):
         """The default path must stay silent, or the warning becomes noise everyone filters out."""
         args = self._args("")

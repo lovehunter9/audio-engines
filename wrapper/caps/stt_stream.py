@@ -99,7 +99,7 @@ MAX_BATCH_SPANS = max(1, _args.count("--batch-max-spans", 1))
 # and 0 to turn it off and take the engine's own budget instead.
 REPETITION_FALLBACK_TOKENS_PER_SEC = max(
     0, _args.count("--repetition-fallback-tokens-per-sec", 12))
-_FALLBACK_ASKED = _args.text("--repetition-fallback-tokens-per-sec") is not None
+_FALLBACK_ASKED = _args.given("--repetition-fallback-tokens-per-sec")
 TOKENS_FLOOR = 64
 REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
 # switch() reads the bare and boolean forms and text() the JSON one; a JSON value is not "on"
@@ -109,19 +109,32 @@ REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count
 # a JSON override because bool("false") is True, and an operator who spelled out "off" gets
 # the feature switched on -- json.loads then gives False, update() throws, and the only trace
 # is one WARN about an ignored value, while everything keyed on REPETITION_ON believed it.
-def repetition_request(args):
-    """(asked for?, JSON override) for --repetition-detection. A function so it can be tested.
+# A word that is neither an on- nor an off-spelling is one nobody here recognises, and the
+# safe reading of that is "off": the alternative turns a deployment that tried to decline
+# into one that enabled. The spellings come from EngineArgs so there is only one copy.
 
-    Inline, the boolean-word case is invisible: every spelling reads as "on" and the reader
-    has to notice that bool("false") is True to see it.
+
+def repetition_request(args):
+    """(asked for?, JSON override, note) for --repetition-detection. A function so it is testable.
+
+    🔴 The rule is "only JSON is an override", not "these words are not overrides". A word
+    list has an outside, and everything outside it used to become an override: `false` was
+    the spelling review caught, but `disabled`, `none` and `never` all read as "on" for the
+    same reason -- a non-empty string is truthy. Inverting it removes the outside.
     """
     raw = (args.text("--repetition-detection", "") or "").strip()
-    boolish = raw.lower() in ("", "1", "true", "yes", "on", "0", "false", "no", "off")
-    override = "" if boolish else raw
-    return bool(args.switch("--repetition-detection") or override), override
+    if raw[:1] in ("{", "["):
+        return True, raw, None
+    word = raw.lower()
+    known = EngineArgs.ON_WORDS + EngineArgs.OFF_WORDS
+    if raw and word not in known:
+        return False, "", ("WARN --repetition-detection=%r is not a value this engine knows; "
+                           "treating it as off. Use the bare flag to turn it on, or a JSON "
+                           "object to override a threshold." % raw)
+    return bool(args.switch("--repetition-detection")), "", None
 
 
-REPETITION_ON, REPETITION_OVERRIDE = repetition_request(_args)
+REPETITION_ON, REPETITION_OVERRIDE, _REP_NOTE = repetition_request(_args)
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -148,6 +161,7 @@ _repdet_cache = []
 # Says the repetition story once, on the first transcription rather than at startup: the
 # detector probe is lazy on purpose, so this is the earliest point that knows the answer.
 _repdet_said = []
+_repset_said = []
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
@@ -323,7 +337,10 @@ def _apply_repetition(sp):
     try:
         sp.repetition_detection = params
     except Exception as e:
-        _p("WARN could not set repetition_detection (%s)" % e)
+        # Once: this runs per generate() call, and a 40 minute meeting is hundreds of them.
+        if not _repset_said:
+            _repset_said.append(True)
+            _p("WARN could not set repetition_detection (%s)" % e)
         return None
 
     def restore():
@@ -346,13 +363,27 @@ def _say_repetition_once():
     # -- it would arrive on every engine on the older vLLM, for a feature nobody turned on.
     # The old code got this from `not REPETITION_ON or _detector_class() ...` short-circuiting;
     # doing it by hand here is easy to lose, which is why it is spelled out.
+    if _REP_NOTE:
+        _p(_REP_NOTE)
     if not REPETITION_ON:
         if _FALLBACK_ASKED:
             _p("--repetition-fallback-tokens-per-sec=%d has no effect: it backs up "
                "--repetition-detection, which was not asked for"
                % REPETITION_FALLBACK_TOKENS_PER_SEC)
         return
+    if _state.get("asr") is not None and getattr(_state["asr"], "sampling_params", None) is None:
+        _p("WARN this qwen-asr exposes no sampling_params: neither --repetition-detection nor "
+           "--repetition-fallback-tokens-per-sec can be applied, whatever they are set to")
+        return
     if _detector_class() is not None:
+        # Asking for the params, not just the class: an override the detector rejects leaves
+        # the class present and nothing running, and saying "this build has the detector"
+        # there describes a thing that is not happening.
+        if _repetition_params() is None:
+            _p("WARN --repetition-detection was asked for and is NOT running: this build has "
+               "the detector but rejected the settings (see the line above). The fallback "
+               "does not step in either, because a length cap truncates real speech")
+            return
         if _FALLBACK_ASKED:
             _p("--repetition-fallback-tokens-per-sec=%d has no effect: this build has the "
                "detector, which ends a span for repeating rather than for being long"
@@ -365,7 +396,14 @@ def _say_repetition_once():
         return
     _p("repetition fallback: no detector in this build, capping output at %d tokens per "
        "audio second (measured speech is about 3.4; too low truncates, and truncation is "
-       "not visible here)" % REPETITION_FALLBACK_TOKENS_PER_SEC)
+       "not visible here)%s" % (
+           REPETITION_FALLBACK_TOKENS_PER_SEC,
+           # One SamplingParams covers a whole generate(), so in a batch the cap is computed
+           # from the longest clip and every shorter span in that group is bounded by ITS
+           # budget. The protection is real but looser the more uneven a group is.
+           ". With --batch-max-spans above 1 the cap follows the LONGEST clip in each group, "
+           "so a short span that starts repeating is bounded by that clip's budget, not its own"
+           if MAX_BATCH_SPANS > 1 else ""))
 
 
 def _token_budget(seconds):
@@ -495,8 +533,29 @@ def build_app(supports):
                             else:
                                 spans.append((i, audio[lo:hi], (hi - lo) / 16000.0))
                         done = len(segs) - len(spans)
-                        for at in range(0, len(spans), MAX_BATCH_SPANS):
-                            group = spans[at:at + MAX_BATCH_SPANS]
+                        # Metered once per span even when its group is retried in halves.
+                        _metered = [False] * len(segs)
+                        # Work through the groups as a stack, because a failed group is put
+                        # back as halves rather than written off.
+                        #
+                        # 🔴 A batched call gives no per-span outcome: one span the engine
+                        # cannot process fails the whole generate(), and marking the group
+                        # would lose up to MAX_BATCH_SPANS-1 perfectly good transcripts to
+                        # one bad neighbour -- measured, a single 0.5 ms span failed all five
+                        # of its group. Nor can the caller fix it by retrying: grouping is by
+                        # index, so the retry rebuilds the same group around the same span
+                        # and fails identically, forever. Halving turns a group failure into
+                        # a search that ends on the span actually responsible.
+                        #
+                        # The cost is bounded and only paid on failure: isolating k bad spans
+                        # in a group of n costs at most 2n-1 calls, which is the case where
+                        # every span fails -- and that is the same order as the serial path's
+                        # n calls for the same spans. One bad span in 32 costs 11.
+                        todo = [spans[at:at + MAX_BATCH_SPANS]
+                                for at in range(0, len(spans), MAX_BATCH_SPANS)]
+                        todo.reverse()
+                        while todo:
+                            group = todo.pop()
                             # One generate() covers a whole group, so a cancellation arriving
                             # mid-call is not seen until that group returns. Bounding the
                             # group is what bounds that wait.
@@ -504,8 +563,11 @@ def build_app(supports):
                             # Metered here rather than while slicing: meter() is additive and
                             # feeds the billing headers and the task doc, so counting every
                             # span up front bills a cancelled job for audio it never read.
+                            # Halves are not metered again; only whole groups are.
                             for _i, _clip, _secs in group:
-                                ctx.meter(input_seconds=_secs)
+                                if not _metered[_i]:
+                                    _metered[_i] = True
+                                    ctx.meter(input_seconds=_secs)
                             try:
                                 texts = _offline_transcribe_many([c for _, c, _s in group])
                                 # zip stops at the shorter side, so a short answer would
@@ -517,15 +579,17 @@ def build_app(supports):
                                         % (len(texts), len(group)))
                                 for (i, _, _s), t in zip(group, texts):
                                     out[i] = {"text": t}
+                                done += len(group)
                             except tasks.Cancelled:
                                 raise
                             except Exception as e:
-                                # No per-span outcome exists when a call fails, so every span
-                                # in that group carries the same error and the caller retries
-                                # the batch -- which is what it already does today.
-                                for i, _, _s in group:
-                                    out[i] = {"error": "stt failed: %s" % e}
-                            done += len(group)
+                                if len(group) > 1:
+                                    mid = len(group) // 2
+                                    todo.append(group[mid:])
+                                    todo.append(group[:mid])
+                                    continue
+                                out[group[0][0]] = {"error": "stt failed: %s" % e}
+                                done += 1
                             ctx.progress(done=done, total=len(segs))
                         ctx.progress(done=len(segs), total=len(segs))
                         return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
