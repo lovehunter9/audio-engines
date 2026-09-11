@@ -709,9 +709,19 @@ def t_qwen():
     from wrapper.caps import stt_stream as q
 
     q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
+    # One result per clip, saying how many samples that clip carried. The real engine
+    # answers per clip; a stub that answers once hides a group handed back short.
+    calls = []
+
+    def fake_transcribe(audio=None, language=None, return_time_stamps=None):
+        # Two shapes reach here: the serial path hands one (clip, sr) tuple, the batched
+        # path a list of them.
+        clips = audio if isinstance(audio, list) else [audio]
+        calls.append(len(clips))
+        return [types.SimpleNamespace(text=str(len(c))) for c, _sr in clips]
+
     q._state.update(ready=True, asr=types.SimpleNamespace(
-        transcribe=lambda audio=None, language=None, return_time_stamps=None:
-            [types.SimpleNamespace(text="ni hao")],
+        transcribe=fake_transcribe,
         sampling_params=types.SimpleNamespace(max_tokens=32)))
     with TestClient(q.build_app(["stt", "stt_stream"])) as c:
         advertises_tasks(c, "qwen stt")
@@ -725,6 +735,224 @@ def t_qwen():
         both_ways(c, "/v1/audio/transcriptions", WAV,
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
                   meters=("input",))
+        batch_over_cap(c, q, calls)
+        repetition_fallback(q)
+        repetition_request_spellings(q)
+        the_report_does_not_need_a_request(q)
+        malformed_span_is_isolated(c, q, calls)
+        one_bad_span_does_not_sink_its_group(c, q, calls)
+
+
+def one_bad_span_does_not_sink_its_group(c, q, calls):
+    """A span the engine refuses must cost only itself, not the group it happened to land in.
+
+    A batched call has no per-span outcome, so the first version marked the whole group --
+    measured against a real engine, one 0.5 ms span failed all five of its group. Retrying
+    cannot help either: grouping is by index, so the retry rebuilds the same group around
+    the same span. Halving a failed group ends the search on the span responsible.
+    """
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 8
+    bad = {"n": 0}
+    real = q._offline_transcribe_many
+
+    def refusing(clips):
+        # The engine refuses any call that carries the pathological clip, as a real one does.
+        bad["n"] += 1
+        if any(len(cl) == 8 for cl in clips):
+            raise RuntimeError("engine refused this batch")
+        return real(clips)
+
+    q._offline_transcribe_many = refusing
+    try:
+        del calls[:]
+        # index 2 is 8 samples long: hi > lo so it is handed to the engine, and a real one
+        # refuses it -- 0.5 ms is not enough audio to build mel features from.
+        spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.2005), (0.4, 0.5), (0.5, 0.6)]
+        body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": "[" + body + "]"})
+        doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q._offline_transcribe_many = real
+        q.MAX_BATCH_SPANS = was
+    got = doc.get("results") or []
+    errs = [i for i, e in enumerate(got) if "error" in e]
+    check("a refused span still leaves one entry per request entry", len(got) == 5, len(got))
+    check("only the span the engine refused carries the error", errs == [2], errs)
+    check("its neighbours keep their transcripts",
+          len(got) == 5 and all("text" in got[i] for i in (0, 1, 3, 4)), got)
+
+
+def malformed_span_is_isolated(c, q, calls):
+    """One unusable span must not take the rest of the request with it.
+
+    The serial path has always answered per span: a bad one gets {"error": ...} and its
+    neighbours still get transcripts. parse_segments only checks the payload is a JSON
+    array, so anything at all can arrive as an element -- and the batched path has to keep
+    the same promise, that the reply carries one entry per request entry, in order.
+    """
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 8
+    try:
+        del calls[:]
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": '[{"start":0,"end":0.2},"oops",'
+                                     '{"start":"n/a","end":1},{"start":0.3,"end":0.5}]'})
+        doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q.MAX_BATCH_SPANS = was
+    got = doc.get("results") or []
+    check("a malformed span does not 500 the whole request", r.status_code == 200,
+          r.status_code)
+    check("every requested span still gets an entry, in order", len(got) == 4, got)
+    check("the good spans still carry text",
+          len(got) == 4 and "text" in got[0] and "text" in got[3], got)
+    check("only the malformed ones carry an error",
+          len(got) == 4 and "error" in got[1] and "error" in got[2], got)
+
+
+def the_report_does_not_need_a_request(q):
+    """Whatever it has to say must be said without waiting for an offline transcription.
+
+    It used to hang off the token budget, whose callers both sit inside
+    `if sp is not None:` -- so the branch written for "this build exposes no
+    sampling_params" could not run, and a deployment that only streams never reached any
+    of it. Those are the two silences the report exists to break, so it is said once when
+    the model finishes loading, and the load path is where this pins it.
+    """
+    import inspect
+
+    src = inspect.getsource(q._load_blocking)
+    check("the report is made when the model loads, not from a request path",
+          "_say_repetition_once()" in src)
+    budget = inspect.getsource(q._token_budget)
+    check("the budget no longer has to be the thing that reports",
+          "if sp is not None" not in budget)
+
+
+def repetition_request_spellings(q):
+    """How --repetition-detection is spelled must not flip what it means.
+
+    bool("false") is True, so a value that spells the feature OFF used to read as a JSON
+    override and switch it ON. The detector then failed to build and logged one line about
+    an ignored value -- while everything keyed on "was it asked for" carried on believing
+    it had been. A word is a word; only real JSON is an override.
+    """
+    from wrapper.contract import EngineArgs
+
+    cases = [
+        ("",                                        False, ""),
+        ("--repetition-detection",                  True,  ""),
+        ("--repetition-detection true",             True,  ""),
+        ("--repetition-detection false",            False, ""),
+        ("--repetition-detection 0",                False, ""),
+        ("--repetition-detection off",              False, ""),
+        # 🔴 Words nobody listed. These are the ones a word list lets through, and each of
+        # them used to read as "on" -- the same bug as `false`, one spelling further out.
+        ("--repetition-detection disabled",         False, ""),
+        ("--repetition-detection none",             False, ""),
+        ("--repetition-detection never",            False, ""),
+        ("--repetition-detection nope",             False, ""),
+        ('--repetition-detection {"min_count":30}', True,  '{"min_count":30}'),
+        ('--repetition-detection [1,2]',            True,  '[1,2]'),
+    ]
+    for raw, want_on, want_override in cases:
+        on, override, note = q.repetition_request(EngineArgs(raw))
+        check("spelling %r asks for it: %s" % (raw or "(nothing)", want_on),
+              on == want_on, on)
+        check("spelling %r overrides: %r" % (raw or "(nothing)", want_override),
+              override == want_override, override)
+    for raw in ("--repetition-detection disabled", "--repetition-detection nope"):
+        check("an unrecognised word %r is reported, not silently obeyed" % raw.split()[-1],
+              q.repetition_request(EngineArgs(raw))[2] is not None)
+    for raw in ("--repetition-detection", "--repetition-detection false",
+                '--repetition-detection {"min_count":30}'):
+        check("a spelling this engine knows says nothing extra: %r" % raw,
+              q.repetition_request(EngineArgs(raw))[2] is None)
+
+
+def repetition_fallback(q):
+    """The fallback replaces the detector, never joins it, and can be turned off by name.
+
+    Three states have to stay distinguishable, because from outside they all look like an
+    engine that transcribes: the detector running, the fallback capping, and neither. The
+    default is the number that used to be hard-coded, so this exposes it without moving it.
+    """
+    stock = q.OFFLINE_MAX_TOKENS
+    was_on, was_n, was_cls = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_class[:]
+    try:
+        check("the default is the number that was hard-coded",
+              q.REPETITION_FALLBACK_TOKENS_PER_SEC == 12, q.REPETITION_FALLBACK_TOKENS_PER_SEC)
+
+        # A build that HAS the detector: the fallback is redundant there and must not apply.
+        del q._repdet_class[:]
+        q._repdet_class.append(object)
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = True, 12
+        check("a build with the detector keeps the engine's own budget",
+              q._token_budget(600.0) == stock, q._token_budget(600.0))
+
+        # A build that has NOT got it: the fallback is what protection means there.
+        del q._repdet_class[:]
+        q._repdet_class.append(None)
+        want = min(stock, int(10.0 * 12) + q.TOKENS_FLOOR)
+        check("without the detector the fallback bounds the output",
+              q._token_budget(10.0) == want, (q._token_budget(10.0), want))
+
+        q.REPETITION_FALLBACK_TOKENS_PER_SEC = 0
+        check("setting it to 0 gives the engine's own budget back",
+              q._token_budget(10.0) == stock, q._token_budget(10.0))
+
+        # Never asked for protection: neither mechanism may touch the budget.
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = False, 12
+        check("asking for nothing leaves the budget alone",
+              q._token_budget(10.0) == stock, q._token_budget(10.0))
+
+        # And it must not go looking for the detector either. Probing warns when the class is
+        # missing, so probing unasked puts a warning about an unused feature in front of every
+        # deployment on the older vLLM. Caught on a real engine, not here, which is why it is
+        # pinned here: the empty list stays empty only if nothing probed.
+        del q._repdet_class[:]
+        del q._repdet_said[:]
+        q._say_repetition_once()
+        check("asking for nothing does not probe for the detector",
+              q._repdet_class == [], q._repdet_class)
+    finally:
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_on, was_n
+        del q._repdet_class[:]
+        q._repdet_class.extend(was_cls)
+
+
+def batch_over_cap(c, q, calls):
+    """A request larger than --batch-max-spans is split, and nothing moves or goes missing.
+
+    The cap bounds memory in one generate() call, so a caller sending more spans than it
+    gets grouped. What the caller must not be able to tell is that this happened: same
+    count, same order, every span answered. Distinct span lengths make each one
+    identifiable, since the stub answers with the sample count it was handed.
+    """
+    spans = [(0.0, 0.1), (0.1, 0.4), (0.4, 0.5), (0.5, 1.1),
+             (1.1, 1.2), (1.2, 1.9), (1.9, 2.0)]
+    want = [str(int(round(e * SR)) - int(round(s * SR))) for s, e in spans]
+    body = ",".join('{"start":%s,"end":%s}' % (s, e) for s, e in spans)
+
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 3
+    try:
+        del calls[:]
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": "[" + body + "]"})
+        doc = r.json()
+    finally:
+        q.MAX_BATCH_SPANS = was
+
+    check("over-cap batch answers 200", r.status_code == 200, r.status_code)
+    got = doc.get("results") or []
+    check("every span comes back", len(got) == len(spans), len(got))
+    check("no span is left unanswered", all(x is not None for x in got), got)
+    check("spans keep the order they were sent in",
+          [x.get("text") for x in got] == want, [x.get("text") for x in got])
+    check("the request was split at the cap, not sent whole", calls == [3, 3, 1], calls)
 
 
 class FakeTTS:
