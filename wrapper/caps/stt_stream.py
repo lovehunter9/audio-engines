@@ -35,11 +35,14 @@ ENFORCE_EAGER = _args.switch("--enforce-eager")
 # How many spans one generate() may carry. 1 is one call per span, which is what ships
 # today, so the default changes nothing for anybody.
 #
-# 32 is the value measured to be worth turning on: through note, a 40 minute Chinese
-# meeting spent 144.5s at 1 and 37.9s at 32, inside the 16Gi the chart allots, and the
-# transcript scored 17.32% against 17.21% CER on the corpus TextGrid -- 0.12 points over
-# the same 235 spans. Turning it on by default is a separate decision from landing the
-# bound, and waits on arm64, which takes a different path here and has not been run.
+# 32 is the value measured to be worth turning on. Through note, a 40 minute Chinese
+# meeting spent 144.5s at 1 and 37.9s at 32 on x86, inside the 16Gi the chart allots, and
+# the transcript scored 17.32% against 17.21% CER on the corpus TextGrid -- 0.12 points
+# over the same 235 spans, which is inside what two runs at the SAME setting differ by.
+# arm64 was then measured on the same recording: 240.1s at 1 against 46.7 / 45.4 / 39.1s
+# at 32 over three runs, 246 spans, no failures. So both arches are covered and changing
+# the default is unblocked -- it is left for its own commit because it turns a change that
+# is invisible to every deployment into one that is not.
 #
 # A count rather than a switch, and a count rather than audio seconds, because memory in one
 # generate() tracks the number of sequences: each carries its own mel features, KV blocks and

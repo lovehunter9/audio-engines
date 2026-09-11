@@ -65,6 +65,10 @@ class EngineArgs:
         if raw is None:
             raw = os.environ.get("ENGINE_ARGS", "") or ""
         self._vals, self._spans, self._claimed = {}, [], set()
+        # Flags whose value was present but unreadable. warn_unclaimed reports them: a
+        # number that will not parse falls back to the default, and a default is exactly
+        # what a working engine looks like, so nothing else would ever say it happened.
+        self._unreadable = []
         toks = shlex.split(raw)
         i = 0
         while i < len(toks):
@@ -123,15 +127,19 @@ class EngineArgs:
         return default if val is None or val is True else str(val)
 
     def number(self, name, default):
+        raw = self.text(name)
         try:
-            return float(self.text(name) or default)
+            return float(raw or default)
         except (TypeError, ValueError):
+            self._unreadable.append((name, raw, default))
             return float(default)
 
     def count(self, name, default):
+        raw = self.text(name)
         try:
-            return int(float(self.text(name) or default))
+            return int(float(raw or default))
         except (TypeError, ValueError):
+            self._unreadable.append((name, raw, default))
             return int(default)
 
     def switch(self, name, default=False):
@@ -157,6 +165,8 @@ class EngineArgs:
         rest = self.passthrough()
         if rest:
             log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
+        for name, raw, default in self._unreadable:
+            log.warning("ENGINE_ARGS %s=%r is not a number; using %s", name, raw, default)
 
 
 def cache_dir(repo):

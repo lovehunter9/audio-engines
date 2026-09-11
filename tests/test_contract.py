@@ -648,6 +648,54 @@ class _FakeUpload:
         return b"\0" * want
 
 
+class EngineArgsTest(unittest.TestCase):
+    """What happens to a flag whose value cannot be read.
+
+    Falling back to the default is right -- an engine that refuses to start over a typo is
+    worse. The problem is that the fallback is invisible: a deployment that asked for
+    batching and mistyped the number gets the serial path, running correctly and slowly,
+    and nothing in the logs separates that from never having asked.
+    """
+
+    def _args(self, raw):
+        from wrapper.contract import EngineArgs
+
+        return EngineArgs(raw)
+
+    def test_an_unreadable_number_falls_back_and_says_so(self):
+        args = self._args("--batch-max-spans 32x")
+        self.assertEqual(args.count("--batch-max-spans", 1), 1)
+        log = _CollectingLog()
+        args.warn_unclaimed(log)
+        self.assertTrue(
+            any("--batch-max-spans" in line and "not a number" in line for line in log.lines),
+            log.lines,
+        )
+
+    def test_a_readable_number_says_nothing(self):
+        args = self._args("--batch-max-spans 32")
+        self.assertEqual(args.count("--batch-max-spans", 1), 32)
+        log = _CollectingLog()
+        args.warn_unclaimed(log)
+        self.assertEqual(log.lines, [])
+
+    def test_an_absent_flag_is_not_an_unreadable_one(self):
+        """The default path must stay silent, or the warning becomes noise everyone filters out."""
+        args = self._args("")
+        self.assertEqual(args.count("--batch-max-spans", 1), 1)
+        log = _CollectingLog()
+        args.warn_unclaimed(log)
+        self.assertEqual(log.lines, [])
+
+
+class _CollectingLog:
+    def __init__(self):
+        self.lines = []
+
+    def warning(self, msg, *fmt):
+        self.lines.append(msg % fmt if fmt else msg)
+
+
 class UploadBoundsTest(unittest.IsolatedAsyncioTestCase):
     """What one request may bring to the caps that hold a whole clip at once.
 
