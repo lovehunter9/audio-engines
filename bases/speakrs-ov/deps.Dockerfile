@@ -11,13 +11,13 @@
 # try, so leaving nvidia-ml-py out costs a few gauges and breaks nothing -- which is why the
 # import check at the bottom does not name it.
 #
-# Built from beclab/speakrs-diarization c2f1039, engine image built with --features openvino.
+# Built from beclab/speakrs-diarization ff46d52, engine image built with --features openvino.
 # Verified against the registry rather than the build log: this digest's
-# org.opencontainers.image.revision reads c2f103911d99e939c8a2513fb03aaa5f28c6f6bc.
+# org.opencontainers.image.revision reads ff46d523129c38ba129a44b4457a1e9de7c4b795.
 #
 # A digest, not a tag: it is what puts the engine's identity inside this hashed file, so the deps
 # tag moves when the engine does.
-ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:9c9e32cdab8aad8e5d1eee962113f6757593571a01b02d2a78e958f0c421be1c
+ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:79b7df81f289d8c39345f01b21a13cf825c3e39d92106659874d03d8965750ba
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM ubuntu:24.04
