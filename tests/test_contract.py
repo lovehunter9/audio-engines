@@ -598,6 +598,83 @@ class OpenVINOModeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
                 self.assertEqual(q._ov_device(), "GPU.1")
 
+    def test_absent_max_model_len_follows_install_mode(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia"}, clear=False):
+            self.assertEqual(q._default_max_model_len(), 8192)
+        with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia-gb10"}, clear=False):
+            self.assertEqual(q._default_max_model_len(), 3072)
+
+    def test_absent_enforce_eager_is_on_for_nvidia_off_for_ov(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen"}, clear=False):
+            self.assertTrue(q._default_enforce_eager())
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False):
+            self.assertFalse(q._default_enforce_eager())
+
+    def test_written_max_model_len_and_eager_keep_the_user_value(self):
+        from wrapper.contract import EngineArgs
+
+        args = EngineArgs("--max-model-len 4096 --enforce-eager false")
+        self.assertEqual(args.count("--max-model-len", 8192), 4096)
+        self.assertFalse(args.switch("--enforce-eager", True))
+
+    def test_ov_generate_many_sends_the_group_in_one_call(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        seen = []
+
+        def fake_generate(raw, **kw):
+            seen.append(raw)
+            return types.SimpleNamespace(texts=["one", "two"])
+
+        class _Clip:
+            def __init__(self, n):
+                self._n = n
+
+            def astype(self, _dt):
+                return self
+
+            def reshape(self, *a, **k):
+                return self
+
+            def tolist(self):
+                return [0.0] * self._n
+
+        asr = q._state.get("asr")
+        try:
+            q._state["asr"] = types.SimpleNamespace(generate=fake_generate)
+            out = q._ov_generate_many([_Clip(16000), _Clip(32000)])
+            self.assertEqual(out, ["one", "two"])
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(len(seen[0]), 2)
+            self.assertEqual(len(seen[0][0]), 16000)
+            self.assertEqual(len(seen[0][1]), 32000)
+        finally:
+            q._state["asr"] = asr
+
+    def test_ov_batch_probe_fails_load_when_generate_rejects_a_list(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        was = q.MAX_BATCH_SPANS
+        try:
+            q.MAX_BATCH_SPANS = 8
+
+            def reject(raw, **kw):
+                if raw and isinstance(raw[0], list):
+                    raise TypeError("AudioInputs")
+                return types.SimpleNamespace(texts=["ok"])
+
+            with self.assertRaises(RuntimeError) as ctx:
+                q._ov_assert_batch_generate(types.SimpleNamespace(generate=reject))
+            self.assertIn("rejects a list of waveforms", str(ctx.exception))
+        finally:
+            q.MAX_BATCH_SPANS = was
+
     def test_ov_base_implements_stt_and_align(self):
         self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream", "align"])
         self.assertEqual(catalog.module_of("ov", "align"), "align")
