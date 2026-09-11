@@ -87,8 +87,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GENAI_TAG}" \
         https://github.com/openvinotoolkit/openvino.genai.git src \
     && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai/src \
-    && export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
-    && export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
+    && export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0 -Wno-macro-redefined" \
+    && export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0 -Wno-macro-redefined" \
     && export CMAKE_GENERATOR=Ninja \
     && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
