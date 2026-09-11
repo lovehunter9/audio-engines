@@ -307,9 +307,12 @@ gradio / flask / sox stay out.
 
 **`ov`.** Intel iGPU and discrete Arc share this image. There is no vLLM on it:
 `stt_stream.py` branches on `AUDIO_BASE=ov` and loads `openvino_genai.ASRPipeline`
-on device `GPU` (or `--device` / CPU when the quota is 0). Converted IR is
+on device `GPU` when `OLARES_GPU_MODE` starts with `intel` (a written `--device`
+still wins; quota `0` infers `CPU`). Converted IR is
 preferred (`openvino/` next to the HF snapshot); a missing IR is exported once
-with `optimum-cli` and reused. `stt_stream` keeps the same WebSocket contract
+with `optimum-cli` and reused. `--batch-max-spans` above 1 sends the group to
+one `generate()` so the decoder runs as a batch (this image patches GenAI to
+accept a list of waveforms). `stt_stream` keeps the same WebSocket contract
 (`partial` / `final`) but **does not transcribe until the client stops** —
 OpenVINO streams decoder tokens after the utterance, which is the Intel
 tradeoff against vLLM's incremental encoder cache. Do not emit live partials
