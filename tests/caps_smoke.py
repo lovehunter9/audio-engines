@@ -737,6 +737,63 @@ def t_qwen():
                   meters=("input",))
         batch_over_cap(c, q, calls)
         repetition_fallback(q)
+        repetition_request_spellings(q)
+        malformed_span_is_isolated(c, q, calls)
+
+
+def malformed_span_is_isolated(c, q, calls):
+    """One unusable span must not take the rest of the request with it.
+
+    The serial path has always answered per span: a bad one gets {"error": ...} and its
+    neighbours still get transcripts. parse_segments only checks the payload is a JSON
+    array, so anything at all can arrive as an element -- and the batched path has to keep
+    the same promise, that the reply carries one entry per request entry, in order.
+    """
+    was = q.MAX_BATCH_SPANS
+    q.MAX_BATCH_SPANS = 8
+    try:
+        del calls[:]
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": '[{"start":0,"end":0.2},"oops",'
+                                     '{"start":"n/a","end":1},{"start":0.3,"end":0.5}]'})
+        doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q.MAX_BATCH_SPANS = was
+    got = doc.get("results") or []
+    check("a malformed span does not 500 the whole request", r.status_code == 200,
+          r.status_code)
+    check("every requested span still gets an entry, in order", len(got) == 4, got)
+    check("the good spans still carry text",
+          len(got) == 4 and "text" in got[0] and "text" in got[3], got)
+    check("only the malformed ones carry an error",
+          len(got) == 4 and "error" in got[1] and "error" in got[2], got)
+
+
+def repetition_request_spellings(q):
+    """How --repetition-detection is spelled must not flip what it means.
+
+    bool("false") is True, so a value that spells the feature OFF used to read as a JSON
+    override and switch it ON. The detector then failed to build and logged one line about
+    an ignored value -- while everything keyed on "was it asked for" carried on believing
+    it had been. A word is a word; only real JSON is an override.
+    """
+    from wrapper.contract import EngineArgs
+
+    cases = [
+        ("",                                        False, ""),
+        ("--repetition-detection",                  True,  ""),
+        ("--repetition-detection true",             True,  ""),
+        ("--repetition-detection false",            False, ""),
+        ("--repetition-detection 0",                False, ""),
+        ("--repetition-detection off",              False, ""),
+        ('--repetition-detection {"min_count":30}', True,  '{"min_count":30}'),
+    ]
+    for raw, want_on, want_override in cases:
+        on, override = q.repetition_request(EngineArgs(raw))
+        check("spelling %r asks for it: %s" % (raw or "(nothing)", want_on),
+              on == want_on, on)
+        check("spelling %r overrides: %r" % (raw or "(nothing)", want_override),
+              override == want_override, override)
 
 
 def repetition_fallback(q):

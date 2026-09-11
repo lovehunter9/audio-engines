@@ -679,6 +679,22 @@ class EngineArgsTest(unittest.TestCase):
         args.warn_unclaimed(log)
         self.assertEqual(log.lines, [])
 
+    def test_a_flag_given_with_no_value_says_so(self):
+        """The likeliest typo of all: --batch-max-spans with the number left off.
+
+        text() answers the default for it, exactly as for a flag nobody passed, so without
+        a separate check this is the one mistake that reports nothing -- and the deployment
+        that meant to switch batching on runs the serial path instead, correct and slow.
+        """
+        args = self._args("--batch-max-spans")
+        self.assertEqual(args.count("--batch-max-spans", 1), 1)
+        log = _CollectingLog()
+        args.warn_unclaimed(log)
+        self.assertTrue(
+            any("--batch-max-spans" in line and "no value" in line for line in log.lines),
+            log.lines,
+        )
+
     def test_an_absent_flag_is_not_an_unreadable_one(self):
         """The default path must stay silent, or the warning becomes noise everyone filters out."""
         args = self._args("")

@@ -102,10 +102,26 @@ REPETITION_FALLBACK_TOKENS_PER_SEC = max(
 _FALLBACK_ASKED = _args.text("--repetition-fallback-tokens-per-sec") is not None
 TOKENS_FLOOR = 64
 REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
-REPETITION_OVERRIDE = (_args.text("--repetition-detection", "") or "").strip()
-# switch() reads the bare form and text() the JSON one; a JSON value is not "on" to switch(),
-# so both have to be consulted to answer "was it asked for at all".
-REPETITION_ON = _args.switch("--repetition-detection") or bool(REPETITION_OVERRIDE)
+# switch() reads the bare and boolean forms and text() the JSON one; a JSON value is not "on"
+# to switch(), so both have to be consulted to answer "was it asked for at all".
+#
+# 🔴 A boolean WORD is not an override. Without this, `--repetition-detection false` reads as
+# a JSON override because bool("false") is True, and an operator who spelled out "off" gets
+# the feature switched on -- json.loads then gives False, update() throws, and the only trace
+# is one WARN about an ignored value, while everything keyed on REPETITION_ON believed it.
+def repetition_request(args):
+    """(asked for?, JSON override) for --repetition-detection. A function so it can be tested.
+
+    Inline, the boolean-word case is invisible: every spelling reads as "on" and the reader
+    has to notice that bool("false") is True to see it.
+    """
+    raw = (args.text("--repetition-detection", "") or "").strip()
+    boolish = raw.lower() in ("", "1", "true", "yes", "on", "0", "false", "no", "off")
+    override = "" if boolish else raw
+    return bool(args.switch("--repetition-detection") or override), override
+
+
+REPETITION_ON, REPETITION_OVERRIDE = repetition_request(_args)
 _args.warn_unclaimed(log)
 
 MAX_NEW_TOKENS = 32
@@ -123,6 +139,10 @@ OFFLINE_MAX_TOKENS = 4096
 _state = _runtime.state
 # One slot each, filled on first use. Two rather than one because the backstop asks what the
 # build CAN do and the detector asks what was REQUESTED: see _detector_class, _repetition_params.
+# max_tokens may legitimately be None (vLLM: generate until max_model_len), so None
+# cannot double as "there was nothing to restore" -- read that way, the narrowed
+# budget stays in place for every later call on this load, offline and streaming.
+_MISSING = object()
 _repdet_class = []
 _repdet_cache = []
 # Says the repetition story once, on the first transcription rather than at startup: the
@@ -369,7 +389,7 @@ def _offline_transcribe(audio):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
-    old = getattr(sp, "max_tokens", None) if sp is not None else None
+    old = getattr(sp, "max_tokens", _MISSING) if sp is not None else _MISSING
     restore_rep = None
     try:
         if sp is not None:
@@ -377,7 +397,7 @@ def _offline_transcribe(audio):
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
-        if sp is not None and old is not None:
+        if sp is not None and old is not _MISSING:
             sp.max_tokens = old
         if restore_rep is not None:
             restore_rep()
@@ -396,7 +416,7 @@ def _offline_transcribe_many(clips):
     # HTTP requests and left as 214 single-sequence generate calls.
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
-    old = getattr(sp, "max_tokens", None) if sp is not None else None
+    old = getattr(sp, "max_tokens", _MISSING) if sp is not None else _MISSING
     restore_rep = None
     try:
         if sp is not None:
@@ -407,7 +427,7 @@ def _offline_transcribe_many(clips):
         results = asr.transcribe(audio=[(c, 16000) for c in clips],
                                  language=None, return_time_stamps=False)
     finally:
-        if sp is not None and old is not None:
+        if sp is not None and old is not _MISSING:
             sp.max_tokens = old
         if restore_rep is not None:
             restore_rep()
@@ -457,13 +477,23 @@ def build_app(supports):
                         out = [None] * len(segs)
                         spans = []
                         for i, seg in enumerate(segs):
-                            lo = max(0, int(float(seg.get("start") or 0) * 16000))
-                            hi = min(len(audio), int(float(seg.get("end") or 0) * 16000))
+                            # Guarded per span, because the serial path below is: one
+                            # malformed span answers with its own error and the rest of the
+                            # request still gets transcripts. Unguarded, a caller sending
+                            # [{"start":0,"end":1}, "oops"] loses EVERY span to a single 500
+                            # -- parse_segments only checks the payload is a JSON array --
+                            # which breaks the promise this batching rests on: the reply
+                            # carries the same count in the same order as the request.
+                            try:
+                                lo = max(0, int(float(seg.get("start") or 0) * 16000))
+                                hi = min(len(audio), int(float(seg.get("end") or 0) * 16000))
+                            except Exception as e:
+                                out[i] = {"error": "stt failed: %s" % e}
+                                continue
                             if hi <= lo:
                                 out[i] = {"text": ""}
                             else:
-                                ctx.meter(input_seconds=(hi - lo) / 16000.0)
-                                spans.append((i, audio[lo:hi]))
+                                spans.append((i, audio[lo:hi], (hi - lo) / 16000.0))
                         done = len(segs) - len(spans)
                         for at in range(0, len(spans), MAX_BATCH_SPANS):
                             group = spans[at:at + MAX_BATCH_SPANS]
@@ -471,8 +501,13 @@ def build_app(supports):
                             # mid-call is not seen until that group returns. Bounding the
                             # group is what bounds that wait.
                             ctx.checkpoint()
+                            # Metered here rather than while slicing: meter() is additive and
+                            # feeds the billing headers and the task doc, so counting every
+                            # span up front bills a cancelled job for audio it never read.
+                            for _i, _clip, _secs in group:
+                                ctx.meter(input_seconds=_secs)
                             try:
-                                texts = _offline_transcribe_many([c for _, c in group])
+                                texts = _offline_transcribe_many([c for _, c, _s in group])
                                 # zip stops at the shorter side, so a short answer would
                                 # leave spans sitting at None and reach the caller as null
                                 # results rather than as a failure. Fail the group instead.
@@ -480,7 +515,7 @@ def build_app(supports):
                                     raise RuntimeError(
                                         "engine returned %d results for %d spans"
                                         % (len(texts), len(group)))
-                                for (i, _), t in zip(group, texts):
+                                for (i, _, _s), t in zip(group, texts):
                                     out[i] = {"text": t}
                             except tasks.Cancelled:
                                 raise
@@ -488,7 +523,7 @@ def build_app(supports):
                                 # No per-span outcome exists when a call fails, so every span
                                 # in that group carries the same error and the caller retries
                                 # the batch -- which is what it already does today.
-                                for i, _ in group:
+                                for i, _, _s in group:
                                     out[i] = {"error": "stt failed: %s" % e}
                             done += len(group)
                             ctx.progress(done=done, total=len(segs))

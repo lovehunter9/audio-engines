@@ -126,8 +126,20 @@ class EngineArgs:
         val = self._vals.get(key)
         return default if val is None or val is True else str(val)
 
+    def _bare(self, name):
+        """The flag was given with no value at all -- `--flag` where `--flag N` was meant.
+
+        text() cannot show this: it answers the default for a valueless flag, exactly as it
+        does for a flag nobody passed. A number that needs a value has to tell the two apart,
+        or the likeliest typo of all is the one that reports nothing.
+        """
+        return self._vals.get(self._key(name)) is True
+
     def number(self, name, default):
         raw = self.text(name)
+        if self._bare(name):
+            self._unreadable.append((name, "<given with no value>", default))
+            return float(default)
         try:
             return float(raw or default)
         except (TypeError, ValueError):
@@ -136,6 +148,9 @@ class EngineArgs:
 
     def count(self, name, default):
         raw = self.text(name)
+        if self._bare(name):
+            self._unreadable.append((name, "<given with no value>", default))
+            return int(default)
         try:
             return int(float(raw or default))
         except (TypeError, ValueError):
