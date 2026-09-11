@@ -90,6 +90,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         setuptools wheel ninja pybind11 \
+        "py-build-cmake==0.5.0" \
+        "pybind11-stubgen==2.5.5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps --no-build-isolation \
         /tmp/genai/src \
     && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
