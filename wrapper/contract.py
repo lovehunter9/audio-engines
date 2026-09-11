@@ -329,10 +329,11 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     declared, _bad = parse_supports()
     capabilities = [COARSE_CAPABILITY] + list(served)
     spec = {
-        # v1: llm-init v1.7.12 only treats schema_version==1 as authoritative
-        # and will then drop undeclared static proxy rows (chat / embeddings).
-        # Newer llm-init still accepts 1. Row-level operation_id etc. stay additive.
-        "schema_version": 1,
+        # NVIDIA / every non-ov base: main's v2. ov only: llm-init v1.7.12 on
+        # the Intel charts treats schema_version==1 as the authoritative catalog
+        # and drops undeclared static proxy rows. A v2 report from ov is relayed
+        # but does not remove that fallback.
+        "schema_version": 1 if base == "ov" else 2,
         "base": spec_base(),
         "model": model_name,
         "implements": catalog.implements(base),

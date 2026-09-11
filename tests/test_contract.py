@@ -1111,7 +1111,7 @@ class EngineSurfaceTest(unittest.TestCase):
     def test_engine_spec_has_the_versioned_contract_shape(self):
         spec = self.client.get("/api/engine-spec").json()
 
-        self.assertEqual(spec["schema_version"], 1)
+        self.assertEqual(spec["schema_version"], 2)
         self.assertEqual(spec["base"], "qwen")
         self.assertEqual(spec["model"], "test-model")
         self.assertEqual(spec["implements"], ["stt", "stt_stream", "align"])
