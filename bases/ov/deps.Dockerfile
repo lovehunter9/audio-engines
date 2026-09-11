@@ -79,16 +79,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-asr==0.0.6" \
     && GENAI_VER="$(python3 -c 'import openvino_genai as g; print(getattr(g, "__version__", "") or "")')" \
-    && echo "pip openvino-genai ${GENAI_VER}" \
+    && GENAI_TAG="${GENAI_VER%%-*}" \
+    && echo "pip openvino-genai ${GENAI_VER} -> tag ${GENAI_TAG}" \
     && mkdir -p /tmp/genai && cd /tmp/genai \
-    && (git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GENAI_VER}" https://github.com/openvinotoolkit/openvino.genai.git src \
-        || git clone --depth 1 --recurse-submodules --shallow-submodules --branch "v${GENAI_VER}" https://github.com/openvinotoolkit/openvino.genai.git src \
-        || git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/openvinotoolkit/openvino.genai.git src) \
+    && git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GENAI_TAG}" \
+        https://github.com/openvinotoolkit/openvino.genai.git src \
     && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai/src \
     && export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
     && export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
     && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
-    && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        setuptools wheel ninja pybind11 \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps --no-build-isolation \
         /tmp/genai/src \
     && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
     && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
