@@ -709,6 +709,27 @@ class EngineArgsTest(unittest.TestCase):
             self.assertTrue(any("--batch-max-spans" in line for line in log.lines),
                             (raw, log.lines))
 
+    def test_a_switch_with_a_stray_equals_sign_still_means_on(self):
+        """`--flag=` is the bare flag with a typo, and must not come back meaning the opposite.
+
+        A chart writing `--flag={{ .Values.x }}` with x unset renders exactly this. Reading
+        it as off turns the feature off while its author reads the template as turning it on,
+        and nothing anywhere says which of the two happened.
+        """
+        for raw in ("--repetition-detection", "--repetition-detection=",
+                    "--repetition-detection= ", '--repetition-detection ""'):
+            self.assertTrue(self._args(raw).switch("--repetition-detection"), raw)
+        for raw in ("--repetition-detection false", "--repetition-detection 0", ""):
+            self.assertFalse(self._args(raw).switch("--repetition-detection"), raw)
+
+    def test_the_warning_does_not_quote_a_value_nobody_typed(self):
+        args = self._args("--batch-max-spans")
+        args.count("--batch-max-spans", 1)
+        log = _CollectingLog()
+        args.warn_unclaimed(log)
+        self.assertTrue(any("given with no value" in line for line in log.lines), log.lines)
+        self.assertFalse(any("<" in line for line in log.lines), log.lines)
+
     def test_given_separates_a_valueless_flag_from_an_absent_one(self):
         self.assertTrue(self._args("--repetition-fallback-tokens-per-sec").given(
             "--repetition-fallback-tokens-per-sec"))

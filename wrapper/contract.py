@@ -148,7 +148,7 @@ class EngineArgs:
     def number(self, name, default):
         raw = self.text(name)
         if self._bare(name):
-            self._unreadable.append((name, "<given with no value>", default))
+            self._unreadable.append((name, None, default))
             return float(default)
         try:
             return float(raw or default)
@@ -159,7 +159,7 @@ class EngineArgs:
     def count(self, name, default):
         raw = self.text(name)
         if self._bare(name):
-            self._unreadable.append((name, "<given with no value>", default))
+            self._unreadable.append((name, None, default))
             return int(default)
         try:
             return int(float(raw or default))
@@ -176,12 +176,16 @@ class EngineArgs:
     def switch(self, name, default=False):
         key = self._key(name)
         self._claimed.add(key)
-        val = self._vals.get(key)
-        if val is None:
+        if self._key(name) not in self._vals:
             return bool(default)
-        if val is True:
+        # `--flag=` is the bare flag with a stray equals sign, not a value that means off.
+        # Reading it as off flips the meaning of the flag silently -- a chart rendering
+        # `--flag={{ .Values.x }}` with x unset turns the feature OFF while its author reads
+        # the template as turning it on. _bare() already decides this for numbers; a switch
+        # has to answer the same question the same way.
+        if self._bare(name):
             return True
-        return str(val).strip().lower() in self.ON_WORDS
+        return str(self._vals.get(key)).strip().lower() in self.ON_WORDS
 
     def passthrough(self):
         """The flags no cap claimed, ready to hand to a child engine's argv."""
@@ -197,7 +201,12 @@ class EngineArgs:
         if rest:
             log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
         for name, raw, default in self._unreadable:
-            log.warning("ENGINE_ARGS %s=%r is not a number; using %s", name, raw, default)
+            if raw is None:
+                # Quoting a placeholder here sends the reader grepping their ENGINE_ARGS for
+                # a string that is not in it, and "not a number" is not what went wrong.
+                log.warning("ENGINE_ARGS %s was given with no value; using %s", name, default)
+            else:
+                log.warning("ENGINE_ARGS %s=%r is not a number; using %s", name, raw, default)
 
 
 def cache_dir(repo):

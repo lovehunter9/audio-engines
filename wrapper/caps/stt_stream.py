@@ -447,8 +447,17 @@ def _offline_transcribe(audio):
             restore_rep = _apply_repetition(sp)
         results = asr.transcribe(audio=(audio, 16000), language=None, return_time_stamps=False)
     finally:
-        if sp is not None and old is not _MISSING:
-            sp.max_tokens = old
+        if sp is not None:
+            if old is not _MISSING:
+                sp.max_tokens = old
+            else:
+                # The attribute did not exist and the try above created it; putting the
+                # narrowed budget back is not enough, it has to go. Leaving it keeps the
+                # cap on this shared object for every later call, offline and streaming.
+                try:
+                    delattr(sp, "max_tokens")
+                except Exception:
+                    pass
         if restore_rep is not None:
             restore_rep()
     r = results[0] if results else None
@@ -477,8 +486,17 @@ def _offline_transcribe_many(clips):
         results = asr.transcribe(audio=[(c, 16000) for c in clips],
                                  language=None, return_time_stamps=False)
     finally:
-        if sp is not None and old is not _MISSING:
-            sp.max_tokens = old
+        if sp is not None:
+            if old is not _MISSING:
+                sp.max_tokens = old
+            else:
+                # The attribute did not exist and the try above created it; putting the
+                # narrowed budget back is not enough, it has to go. Leaving it keeps the
+                # cap on this shared object for every later call, offline and streaming.
+                try:
+                    delattr(sp, "max_tokens")
+                except Exception:
+                    pass
         if restore_rep is not None:
             restore_rep()
     texts = []
