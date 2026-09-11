@@ -26,12 +26,35 @@ MODEL_REPO = _runtime.model_repo
 PORT = _runtime.port
 
 _args = EngineArgs()
+
+
+def _is_ov():
+    """The ov image bakes AUDIO_BASE=ov. Never infer Intel from visible hardware."""
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "ov"
+
+
+def _gpu_mode():
+    return (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+
+
+def _default_max_model_len():
+    # Chart used to stuff this into empty ENGINE_ARGS. The user-written flag still wins;
+    # this is only what the engine fills in when the flag is absent.
+    return 3072 if _gpu_mode() == "nvidia-gb10" else 8192
+
+
+def _default_enforce_eager():
+    # Same story as max-model-len: NVIDIA installs used to always get --enforce-eager.
+    # OpenVINO does not read the flag, so the inferred default stays off there.
+    return not _is_ov()
+
+
 # vLLM wants a share of the whole card; the platform hands out a quota, so derive one from it.
 GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 # Holds ONE unit of work; the chart sizes it per machine type, since unified memory needs less.
-MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
+MAX_MODEL_LEN = max(1, _args.count("--max-model-len", _default_max_model_len()))
 # Capture is where startup wedges holding the vGPU lock.
-ENFORCE_EAGER = _args.switch("--enforce-eager")
+ENFORCE_EAGER = _args.switch("--enforce-eager", _default_enforce_eager())
 # How many spans one generate() may carry; default 1.
 MAX_BATCH_SPANS = max(1, _args.count("--batch-max-spans", 1))
 # End a span that has started repeating rather than folding the loop out afterwards.
@@ -104,11 +127,6 @@ _OV_LANG = {
 }
 
 
-def _is_ov():
-    """The ov image bakes AUDIO_BASE=ov. Never infer Intel from visible hardware."""
-    return (os.environ.get("AUDIO_BASE") or "").strip() == "ov"
-
-
 def _ov_device():
     if OV_DEVICE:
         return OV_DEVICE
@@ -139,7 +157,8 @@ def _p(msg):
 
 def _capture_kw():
     if ENFORCE_EAGER:
-        _p("--enforce-eager given: skipping CUDA graphs entirely")
+        how = "flag" if _args.given("--enforce-eager") else "inferred"
+        _p("--enforce-eager %s: skipping CUDA graphs entirely" % how)
         return {"enforce_eager": True}
     sizes = list(_CAPTURE_SIZES)
     try:
@@ -247,6 +266,7 @@ def _load_ov():
     os.makedirs(cache, exist_ok=True)
     _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
     pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
+    _ov_assert_batch_generate(pipe)
     _state["asr"] = pipe
     _state["backend"] = "openvino"
     _say_repetition_once()
@@ -283,6 +303,52 @@ def _ov_generate(audio, language=None, streamer=None):
     if streamer is not None:
         kw["streamer"] = streamer
     return asr.generate(raw, **kw)
+
+
+def _ov_result_texts(result, n):
+    texts = getattr(result, "texts", None)
+    if not texts:
+        if n == 1:
+            return [_ov_result_text(result)]
+        raise RuntimeError("openvino generate returned no texts for %d clips" % n)
+    out = [(t or "").strip() for t in texts]
+    if len(out) != n:
+        raise RuntimeError("openvino generate returned %d texts for %d clips"
+                           % (len(out), n))
+    return out
+
+
+def _ov_assert_batch_generate(pipe):
+    """--batch-max-spans above 1 is a real batch. Fail load if generate() cannot take a list."""
+    if MAX_BATCH_SPANS <= 1:
+        return
+    try:
+        pipe.generate([[0.0] * 1600, [0.0] * 1600], max_new_tokens=1)
+    except TypeError as e:
+        raise RuntimeError(
+            "ENGINE_ARGS --batch-max-spans is %d but this OpenVINO build "
+            "rejects a list of waveforms (%s). Use the patched audio-ov image."
+            % (MAX_BATCH_SPANS, e)
+        ) from e
+    except Exception as e:
+        _p("batch generate probe accepted a list (%s); continuing" % e)
+
+
+def _ov_generate_many(clips, language=None):
+    """One OpenVINO generate() for the group. Decoder already accepts batch>1;
+    the patched ASRPipeline.generate takes a list of waveforms. A TypeError is
+    the unpatched wheel, which cannot accelerate and must not pretend to.
+    """
+    if len(clips) == 1:
+        return [_ov_result_text(_ov_generate(clips[0], language=language))]
+    asr = _state["asr"]
+    raws = [c.astype("float32").reshape(-1).tolist() for c in clips]
+    kw = {"max_new_tokens": _ov_max_new_tokens(max(len(r) for r in raws) / 16000.0)}
+    lang = _ov_language(language)
+    if lang:
+        kw["language"] = lang
+    result = asr.generate(raws, **kw)
+    return _ov_result_texts(result, len(clips))
 
 
 def _load_blocking():
@@ -564,7 +630,8 @@ def _say_repetition_once():
            "per audio second via max_new_tokens (same rule as a vLLM build without the "
            "detector; too low truncates, and truncation is not visible here)%s" % (
                REPETITION_FALLBACK_TOKENS_PER_SEC,
-               ". --batch-max-spans still groups, but each clip is generated on its own"
+               ". --batch-max-spans above 1 sends the group in one generate(); "
+               "the cap follows the longest clip"
                if MAX_BATCH_SPANS > 1 else ""))
         return
     asr = _state.get("asr")
@@ -667,11 +734,8 @@ def _offline_transcribe(audio, language=None):
 
 
 def _offline_transcribe_many(clips):
-    # OpenVINO GenAI generate() takes one waveform. The caller's grouping, halving
-    # and cancel bound still run; each clip gets the same fallback token budget as
-    # CUDA uses when this engine has no detector.
     if _is_ov():
-        return [_offline_transcribe(c) for c in clips]
+        return _ov_generate_many(clips)
     # qwen-asr's transcribe() takes a list and hands the whole list to the engine in one generate().
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)

@@ -52,7 +52,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Do not `pip install --upgrade pip`: Ubuntu's pip has no RECORD file and the upgrade aborts the build.
 # ASR: openvino_genai.ASRPipeline + optimum export (qwen3_asr in transformers 5.13).
 # Align: OVModelForQwen3ASRForcedAligner from openvino-dev-samples/optimum-intel until upstream merges.
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
+COPY bases/ov/patches/apply_qwen3_asr_batch.py /tmp/apply_qwen3_asr_batch.py
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cmake \
+        ninja-build \
+        g++ \
+        python3-dev \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
         openvino-genai \
         huggingface_hub \
@@ -69,6 +78,19 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-asr==0.0.6" \
+    && GENAI_VER="$(python3 -c 'import openvino_genai as g; print(getattr(g, "__version__", "") or "")')" \
+    && echo "pip openvino-genai ${GENAI_VER}" \
+    && mkdir -p /tmp/genai && cd /tmp/genai \
+    && (git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GENAI_VER}" https://github.com/openvinotoolkit/openvino.genai.git src \
+        || git clone --depth 1 --recurse-submodules --shallow-submodules --branch "v${GENAI_VER}" https://github.com/openvinotoolkit/openvino.genai.git src \
+        || git clone --depth 1 --recurse-submodules --shallow-submodules https://github.com/openvinotoolkit/openvino.genai.git src) \
+    && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai/src \
+    && export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
+    && export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
+    && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps \
+        /tmp/genai/src \
+    && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
     && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
 print('openvino', openvino.__version__); \
