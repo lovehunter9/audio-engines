@@ -738,6 +738,83 @@ class OpenVINOModeTest(unittest.TestCase):
             with mock.patch.object(q, "_offline_transcribe", side_effect=RuntimeError("cold")):
                 q._warmup()
 
+    def test_ov_repetition_fallback_uses_the_same_per_second_cap(self):
+        from wrapper.caps import stt_stream as q
+
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        try:
+            q.REPETITION_ON = False
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                self.assertEqual(q._ov_max_new_tokens(10.0), q.OV_MAX_NEW_TOKENS)
+                q.REPETITION_ON = True
+                want = min(q.OFFLINE_MAX_TOKENS, int(10.0 * 12) + q.TOKENS_FLOOR)
+                self.assertEqual(q._ov_max_new_tokens(10.0), want)
+                q.REPETITION_FALLBACK_TOKENS_PER_SEC = 0
+                self.assertEqual(q._ov_max_new_tokens(10.0), q.OV_MAX_NEW_TOKENS)
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
+
+    def test_ov_generate_passes_the_fallback_budget(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        seen = []
+
+        def fake_generate(raw, **kw):
+            seen.append(kw.get("max_new_tokens"))
+            return types.SimpleNamespace(texts=["ok"])
+
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        asr = q._state.get("asr")
+        try:
+            q.REPETITION_ON = True
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            q._state["asr"] = types.SimpleNamespace(generate=fake_generate)
+
+            class _Arr:
+                def astype(self, _dt):
+                    return self
+
+                def reshape(self, *a, **k):
+                    return self
+
+                def tolist(self):
+                    return [0.0] * 16000
+
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                q._ov_generate(_Arr())
+            self.assertEqual(seen, [min(q.OFFLINE_MAX_TOKENS, 12 + q.TOKENS_FLOOR)])
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
+            q._state["asr"] = asr
+
+    def test_ov_repetition_report_does_not_look_for_sampling_params(self):
+        from wrapper.caps import stt_stream as q
+
+        lines = []
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        try:
+            q.REPETITION_ON = True
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            del q._repdet_said[:]
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                with mock.patch.object(q, "_p", side_effect=lines.append):
+                    q._say_repetition_once()
+            self.assertTrue(any("OpenVINO has no vLLM detector" in x for x in lines), lines)
+            self.assertFalse(any("sampling_params" in x for x in lines), lines)
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
+
 
 class SharedHelperTest(unittest.TestCase):
     def test_audioio_import_does_not_require_numpy(self):
