@@ -30,7 +30,12 @@ _args = EngineArgs()
 GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 # Holds ONE unit of work; the chart sizes it per machine type, since unified memory needs less.
 MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
-# Capture is where startup wedges holding the vGPU lock; inference is batch 1, so 4 shapes do.
+# Capture is where startup wedges holding the vGPU lock.
+# ⚠️ The four shapes were chosen when inference here was always batch 1. --batch-max-spans
+# above 1 makes that false: vLLM sets max_cudagraph_capture_size from the largest entry, so a
+# group bigger than 8 decodes outside CUDA graphs. Not a correctness problem, and the measured
+# speed-up was taken that way -- but the reason written here no longer holds, and picking a
+# list to match the cap is a separate measurement, not a guess to slip in alongside this.
 ENFORCE_EAGER = _args.switch("--enforce-eager")
 # How many spans one generate() may carry. 1 is one call per span, which is what ships
 # today, so the default changes nothing for anybody.
@@ -231,6 +236,12 @@ def _load_blocking():
             _p("LLM() rejected %s (%s); retrying with fewer kwargs"
                % (sorted(set(_try) - set(_kw)), e))
     _state["asr"] = asr
+    # 🔴 Said here, not from inside a request. The report used to hang off _token_budget(),
+    # whose only two callers sit inside `if sp is not None:` -- so the branch written FOR the
+    # sampling_params-is-None case could never run, and a deployment that only streams never
+    # reached any of it. Both are exactly the silence this report exists to break, and the
+    # one place that is true for every deployment is the moment the model finished loading.
+    _say_repetition_once()
     _warmup()
     _state["ready"] = True
     _p("engine READY: %s (gpu_util=%.2f)" % (MODEL_REPO, GPU_UTIL))
@@ -371,7 +382,8 @@ def _say_repetition_once():
                "--repetition-detection, which was not asked for"
                % REPETITION_FALLBACK_TOKENS_PER_SEC)
         return
-    if _state.get("asr") is not None and getattr(_state["asr"], "sampling_params", None) is None:
+    asr = _state.get("asr")
+    if asr is not None and getattr(asr, "sampling_params", None) is None:
         _p("WARN this qwen-asr exposes no sampling_params: neither --repetition-detection nor "
            "--repetition-fallback-tokens-per-sec can be applied, whatever they are set to")
         return

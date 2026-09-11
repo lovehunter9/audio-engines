@@ -738,6 +738,7 @@ def t_qwen():
         batch_over_cap(c, q, calls)
         repetition_fallback(q)
         repetition_request_spellings(q)
+        the_report_does_not_need_a_request(q)
         malformed_span_is_isolated(c, q, calls)
         one_bad_span_does_not_sink_its_group(c, q, calls)
 
@@ -809,6 +810,25 @@ def malformed_span_is_isolated(c, q, calls):
           len(got) == 4 and "text" in got[0] and "text" in got[3], got)
     check("only the malformed ones carry an error",
           len(got) == 4 and "error" in got[1] and "error" in got[2], got)
+
+
+def the_report_does_not_need_a_request(q):
+    """Whatever it has to say must be said without waiting for an offline transcription.
+
+    It used to hang off the token budget, whose callers both sit inside
+    `if sp is not None:` -- so the branch written for "this build exposes no
+    sampling_params" could not run, and a deployment that only streams never reached any
+    of it. Those are the two silences the report exists to break, so it is said once when
+    the model finishes loading, and the load path is where this pins it.
+    """
+    import inspect
+
+    src = inspect.getsource(q._load_blocking)
+    check("the report is made when the model loads, not from a request path",
+          "_say_repetition_once()" in src)
+    budget = inspect.getsource(q._token_budget)
+    check("the budget no longer has to be the thing that reports",
+          "if sp is not None" not in budget)
 
 
 def repetition_request_spellings(q):

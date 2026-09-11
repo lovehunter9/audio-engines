@@ -233,10 +233,14 @@ the first match and says so in the log.
 **`qwen`.** One vLLM load serves `stt` (task-based) and `stt_stream` (WebSocket),
 so the two are kept off each other with a plain `threading.Lock` the task worker
 also takes — an `asyncio` lock cannot span the worker thread. vLLM is asked to
-capture only the shapes `1,2,4,8` because inference here is always batch 1 and
-capture is where startup has been seen to wedge holding the vGPU lock; the field
-name is probed off `CompilationConfig` rather than assumed, and `--enforce-eager`
-skips graphs altogether if that ever needs to be ruled out. Deps `FROM` is
+capture only the shapes `1,2,4,8` because capture is where startup has been seen
+to wedge holding the vGPU lock; the field name is probed off `CompilationConfig`
+rather than assumed, and `--enforce-eager` skips graphs altogether if that ever
+needs to be ruled out. Those four shapes were picked when inference here was
+always batch 1, which `--batch-max-spans` above 1 makes untrue: vLLM takes the
+largest entry as its capture ceiling, so a larger group decodes outside the
+graphs. That costs speed, not correctness, and the batching measurements were
+taken that way; matching the list to the cap wants its own measurement. Deps `FROM` is
 arch-selected:
 amd64 keeps the validated cu129 / v0.23 image; arm64 uses the general aarch64
 CUDA track (`vllm …:v0.16.0-cu130`) plus an **arm64-only** post-install patch that
