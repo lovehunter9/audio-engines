@@ -50,9 +50,8 @@ def base_name():
     return (os.environ.get("AUDIO_BASE") or "").strip()
 
 
-# Display family only. Chart-pinned llm-init v1.7.12 drops the LLM catalog
-# when schema_version is 1, not because base is a known family name.
-# ov is the Intel build of the same qwen routes; dispatch still keys on AUDIO_BASE.
+# Display family only. ov is the Intel build of the same qwen routes;
+# dispatch still keys on AUDIO_BASE.
 _SPEC_BASE = {"ov": "qwen"}
 
 
@@ -329,11 +328,7 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     declared, _bad = parse_supports()
     capabilities = [COARSE_CAPABILITY] + list(served)
     spec = {
-        # NVIDIA / every non-ov base: main's v2. ov only: llm-init v1.7.12 on
-        # the Intel charts treats schema_version==1 as the authoritative catalog
-        # and drops undeclared static proxy rows. A v2 report from ov is relayed
-        # but does not remove that fallback.
-        "schema_version": 1 if base == "ov" else 2,
+        "schema_version": 2,
         "base": spec_base(),
         "model": model_name,
         "implements": catalog.implements(base),
