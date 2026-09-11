@@ -54,8 +54,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Align: OVModelForQwen3ASRForcedAligner from openvino-dev-samples/optimum-intel until upstream merges.
 COPY bases/ov/patches/apply_qwen3_asr_batch.py /tmp/apply_qwen3_asr_batch.py
 
+# cmake defaults to Unix Makefiles (needs `make`). ninja is faster once CMAKE_GENERATOR=Ninja.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
+        make \
         ninja-build \
         g++ \
         python3-dev \
@@ -87,6 +89,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai/src \
     && export CFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
     && export CXXFLAGS="-D_GLIBCXX_USE_CXX11_ABI=0" \
+    && export CMAKE_GENERATOR=Ninja \
     && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         setuptools wheel ninja pybind11 \
