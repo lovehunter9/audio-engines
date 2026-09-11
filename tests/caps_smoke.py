@@ -736,6 +736,58 @@ def t_qwen():
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
                   meters=("input",))
         batch_over_cap(c, q, calls)
+        repetition_fallback(q)
+
+
+def repetition_fallback(q):
+    """The fallback replaces the detector, never joins it, and can be turned off by name.
+
+    Three states have to stay distinguishable, because from outside they all look like an
+    engine that transcribes: the detector running, the fallback capping, and neither. The
+    default is the number that used to be hard-coded, so this exposes it without moving it.
+    """
+    stock = q.OFFLINE_MAX_TOKENS
+    was_on, was_n, was_cls = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_class[:]
+    try:
+        check("the default is the number that was hard-coded",
+              q.REPETITION_FALLBACK_TOKENS_PER_SEC == 12, q.REPETITION_FALLBACK_TOKENS_PER_SEC)
+
+        # A build that HAS the detector: the fallback is redundant there and must not apply.
+        del q._repdet_class[:]
+        q._repdet_class.append(object)
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = True, 12
+        check("a build with the detector keeps the engine's own budget",
+              q._token_budget(600.0) == stock, q._token_budget(600.0))
+
+        # A build that has NOT got it: the fallback is what protection means there.
+        del q._repdet_class[:]
+        q._repdet_class.append(None)
+        want = min(stock, int(10.0 * 12) + q.TOKENS_FLOOR)
+        check("without the detector the fallback bounds the output",
+              q._token_budget(10.0) == want, (q._token_budget(10.0), want))
+
+        q.REPETITION_FALLBACK_TOKENS_PER_SEC = 0
+        check("setting it to 0 gives the engine's own budget back",
+              q._token_budget(10.0) == stock, q._token_budget(10.0))
+
+        # Never asked for protection: neither mechanism may touch the budget.
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = False, 12
+        check("asking for nothing leaves the budget alone",
+              q._token_budget(10.0) == stock, q._token_budget(10.0))
+
+        # And it must not go looking for the detector either. Probing warns when the class is
+        # missing, so probing unasked puts a warning about an unused feature in front of every
+        # deployment on the older vLLM. Caught on a real engine, not here, which is why it is
+        # pinned here: the empty list stays empty only if nothing probed.
+        del q._repdet_class[:]
+        del q._repdet_said[:]
+        q._say_repetition_once()
+        check("asking for nothing does not probe for the detector",
+              q._repdet_class == [], q._repdet_class)
+    finally:
+        q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_on, was_n
+        del q._repdet_class[:]
+        q._repdet_class.extend(was_cls)
 
 
 def batch_over_cap(c, q, calls):

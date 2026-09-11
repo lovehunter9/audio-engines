@@ -80,14 +80,26 @@ MAX_BATCH_SPANS = max(1, _args.count("--batch-max-spans", 1))
 # qwen3-asr release can, so re-measure on a model upgrade rather than assuming they carry
 # over. The override exists so that a re-measured value can ship without a new image.
 #
-# The cap below is what protection looks like where the detector cannot run: vLLM 0.16 on
-# arm64 has no RepetitionDetectionParams, the lazy import says so and serving continues, and
-# there a runaway span has nothing bounding it. It substitutes for the detector rather than
-# adding to it -- 13.0s with both against 13.2s for the detector alone -- and its headroom is
-# a guess, 12 tokens per audio second over a measured 3.4, which a faster-talking corpus would
-# turn into truncated speech. So it applies on exactly one condition: protection was asked for
-# and this build cannot supply it. Asking for nothing gets the stock budget on both arches.
-TOKENS_PER_AUDIO_SEC = 12
+# What protection looks like where the detector cannot run: vLLM 0.16 has no
+# RepetitionDetectionParams, the lazy import says so and serving continues, and there a
+# runaway span has nothing bounding it but the engine's own OFFLINE_MAX_TOKENS. It
+# SUBSTITUTES for the detector rather than adding to it -- 13.0s with both against 13.2s for
+# the detector alone -- so the two never run together and the name says which one this is.
+#
+# 🔴 Keyed on whether this build HAS the detector, never on the architecture. arm64 shipping
+# a vLLM without the class is a fact about that version, not about the chip: a newer arm64
+# image makes this inert, and an x86 image pinned to an old vLLM would need it. An arch test
+# would keep passing while meaning the wrong thing, which is the failure that leaves no trace.
+#
+# The number is what the operator may not want to accept blind: 12 tokens per audio second
+# over a measured 3.4 on AISHELL-4 meetings. It is generous for that corpus and a guess for
+# any other, and setting it too low truncates real speech -- silently, because transcribe()
+# hands back objects this module reads .text off, with no finish reason, so a span cut short
+# looks exactly like one that finished. Hence a name, a default that keeps today's behaviour,
+# and 0 to turn it off and take the engine's own budget instead.
+REPETITION_FALLBACK_TOKENS_PER_SEC = max(
+    0, _args.count("--repetition-fallback-tokens-per-sec", 12))
+_FALLBACK_ASKED = _args.text("--repetition-fallback-tokens-per-sec") is not None
 TOKENS_FLOOR = 64
 REPETITION_DEFAULTS = {"min_pattern_size": 2, "max_pattern_size": 20, "min_count": 20}
 REPETITION_OVERRIDE = (_args.text("--repetition-detection", "") or "").strip()
@@ -113,6 +125,9 @@ _state = _runtime.state
 # build CAN do and the detector asks what was REQUESTED: see _detector_class, _repetition_params.
 _repdet_class = []
 _repdet_cache = []
+# Says the repetition story once, on the first transcription rather than at startup: the
+# detector probe is lazy on purpose, so this is the earliest point that knows the answer.
+_repdet_said = []
 # vLLM's generate is blocking and not concurrency-safe, so all inference shares one lock.
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
@@ -297,6 +312,42 @@ def _apply_repetition(sp):
     return restore
 
 
+def _say_repetition_once():
+    """One line saying which of the two is in force, and why the other is not.
+
+    Without it the three states are indistinguishable from outside: detector running,
+    fallback capping, and nothing at all all look like an engine that transcribes.
+    """
+    if _repdet_said:
+        return
+    _repdet_said.append(True)
+    # 🔴 Probe only where the answer is used. _detector_class() warns when the class is
+    # missing, and a deployment that never asked for detection has no use for that warning
+    # -- it would arrive on every engine on the older vLLM, for a feature nobody turned on.
+    # The old code got this from `not REPETITION_ON or _detector_class() ...` short-circuiting;
+    # doing it by hand here is easy to lose, which is why it is spelled out.
+    if not REPETITION_ON:
+        if _FALLBACK_ASKED:
+            _p("--repetition-fallback-tokens-per-sec=%d has no effect: it backs up "
+               "--repetition-detection, which was not asked for"
+               % REPETITION_FALLBACK_TOKENS_PER_SEC)
+        return
+    if _detector_class() is not None:
+        if _FALLBACK_ASKED:
+            _p("--repetition-fallback-tokens-per-sec=%d has no effect: this build has the "
+               "detector, which ends a span for repeating rather than for being long"
+               % REPETITION_FALLBACK_TOKENS_PER_SEC)
+        return
+    if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+        _p("WARN repetition fallback off (--repetition-fallback-tokens-per-sec=0) and this "
+           "build has no detector: a repeating span is bounded only by max_tokens=%d, and "
+           "with spans batched the rest of its group waits on it" % OFFLINE_MAX_TOKENS)
+        return
+    _p("repetition fallback: no detector in this build, capping output at %d tokens per "
+       "audio second (measured speech is about 3.4; too low truncates, and truncation is "
+       "not visible here)" % REPETITION_FALLBACK_TOKENS_PER_SEC)
+
+
 def _token_budget(seconds):
     # Two conditions, and both have to hold before the stock budget is replaced: protection
     # was asked for, and this build cannot supply it. Asking for nothing therefore leaves the
@@ -304,10 +355,14 @@ def _token_budget(seconds):
     # point of the flag being off by default. Keying this on "is the detector running" instead
     # would mean turning the detector off silently turned this on, so there would be no way
     # left to ask for the engine's own behaviour.
+    _say_repetition_once()
     if not REPETITION_ON or _detector_class() is not None:
         return OFFLINE_MAX_TOKENS
+    if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+        return OFFLINE_MAX_TOKENS
     return max(TOKENS_FLOOR,
-               min(OFFLINE_MAX_TOKENS, int(seconds * TOKENS_PER_AUDIO_SEC) + TOKENS_FLOOR))
+               min(OFFLINE_MAX_TOKENS,
+                   int(seconds * REPETITION_FALLBACK_TOKENS_PER_SEC) + TOKENS_FLOOR))
 
 
 def _offline_transcribe(audio):
