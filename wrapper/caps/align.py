@@ -46,6 +46,35 @@ def _resolve_hf_dir(repo):
     return snapshot_download(**kw)
 
 
+def _ov_align_repo(repo=None):
+    """OVModelForQwen3ASRForcedAligner loads Qwen3ASRForTokenClassification.
+
+    That is the HuggingFace-native *-hf checkpoint. The qwen_asr package
+    snapshot (0.6B, no suffix) is Qwen3ASRForConditionalGeneration; exporting
+    it as token-classification dies on Unrecognized configuration class.
+    """
+    repo = (repo if repo is not None else MODEL_REPO) or ""
+    repo = repo.strip()
+    if not repo or repo.endswith("-hf"):
+        return repo
+    return repo + "-hf"
+
+
+def _resolve_ov_src():
+    hub = _ov_align_repo()
+    try:
+        return _resolve_hf_dir(hub)
+    except Exception as e:
+        raise RuntimeError(
+            "OpenVINO align needs the HuggingFace-native checkpoint %s in the "
+            "HF cache (OVModelForQwen3ASRForcedAligner / "
+            "Qwen3ASRForTokenClassification). The qwen_asr snapshot %s cannot "
+            "be exported as token-classification. Add hf://%s to MODEL_SOURCE "
+            "so llm-init downloads it."
+            % (hub, MODEL_REPO, hub)
+        ) from e
+
+
 def _xml_has_input(path, name, limit=1048576):
     try:
         with open(path, "rb") as f:
@@ -146,24 +175,17 @@ def _ensure_ov_ir(src):
     return dest
 
 
-def _register_qwen3_asr():
-    from qwen_asr.core.transformers_backend import Qwen3ASRConfig, Qwen3ASRProcessor
-    from transformers import AutoConfig, AutoProcessor
-
-    AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
-    AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
-
-
 def _load_ov():
     from optimum.intel import OVModelForQwen3ASRForcedAligner
     from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
     from transformers import AutoProcessor
 
-    src = _resolve_hf_dir(MODEL_REPO)
+    # Do not register qwen_asr's Qwen3ASRConfig over transformers' native
+    # qwen3_asr: the *-hf IR and AutoProcessor need the HF-native classes.
+    src = _resolve_ov_src()
     model_dir = _ensure_ov_ir(src)
     device = ovutil.device()
     _p("loading OpenVINO forced aligner src=%s ir=%s device=%s" % (src, model_dir, device))
-    _register_qwen3_asr()
     kw = dict(device=device)
     if HF_TOKEN:
         kw["token"] = HF_TOKEN

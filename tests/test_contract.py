@@ -611,6 +611,29 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--task") + 1], "token-classification")
         self.assertNotIn("automatic-speech-recognition", cmd)
 
+    def test_ov_align_repo_uses_hf_native_checkpoint(self):
+        from wrapper.caps import align as a
+
+        self.assertEqual(a._ov_align_repo("Qwen/Qwen3-ForcedAligner-0.6B"),
+                         "Qwen/Qwen3-ForcedAligner-0.6B-hf")
+        self.assertEqual(a._ov_align_repo("Qwen/Qwen3-ForcedAligner-0.6B-hf"),
+                         "Qwen/Qwen3-ForcedAligner-0.6B-hf")
+
+    def test_resolve_ov_src_does_not_export_the_qwen_asr_snapshot(self):
+        from wrapper.caps import align as a
+
+        def missing(repo):
+            raise OSError("not in cache: %s" % repo)
+
+        with mock.patch.object(a, "MODEL_REPO", "Qwen/Qwen3-ForcedAligner-0.6B"):
+            with mock.patch.object(a, "_resolve_hf_dir", side_effect=missing):
+                with mock.patch.object(a, "_export_align_ir") as exp:
+                    with self.assertRaises(RuntimeError) as ctx:
+                        a._resolve_ov_src()
+        exp.assert_not_called()
+        self.assertIn("Qwen3-ForcedAligner-0.6B-hf", str(ctx.exception))
+        self.assertIn("MODEL_SOURCE", str(ctx.exception))
+
     def test_align_ov_ir_rejects_asr_task_cache_without_marker(self):
         from wrapper.caps import align as a
 
