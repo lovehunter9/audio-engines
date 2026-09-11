@@ -1,0 +1,53 @@
+# speakrs-ov CI: triggers only; the build is the shared build-image.yml.
+#
+# The Intel sibling of speakrs-ci. Separate rather than another base in that one, because the
+# repositories differ -- audio-speakrs against audio-speakrs-ov -- and build-image.yml takes one
+# repo per call. That naming follows the convention already here: a deps image is named after its
+# base, which is why ov publishes audio-ov.
+name: speakrs-ov-ci
+
+on:
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
+  push:
+    tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/speakrs-ov/**'
+      - '.github/workflows/speakrs-ov-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speakrs-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: speakrs-ov
+      repo: audio-speakrs-ov
+      # 🔴 amd64 only, and it would not merely be wasteful to build both: the engine image this
+      # base pins is a single-architecture digest, so an arm64 slice dies at FROM. The limit
+      # originates further up than that -- ort supports the OpenVINO provider on x86_64 Linux and
+      # Windows and nowhere else.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
