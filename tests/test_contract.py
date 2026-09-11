@@ -608,37 +608,15 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertFalse(by_cap["stt"]["available"])
         self.assertFalse(by_cap["stt_stream"]["available"])
 
-    def test_align_ov_export_is_token_classification(self):
+    def test_align_ov_export_is_one_shot_asr_not_hf(self):
         from wrapper.caps import align as a
 
         cmd = a._ov_export_cmd("/src", "/dest")
-        self.assertEqual(cmd[cmd.index("--task") + 1], "token-classification")
-        self.assertNotIn("automatic-speech-recognition", cmd)
+        self.assertEqual(cmd[cmd.index("--task") + 1], "automatic-speech-recognition")
+        self.assertNotIn("token-classification", cmd)
+        self.assertNotIn("with-past", "".join(cmd))
 
-    def test_ov_align_repo_uses_hf_native_checkpoint(self):
-        from wrapper.caps import align as a
-
-        self.assertEqual(a._ov_align_repo("Qwen/Qwen3-ForcedAligner-0.6B"),
-                         "Qwen/Qwen3-ForcedAligner-0.6B-hf")
-        self.assertEqual(a._ov_align_repo("Qwen/Qwen3-ForcedAligner-0.6B-hf"),
-                         "Qwen/Qwen3-ForcedAligner-0.6B-hf")
-
-    def test_resolve_ov_src_does_not_export_the_qwen_asr_snapshot(self):
-        from wrapper.caps import align as a
-
-        def missing(repo):
-            raise OSError("not in cache: %s" % repo)
-
-        with mock.patch.object(a, "MODEL_REPO", "Qwen/Qwen3-ForcedAligner-0.6B"):
-            with mock.patch.object(a, "_resolve_hf_dir", side_effect=missing):
-                with mock.patch.object(a, "_export_align_ir") as exp:
-                    with self.assertRaises(RuntimeError) as ctx:
-                        a._resolve_ov_src()
-        exp.assert_not_called()
-        self.assertIn("Qwen3-ForcedAligner-0.6B-hf", str(ctx.exception))
-        self.assertIn("MODEL_SOURCE", str(ctx.exception))
-
-    def test_align_ov_ir_rejects_asr_task_cache_without_marker(self):
+    def test_align_ov_ir_accepts_one_shot_asr_without_marker(self):
         from wrapper.caps import align as a
 
         with tempfile.TemporaryDirectory() as td:
@@ -646,24 +624,34 @@ class OpenVINOModeTest(unittest.TestCase):
                 f.write("<net/>")
             with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
                 f.write("<net><layer name=\"input_ids\"/></net>")
-            self.assertFalse(a._looks_like_ov_ir(td))
-            with open(os.path.join(td, a._ALIGN_IR_MARKER), "w") as f:
-                f.write(a._ALIGN_IR_TASK + "\n")
             self.assertTrue(a._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/><layer name=\"input_ids\"/></net>")
+            self.assertFalse(a._looks_like_ov_ir(td))
 
-    def test_ov_logits_calls_the_model_not_the_thinker(self):
+    def test_ov_logits_splits_encoder_decoder_and_skips_thinker(self):
         from wrapper.caps import align as a
+
+        class Enc:
+            def __call__(self, **kw):
+                return mock.Mock(last_hidden_state="h")
+
+        class Dec:
+            def __call__(self, **kw):
+                if kw.get("encoder_hidden_states") == "h" and kw.get("input_ids") == 1:
+                    return mock.Mock(logits="ok")
+                raise TypeError("bad decoder args %s" % kw)
 
         class Fake:
             def __init__(self):
+                self.encoder = Enc()
+                self.decoder = Dec()
                 self.thinker = mock.Mock(side_effect=TypeError(
                     "OVModelForSeq2SeqLM.forward() got multiple values for "
                     "keyword argument 'input_ids'"))
 
             def __call__(self, **kw):
-                if "input_ids" in kw and "input_features" in kw:
-                    return mock.Mock(logits="ok")
-                raise TypeError("missing aligner inputs")
+                raise TypeError("must not call SpeechSeq2Seq.forward")
 
         self.assertEqual(a._ov_logits(Fake(), {"input_ids": 1, "input_features": 2}), "ok")
 
