@@ -52,11 +52,10 @@ remains visible. A reported `model` that differs from configured `MODEL_NAME`
 is added to `/api/endpoints` `reasons` as a diagnostic and does not by itself
 change `available`.
 
-The Intel `ov` image is the exception: Chart-pinned `llm-init` **v1.7.12**
-only treats `schema_version == 1` as authoritative, so `ov` still reports 1
-(and `base: qwen` for the same routes). Dispatch stays on `AUDIO_BASE=ov`.
-A v2 report from that image would be relayed but would not drop the static
-chat / embeddings fallback.
+The Intel `ov` image reports the same `schema_version: 2` as main (and
+`base: qwen` for the same routes). Dispatch stays on `AUDIO_BASE=ov`.
+Charts that still pin `llm-init` **v1.7.12** only treat schema 1 as
+authoritative; pair `ov` with a llm-init that accepts v2.
 
 `llm-init` does the model **download** (into the shared HF cache) and writes a
 sentinel; the engine container waits for that sentinel, then serves **offline**
