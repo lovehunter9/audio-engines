@@ -249,6 +249,7 @@ def _load_ov():
     pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
     _state["asr"] = pipe
     _state["backend"] = "openvino"
+    _say_repetition_once()
     _warmup()
     _state["ready"] = True
     _p("engine READY: %s (openvino %s)" % (MODEL_REPO, device))
@@ -275,7 +276,7 @@ def _ov_result_language(result, fallback=None):
 def _ov_generate(audio, language=None, streamer=None):
     asr = _state["asr"]
     raw = audio.astype("float32").reshape(-1).tolist()
-    kw = {"max_new_tokens": OV_MAX_NEW_TOKENS}
+    kw = {"max_new_tokens": _ov_max_new_tokens(len(raw) / 16000.0)}
     lang = _ov_language(language)
     if lang:
         kw["language"] = lang
@@ -550,6 +551,22 @@ def _say_repetition_once():
                "--repetition-detection, which was not asked for"
                % REPETITION_FALLBACK_TOKENS_PER_SEC)
         return
+    # OpenVINO is a different runtime, not a vLLM-without-the-class. It applies the
+    # same per-second fallback through max_new_tokens; do not look for sampling_params
+    # or import vLLM just to log that they are missing.
+    if _is_ov():
+        if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+            _p("WARN repetition fallback off (--repetition-fallback-tokens-per-sec=0) and "
+               "OpenVINO has no vLLM detector: a repeating span is bounded only by "
+               "max_new_tokens=%d" % OV_MAX_NEW_TOKENS)
+            return
+        _p("repetition fallback: OpenVINO has no vLLM detector, capping output at %d tokens "
+           "per audio second via max_new_tokens (same rule as a vLLM build without the "
+           "detector; too low truncates, and truncation is not visible here)%s" % (
+               REPETITION_FALLBACK_TOKENS_PER_SEC,
+               ". --batch-max-spans still groups, but each clip is generated on its own"
+               if MAX_BATCH_SPANS > 1 else ""))
+        return
     asr = _state.get("asr")
     if asr is not None and getattr(asr, "sampling_params", None) is None:
         _p("WARN this qwen-asr exposes no sampling_params: neither --repetition-detection nor "
@@ -582,16 +599,33 @@ def _say_repetition_once():
            if MAX_BATCH_SPANS > 1 else ""))
 
 
+def _fallback_token_budget(seconds, stock):
+    """The length cap that stands in when this build has no vLLM detector.
+
+    One formula, two stock ceilings: CUDA keeps OFFLINE_MAX_TOKENS, OpenVINO keeps
+    --max-new-tokens. The per-second number is the model's, not the runtime's.
+    """
+    if not REPETITION_ON or REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+        return stock
+    return max(TOKENS_FLOOR,
+               min(OFFLINE_MAX_TOKENS,
+                   int(seconds * REPETITION_FALLBACK_TOKENS_PER_SEC) + TOKENS_FLOOR))
+
+
 def _token_budget(seconds):
     # Replace the stock budget only when there is no detector and fallback tokens/sec > 0.
     _say_repetition_once()
     if not REPETITION_ON or _detector_class() is not None:
         return OFFLINE_MAX_TOKENS
-    if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
-        return OFFLINE_MAX_TOKENS
-    return max(TOKENS_FLOOR,
-               min(OFFLINE_MAX_TOKENS,
-                   int(seconds * REPETITION_FALLBACK_TOKENS_PER_SEC) + TOKENS_FLOOR))
+    return _fallback_token_budget(seconds, OFFLINE_MAX_TOKENS)
+
+
+def _ov_max_new_tokens(seconds):
+    """OpenVINO has no RepetitionDetectionParams; use the same fallback the CUDA path uses
+    when this vLLM build lacks the class. Do not import vLLM just to prove it is missing.
+    """
+    _say_repetition_once()
+    return _fallback_token_budget(seconds, OV_MAX_NEW_TOKENS)
 
 
 def _offline_transcribe(audio, language=None):
@@ -633,7 +667,9 @@ def _offline_transcribe(audio, language=None):
 
 
 def _offline_transcribe_many(clips):
-    # OpenVINO GenAI has no transformers batch generate; keep the caller's grouping but run serially.
+    # OpenVINO GenAI generate() takes one waveform. The caller's grouping, halving
+    # and cancel bound still run; each clip gets the same fallback token budget as
+    # CUDA uses when this engine has no detector.
     if _is_ov():
         return [_offline_transcribe(c) for c in clips]
     # qwen-asr's transcribe() takes a list and hands the whole list to the engine in one generate().

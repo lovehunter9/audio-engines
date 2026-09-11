@@ -802,6 +802,9 @@ def the_report_does_not_need_a_request(q):
     src = inspect.getsource(q._load_blocking)
     check("the report is made when the model loads, not from a request path",
           "_say_repetition_once()" in src)
+    ov_src = inspect.getsource(q._load_ov)
+    check("the OpenVINO load path reports the same way",
+          "_say_repetition_once()" in ov_src)
     budget = inspect.getsource(q._token_budget)
     check("the budget no longer has to be the thing that reports",
           "if sp is not None" not in budget)
