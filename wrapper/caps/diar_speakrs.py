@@ -40,6 +40,69 @@ ENGINE_BIN = os.environ.get("SPEAKRS_ENGINE_BIN") or "/usr/local/bin/speakrs-eng
 RUN_DIR = os.environ.get("RUN_DIR") or "/run/llm-init"
 
 
+def _openvino_models_dir(models_dir):
+    """The directory to hand the engine, with a batched segmentation model OpenVINO can use.
+
+    Batching segmentation is speakrs' own feature and it is on for every other backend. On
+    OpenVINO it is off, because the stock segmentation-3.0-b32 export has a static sequence
+    length and the GPU plugin cannot compile an LSTM kernel for that graph -- measured on both
+    an Arrow Lake integrated part and an Arc Pro B70. The same export with its sample dimension
+    made dynamic compiles and runs, and is 16x faster per window than going one at a time.
+
+    That model is derived here rather than baked into the image, because baking it would pin a
+    copy of weights the engine resolves separately: a new revision upstream and the two drift
+    apart with nothing to notice. Derived at startup, it is always the cache's own file.
+
+    The result is a directory of symlinks plus the one real file, not an edit of the cache.
+    The cache is shared with other applications and is huggingface_hub's to manage; adding
+    files to a snapshot directory is not ours to do.
+
+    Every failure here returns the original directory. Then speakrs finds no prepared model,
+    batching stays off, and the engine runs exactly as it did before this existed -- slower,
+    and working. There is no failure mode worth stopping startup for.
+    """
+    if not EXECUTION_MODE.startswith("openvino"):
+        return models_dir
+    stock = os.path.join(models_dir, "segmentation-3.0-b32.onnx")
+    if not os.path.exists(stock):
+        log.info("no batched segmentation model in the cache; leaving batching off")
+        return models_dir
+    farm = "/tmp/speakrs-models-openvino"
+    try:
+        import onnx
+        from onnx import shape_inference
+
+        os.makedirs(farm, exist_ok=True)
+        for name in os.listdir(models_dir):
+            link = os.path.join(farm, name)
+            if not os.path.lexists(link):
+                os.symlink(os.path.join(models_dir, name), link)
+
+        prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
+        if not os.path.exists(prepared):
+            model = onnx.load(stock)
+            # The sample count, and only it. The batch dimension is deliberately left static:
+            # making that one dynamic instead was measured and does not avoid the failure.
+            dims = model.graph.input[0].type.tensor_type.shape.dim
+            dims[2].ClearField("dim_value")
+            dims[2].dim_param = "samples"
+            out = model.graph.output[0].type.tensor_type.shape.dim
+            out[1].ClearField("dim_value")
+            out[1].dim_param = "frames"
+            model = shape_inference.infer_shapes(model, strict_mode=True)
+            onnx.checker.check_model(model)
+            onnx.save(model, prepared + ".partial")
+            # Renamed into place, so a crash midway cannot leave a half-written model that
+            # the engine would happily try to load.
+            os.replace(prepared + ".partial", prepared)
+        log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
+        return farm
+    except Exception:
+        log.warning("could not prepare the batched segmentation model; "
+                    "OpenVINO will run segmentation one window at a time", exc_info=True)
+        return models_dir
+
+
 def _models_dir(repo):
     """The directory holding this repo's weights.
 
@@ -226,7 +289,7 @@ class _Child:
 
 
 _child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE,
-                 "--models-dir", _models_dir(MODEL_REPO)])
+                 "--models-dir", _openvino_models_dir(_models_dir(MODEL_REPO))])
 
 # Set once this process is on its way out, so the child dying with us is not read as a crash.
 _stopping = threading.Event()

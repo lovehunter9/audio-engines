@@ -344,6 +344,77 @@ def t_diar():
               r.status_code == 400, (r.status_code, r.text[:120]))
 
 
+def t_diar_speakrs_openvino_models_dir():
+    """Preparing the batched segmentation model, and every way it is allowed to give up.
+
+    The giving-up cases matter more than the happy one: this runs at startup, and anything
+    that stops the engine from launching costs more than the batching it was buying.
+    """
+    import shutil
+    import tempfile
+    from wrapper.caps import diar_speakrs as ds
+
+    root = tempfile.mkdtemp(prefix="ovmodels-")
+    farm = "/tmp/speakrs-models-openvino"
+    shutil.rmtree(farm, ignore_errors=True)
+    original = ds.EXECUTION_MODE
+    try:
+        # Off for every other backend: they compile the stock export and batch with it.
+        open(os.path.join(root, "segmentation-3.0-b32.onnx"), "wb").close()
+        ds.EXECUTION_MODE = "cuda"
+        check("non-openvino modes are handed the cache directory untouched",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+
+        # No stock export to derive from -- the cpu file list does not fetch one.
+        ds.EXECUTION_MODE = "openvino"
+        empty = tempfile.mkdtemp(prefix="ovempty-")
+        try:
+            check("a cache with no batched export is handed over untouched",
+                  ds._openvino_models_dir(empty) == empty, ds._openvino_models_dir(empty))
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+        # 🔴 The one that has to hold: a file that is not a model at all. Anything thrown while
+        # deriving must come back as the original directory, so the engine starts unbatched
+        # rather than not at all.
+        check("an unreadable batched export falls back to the cache directory",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+
+        try:
+            import onnx
+            from onnx import helper, TensorProto
+        except ImportError:
+            print("  (skipped the derivation itself: onnx is not installed here)")
+            return
+
+        node = helper.make_node("Identity", ["input"], ["output"])
+        graph = helper.make_graph(
+            [node], "seg",
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, [32, 1, 160000])],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [32, 1, 160000])])
+        onnx.save(helper.make_model(graph), os.path.join(root, "segmentation-3.0-b32.onnx"))
+
+        got = ds._openvino_models_dir(root)
+        check("a derivable export produces a directory of its own", got == farm, got)
+        prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
+        check("the prepared model is there under the name speakrs looks for",
+              os.path.isfile(prepared) and not os.path.islink(prepared), prepared)
+        check("the rest of the cache is reachable through it",
+              os.path.islink(os.path.join(farm, "segmentation-3.0-b32.onnx")))
+
+        dims = onnx.load(prepared).graph.input[0].type.tensor_type.shape.dim
+        # Batch static, samples dynamic. The other way round was measured and still fails.
+        check("the batch dimension stays fixed", dims[0].dim_value == 32, dims[0].dim_value)
+        check("the sample dimension becomes dynamic",
+              dims[2].dim_param == "samples" and dims[2].dim_value == 0, str(dims[2]))
+        check("no half-written model is left behind",
+              not os.path.exists(prepared + ".partial"))
+    finally:
+        ds.EXECUTION_MODE = original
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(farm, ignore_errors=True)
+
+
 def t_diar_speakrs_models_dir():
     import shutil
     import tempfile
@@ -3382,6 +3453,8 @@ def main():
                            ("firered design speak", t_firered_design_speak, "firered"),
                            ("diar_speakrs", t_diar_speakrs, "speakrs"),
                            ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs"),
+                           ("diar_speakrs openvino models dir",
+                            t_diar_speakrs_openvino_models_dir, "speakrs"),
                            ("diar_stream offline", t_diar_stream_offline, "nemo")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base

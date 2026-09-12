@@ -66,8 +66,13 @@ RUN set -eux; \
 
 # The shell only serves HTTP and reads a file header for billing. Everything that touches audio
 # samples or the model happens in the engine process.
+# onnx is here for one job: deriving the batched segmentation model OpenVINO can compile, at
+# startup, from the one in the cache. Not a runtime dependency of serving -- if the import or
+# the derivation fails, diar_speakrs logs it and runs segmentation one window at a time, which
+# is where this backend stood before. Deriving beats baking a copy into the image: a baked one
+# pins weights the engine resolves separately, and the two drift with nothing to notice.
 RUN python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
-        "fastapi>=0.110" "uvicorn>=0.29" python-multipart soundfile
+        "fastapi>=0.110" "uvicorn>=0.29" python-multipart soundfile onnx
 
 COPY --from=engine /usr/local/bin/speakrs-engine /usr/local/bin/speakrs-engine
 # ONNX Runtime's OpenVINO provider and OpenVINO itself travel with the engine that dlopen's them,
