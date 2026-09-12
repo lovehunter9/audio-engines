@@ -71,7 +71,12 @@ RUN set -eux; \
 # the derivation fails, diar_speakrs logs it and runs segmentation one window at a time, which
 # is where this backend stood before. Deriving beats baking a copy into the image: a baked one
 # pins weights the engine resolves separately, and the two drift with nothing to notice.
+#
+# --timeout / --retries because this pulls from PyPI over whatever link the builder has, and
+# pip's default 15 seconds is short enough that one slow response fails the whole image. Seen:
+# a ReadTimeoutError on files.pythonhosted.org killed a build that had everything else cached.
 RUN python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
+        --timeout 120 --retries 10 \
         "fastapi>=0.110" "uvicorn>=0.29" python-multipart soundfile onnx
 
 COPY --from=engine /usr/local/bin/speakrs-engine /usr/local/bin/speakrs-engine
