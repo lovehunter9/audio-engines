@@ -409,6 +409,18 @@ def t_diar_speakrs_openvino_models_dir():
               dims[2].dim_param == "samples" and dims[2].dim_value == 0, str(dims[2]))
         check("no half-written model is left behind",
               not os.path.exists(prepared + ".partial"))
+
+        # 🔴 /tmp is a mounted volume and survives a restart. A farm left from a previous
+        # revision would aim at weights the cache has moved past, and nothing would say so,
+        # so a second call must rebuild rather than find its own work and keep it.
+        stale = os.path.join(farm, "left-from-a-previous-revision.onnx")
+        open(stale, "wb").close()
+        os.utime(prepared, (1000000, 1000000))
+        ds._openvino_models_dir(root)
+        check("a farm left over from an earlier run is rebuilt, not reused",
+              not os.path.exists(stale))
+        check("and the model is derived again rather than found",
+              os.stat(prepared).st_mtime > 1000000, os.stat(prepared).st_mtime)
     finally:
         ds.EXECUTION_MODE = original
         shutil.rmtree(root, ignore_errors=True)

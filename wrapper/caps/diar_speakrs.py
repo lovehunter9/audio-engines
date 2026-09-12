@@ -70,31 +70,35 @@ def _openvino_models_dir(models_dir):
     farm = "/tmp/speakrs-models-openvino"
     try:
         import onnx
+        import shutil
         from onnx import shape_inference
 
-        os.makedirs(farm, exist_ok=True)
+        # 🔴 Rebuilt, never reused. /tmp is a mounted volume here and survives a restart, so
+        # keeping what is already there would mean symlinks still aimed at the revision that
+        # was current when they were made, and a derived model still carrying its weights --
+        # against a cache that has moved on. Nothing would report the disagreement. Rebuilding
+        # costs a directory of symlinks and one pass over a 6 MB graph.
+        shutil.rmtree(farm, ignore_errors=True)
+        os.makedirs(farm)
         for name in os.listdir(models_dir):
-            link = os.path.join(farm, name)
-            if not os.path.lexists(link):
-                os.symlink(os.path.join(models_dir, name), link)
+            os.symlink(os.path.join(models_dir, name), os.path.join(farm, name))
 
         prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
-        if not os.path.exists(prepared):
-            model = onnx.load(stock)
-            # The sample count, and only it. The batch dimension is deliberately left static:
-            # making that one dynamic instead was measured and does not avoid the failure.
-            dims = model.graph.input[0].type.tensor_type.shape.dim
-            dims[2].ClearField("dim_value")
-            dims[2].dim_param = "samples"
-            out = model.graph.output[0].type.tensor_type.shape.dim
-            out[1].ClearField("dim_value")
-            out[1].dim_param = "frames"
-            model = shape_inference.infer_shapes(model, strict_mode=True)
-            onnx.checker.check_model(model)
-            onnx.save(model, prepared + ".partial")
-            # Renamed into place, so a crash midway cannot leave a half-written model that
-            # the engine would happily try to load.
-            os.replace(prepared + ".partial", prepared)
+        model = onnx.load(stock)
+        # The sample count, and only it. The batch dimension is deliberately left static:
+        # making that one dynamic instead was measured and does not avoid the failure.
+        dims = model.graph.input[0].type.tensor_type.shape.dim
+        dims[2].ClearField("dim_value")
+        dims[2].dim_param = "samples"
+        out = model.graph.output[0].type.tensor_type.shape.dim
+        out[1].ClearField("dim_value")
+        out[1].dim_param = "frames"
+        model = shape_inference.infer_shapes(model, strict_mode=True)
+        onnx.checker.check_model(model)
+        onnx.save(model, prepared + ".partial")
+        # Renamed into place, so a crash midway cannot leave a half-written model that the
+        # engine would happily try to load.
+        os.replace(prepared + ".partial", prepared)
         log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
         return farm
     except Exception:
