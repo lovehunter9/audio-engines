@@ -443,6 +443,26 @@ def t_diar_speakrs_openvino_models_dir():
         check("no half-written model is left behind",
               not os.path.exists(prepared + ".partial"))
 
+        # 🔴 The name has to track the export, not a literal. speakrs builds what it looks
+        # for out of its own PRIMARY_BATCH_SIZE, so a cache shipping a different batch size is
+        # the case where a hardcoded 32 here and the constant there stop agreeing -- and the
+        # failure is batching silently off, which nothing errors on.
+        other = os.path.join(root, "segmentation-3.0-b64.onnx")
+        shutil.copyfile(os.path.join(root, "segmentation-3.0-b32.onnx"), other)
+        ds._openvino_models_dir(root)
+        check("a different batch size is derived under its own name",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b64-dynseq.onnx")),
+              sorted(os.listdir(farm)))
+        check("and the original is still derived alongside it",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")))
+        # 🔴 And a restart must not derive from its own output: -dynseq is an export-shaped
+        # name living in the same directory the next run reads.
+        ds._openvino_models_dir(root)
+        check("a derived model is not itself treated as an export",
+              not os.path.exists(os.path.join(farm, "segmentation-3.0-b32-dynseq-dynseq.onnx")),
+              sorted(os.listdir(farm)))
+        os.remove(other)
+
         # 🔴 /tmp is a mounted volume and survives a restart. A farm left from a previous
         # revision would aim at weights the cache has moved past, and nothing would say so,
         # so a second call must rebuild rather than find its own work and keep it.

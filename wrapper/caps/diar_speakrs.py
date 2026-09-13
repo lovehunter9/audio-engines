@@ -12,6 +12,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import subprocess
 import threading
 import time
@@ -40,6 +41,13 @@ ENGINE_BIN = os.environ.get("SPEAKRS_ENGINE_BIN") or "/usr/local/bin/speakrs-eng
 RUN_DIR = os.environ.get("RUN_DIR") or "/run/llm-init"
 
 
+# The batched segmentation exports speakrs can be asked to load. Any batch size, because the
+# number is upstream's PRIMARY_BATCH_SIZE and the point of matching rather than spelling it is
+# that this side does not have to be edited when it changes. Excludes what this function
+# writes, or a restart would derive from its own output.
+_BATCHED_SEGMENTATION = re.compile(r"segmentation-[\d.]+-b\d+\.onnx")
+
+
 def _openvino_models_dir(models_dir):
     """The directory to hand the engine, with a batched segmentation model OpenVINO can use.
 
@@ -63,8 +71,21 @@ def _openvino_models_dir(models_dir):
     """
     if not EXECUTION_MODE.startswith("openvino"):
         return models_dir
-    stock = os.path.join(models_dir, "segmentation-3.0-b32.onnx")
-    if not os.path.exists(stock):
+    # 🔴 Found by pattern, and the derived name follows the one found, rather than both being
+    # written out here. speakrs asks for "<the batched export's name>-dynseq.onnx", building
+    # the batch number from its own PRIMARY_BATCH_SIZE constant; spelling 32 on this side made
+    # the two agree only as long as nobody changed that constant. Deriving from whatever
+    # export is actually in the cache keeps them in step through a change of batch size,
+    # because the export upstream ships and the constant it compiles against move together.
+    #
+    # Every match is derived, not just one, so a cache carrying more than one batched export
+    # has a prepared model for whichever the engine turns out to ask for.
+    stock = sorted(
+        os.path.join(models_dir, name)
+        for name in os.listdir(models_dir)
+        if _BATCHED_SEGMENTATION.fullmatch(name)
+    )
+    if not stock:
         log.info("no batched segmentation model in the cache; leaving batching off")
         return models_dir
     farm = "/tmp/speakrs-models-openvino"
@@ -83,26 +104,28 @@ def _openvino_models_dir(models_dir):
         for name in os.listdir(models_dir):
             os.symlink(os.path.join(models_dir, name), os.path.join(farm, name))
 
-        prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
-        model = onnx.load(stock)
-        # The sample count, and only it. The batch dimension is deliberately left static:
-        # making that one dynamic instead was measured and does not avoid the failure.
-        dims = model.graph.input[0].type.tensor_type.shape.dim
-        dims[2].ClearField("dim_value")
-        dims[2].dim_param = "samples"
-        out = model.graph.output[0].type.tensor_type.shape.dim
-        out[1].ClearField("dim_value")
-        out[1].dim_param = "frames"
-        model = shape_inference.infer_shapes(model, strict_mode=True)
-        onnx.checker.check_model(model)
-        onnx.save(model, prepared + ".partial")
+        for source in stock:
+            prepared = os.path.join(
+                farm, os.path.basename(source)[: -len(".onnx")] + "-dynseq.onnx")
+            model = onnx.load(source)
+            # The sample count, and only it. The batch dimension is deliberately left static:
+            # making that one dynamic instead was measured and does not avoid the failure.
+            dims = model.graph.input[0].type.tensor_type.shape.dim
+            dims[2].ClearField("dim_value")
+            dims[2].dim_param = "samples"
+            out = model.graph.output[0].type.tensor_type.shape.dim
+            out[1].ClearField("dim_value")
+            out[1].dim_param = "frames"
+            model = shape_inference.infer_shapes(model, strict_mode=True)
+            onnx.checker.check_model(model)
+            onnx.save(model, prepared + ".partial")
         # Renamed into place. Not because a half-written model could otherwise be loaded --
         # the farm above is deleted and rebuilt on every start, so nothing from a crashed run
         # survives to be found. It is that the engine is handed this directory as soon as the
         # function returns, and a reader arriving between the write and the end of it would
         # see a truncated file under the name speakrs looks for.
-        os.replace(prepared + ".partial", prepared)
-        log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
+            os.replace(prepared + ".partial", prepared)
+            log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
         return farm
     except Exception:
         log.warning("could not prepare the batched segmentation model; "
