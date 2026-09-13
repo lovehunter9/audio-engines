@@ -425,8 +425,21 @@ def t_diar_speakrs_openvino_models_dir():
         prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
         check("the prepared model is there under the name speakrs looks for",
               os.path.isfile(prepared) and not os.path.islink(prepared), prepared)
+        # 🔴 Followed, not just identified as a link. os.path.islink is True for a dangling
+        # one, so a farm of links that all point at themselves satisfied the old wording of
+        # this check -- "reachable through it" was the one thing it did not test. The engine
+        # joins the embedding weights and the PLDA directory off this path; dead links there
+        # turn "slower but running" into a pipeline that cannot build, which is the failure
+        # this whole function is written to avoid.
+        linked = os.path.join(farm, "segmentation-3.0-b32.onnx")
         check("the rest of the cache is reachable through it",
-              os.path.islink(os.path.join(farm, "segmentation-3.0-b32.onnx")))
+              os.path.islink(linked) and os.path.isfile(linked)
+              and os.path.realpath(linked).startswith(os.path.realpath(root)),
+              os.path.realpath(linked))
+        for name in os.listdir(farm):
+            entry = os.path.join(farm, name)
+            check("every entry in the farm resolves: %s" % name, os.path.exists(entry),
+                  os.path.realpath(entry))
 
         dims = onnx.load(prepared).graph.input[0].type.tensor_type.shape.dim
         # Batch static, samples dynamic. The other way round was measured and still fails.
@@ -455,12 +468,15 @@ def t_diar_speakrs_openvino_models_dir():
               sorted(os.listdir(farm)))
         check("and the original is still derived alongside it",
               os.path.isfile(os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")))
-        # 🔴 And a restart must not derive from its own output: -dynseq is an export-shaped
-        # name living in the same directory the next run reads.
-        ds._openvino_models_dir(root)
-        check("a derived model is not itself treated as an export",
-              not os.path.exists(os.path.join(farm, "segmentation-3.0-b32-dynseq-dynseq.onnx")),
-              sorted(os.listdir(farm)))
+        # 🔴 The pattern must not match what this function writes. Asserting that no
+        # `-dynseq-dynseq` file appears could not fail: the exports are read from the cache
+        # and the derivatives are written to the farm, two directories that are never the
+        # same one, so the scenario it described cannot arise. Ask the pattern directly
+        # instead -- that is the property, and it is the one a loosened regex breaks.
+        check("the pattern does not match a derived model",
+              not ds._BATCHED_SEGMENTATION.fullmatch("segmentation-3.0-b32-dynseq.onnx"))
+        check("and still matches a real export",
+              bool(ds._BATCHED_SEGMENTATION.fullmatch("segmentation-3.0-b32.onnx")))
         os.remove(other)
 
         # 🔴 /tmp is a mounted volume and survives a restart. A farm left from a previous
@@ -474,6 +490,14 @@ def t_diar_speakrs_openvino_models_dir():
               not os.path.exists(stale))
         check("and the model is derived again rather than found",
               os.stat(prepared).st_mtime > 1000000, os.stat(prepared).st_mtime)
+        # 🔴 That the function is reached at all. Every check above calls it directly, so
+        # deleting the call from the engine's argv left all of them green and turned
+        # batching silently off -- which is the entire reason this code exists.
+        source = open(ds.__file__, encoding="utf-8").read()
+        wired = [l for l in source.splitlines()
+                 if "--models-dir" in l or ("_openvino_models_dir(" in l and "def " not in l)]
+        check("the engine is handed the prepared directory, not the raw cache",
+              any("_openvino_models_dir(" in l for l in wired), wired)
     finally:
         ds.EXECUTION_MODE = original
         shutil.rmtree(root, ignore_errors=True)
