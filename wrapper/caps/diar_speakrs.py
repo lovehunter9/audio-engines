@@ -96,8 +96,11 @@ def _openvino_models_dir(models_dir):
         model = shape_inference.infer_shapes(model, strict_mode=True)
         onnx.checker.check_model(model)
         onnx.save(model, prepared + ".partial")
-        # Renamed into place, so a crash midway cannot leave a half-written model that the
-        # engine would happily try to load.
+        # Renamed into place. Not because a half-written model could otherwise be loaded --
+        # the farm above is deleted and rebuilt on every start, so nothing from a crashed run
+        # survives to be found. It is that the engine is handed this directory as soon as the
+        # function returns, and a reader arriving between the write and the end of it would
+        # see a truncated file under the name speakrs looks for.
         os.replace(prepared + ".partial", prepared)
         log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
         return farm

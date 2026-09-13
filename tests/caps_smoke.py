@@ -384,18 +384,44 @@ def t_diar_speakrs_openvino_models_dir():
             import onnx
             from onnx import helper, TensorProto
         except ImportError:
+            # 🔴 A failure on CI rather than a print. Returning here skips every assertion
+            # below and the suite still reports that everything passed -- which is the shape
+            # this repository already paid for once, with the tempo assertions that shelled
+            # out to a missing ffmpeg on every run. CI installs onnx; if it ever stops, this
+            # says so instead of going quiet.
+            if os.environ.get("CI"):
+                check("onnx is installed so the derivation itself is exercised", False)
+                return
             print("  (skipped the derivation itself: onnx is not installed here)")
             return
 
-        node = helper.make_node("Identity", ["input"], ["output"])
+        # 🔴 An op from a domain onnx knows nothing about, deliberately. This stood in as an
+        # Identity, and Identity ties the output's shape to the input's: shape inference
+        # propagated [32, 1, 160000] over the declared output and the derivation's edit to the
+        # frame dimension could not be observed at all. The real export's output is not a copy
+        # of its input -- [32, 589, 7], windows by frames by speakers -- and an op with no
+        # inference rule is what lets a two-node fake say so.
+        node = helper.make_node("Segment", ["input"], ["output"], domain="test.fake")
         graph = helper.make_graph(
             [node], "seg",
             [helper.make_tensor_value_info("input", TensorProto.FLOAT, [32, 1, 160000])],
-            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [32, 1, 160000])])
-        onnx.save(helper.make_model(graph), os.path.join(root, "segmentation-3.0-b32.onnx"))
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [32, 589, 7])])
+        model = helper.make_model(graph)
+        model.opset_import.append(helper.make_opsetid("test.fake", 1))
+        onnx.save(model, os.path.join(root, "segmentation-3.0-b32.onnx"))
 
         got = ds._openvino_models_dir(root)
         check("a derivable export produces a directory of its own", got == farm, got)
+
+        # 🔴 A device may be named, and on a two-card machine it will be: the engine takes
+        # openvino:<device> and the chart could start sending one. So the guard has to be a
+        # prefix test, and this has to be asserted where deriving SUCCEEDS -- asserted against
+        # an unreadable export instead, both answers are the cache directory and the case
+        # proves nothing, which is how it was written the first time.
+        ds.EXECUTION_MODE = "openvino:GPU.1"
+        check("a mode naming a device still derives", ds._openvino_models_dir(root) == farm,
+              ds._openvino_models_dir(root))
+        ds.EXECUTION_MODE = "openvino"
         prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
         check("the prepared model is there under the name speakrs looks for",
               os.path.isfile(prepared) and not os.path.islink(prepared), prepared)
@@ -407,6 +433,13 @@ def t_diar_speakrs_openvino_models_dir():
         check("the batch dimension stays fixed", dims[0].dim_value == 32, dims[0].dim_value)
         check("the sample dimension becomes dynamic",
               dims[2].dim_param == "samples" and dims[2].dim_value == 0, str(dims[2]))
+        out = onnx.load(prepared).graph.output[0].type.tensor_type.shape.dim
+        # Both ends, or the graph contradicts itself: a dynamic sample count feeding a fixed
+        # frame count. onnx's own checker accepts that and ORT runs it on CPU, so nothing
+        # downstream of here would notice the output edit going missing.
+        check("the frame dimension becomes dynamic too",
+              out[1].dim_param == "frames" and out[1].dim_value == 0, str(out[1]))
+        check("the speaker dimension stays fixed", out[2].dim_value == 7, out[2].dim_value)
         check("no half-written model is left behind",
               not os.path.exists(prepared + ".partial"))
 
