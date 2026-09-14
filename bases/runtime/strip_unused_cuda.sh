@@ -5,39 +5,34 @@
 # Keep: cublas, cudnn, cuda-runtime, nvjitlink, cufft, nvrtc, curand, plus any
 # nvidia *.so on the import-time load chain of torch/_C*.so (cu128 links
 # libcusparseLt; cu130 links libcufile). Drop the rest of: nccl, cusolver,
-# cusparse, cusparselt, cupti, nvtx, cufile, nvshmem, triton. torch.testing
-# stays — import torch pulls it.
+# cusparse, cusparselt, cupti, nvtx, cufile, triton. torch.testing stays —
+# import torch pulls it.
 #
-# nvshmem is only pulled in through libtorch_nvshmem; drop that NEEDED and
-# delete the file. nccl is different: libtorch_cuda relocates against ncclRecv
-# and friends, so the soname must stay. Replace the 300 Mi wheel with a stub
-# that exports the same dynamic symbols. Multi-GPU is not this image's contract.
+# Do not unlink nvshmem. cu130 libtorch_python relocates against
+# c10d::nvshmem_extension::is_nvshmem_available; deleting libtorch_nvshmem
+# blows import torch (arm64 slim3). Leave that for a later pass.
+#
+# nccl: libtorch_cuda relocates against ncclRecv, so the soname must stay.
+# Replace the 300 Mi wheel with a stub that exports the same dynamic symbols,
+# then force-uninstall the pip package — otherwise ldd still sees the real
+# libnccl.so.2 and the second pass keeps the wheel. Multi-GPU is not this
+# image's contract.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
 PURGE_TOOLS=0
-if ! command -v patchelf >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1 \
-        || ! command -v readelf >/dev/null 2>&1; then
+if ! command -v gcc >/dev/null 2>&1 || ! command -v readelf >/dev/null 2>&1; then
     apt-get update
     # libc6-dev is a Recommends of gcc; --no-install-recommends drops it and
     # then `gcc -shared` dies with `cannot find crti.o` (arm64 slim3).
-    apt-get install -y --no-install-recommends patchelf gcc binutils libc6-dev
+    apt-get install -y --no-install-recommends gcc binutils libc6-dev
     PURGE_TOOLS=1
 fi
 
 python3 - "$SITE" <<'PY'
-import glob, os, subprocess, sys, tempfile
+import os, subprocess, sys, tempfile
 
 sitep = sys.argv[1]
-
-
-def needed_of(path):
-    try:
-        return subprocess.check_output(
-            ["patchelf", "--print-needed", path], text=True
-        ).split()
-    except (OSError, subprocess.CalledProcessError):
-        return []
 
 
 def dyn_defined(path):
@@ -84,29 +79,10 @@ if nccl_libs:
     os.symlink("libnccl.so.2", link)
     subprocess.call(["ldconfig"])
 
-drop_needed = (
-    "libnvshmem_host.so.3",
-    "libnvshmem.so.3",
-    "libtorch_nvshmem.so",
-)
-for root, _, files in os.walk(os.path.join(sitep, "torch")):
-    for name in files:
-        if ".so" not in name:
-            continue
-        path = os.path.join(root, name)
-        have = needed_of(path)
-        for soname in drop_needed:
-            if soname in have:
-                print("patchelf --remove-needed", soname, path)
-                subprocess.check_call(["patchelf", "--remove-needed", soname, path])
-
-for path in glob.glob(os.path.join(sitep, "torch", "lib", "libtorch_nvshmem*")):
-    print("delete", path)
-    os.remove(path)
 PY
 
 freeze=$(python3 -m pip freeze)
-STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile|nvshmem)[^[:space:]=]*|triton|pytorch-triton)==' \
+STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
     | cut -d= -f1 || true)
 export STRIP_CANDIDATES
 
@@ -143,7 +119,7 @@ print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
 force_drop = {"triton", "pytorch-triton"}
 for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
-    if pkg in force_drop:
+    if pkg in force_drop or pkg.startswith("nvidia-nccl"):
         print("drop", pkg)
         subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
         continue
@@ -183,7 +159,7 @@ fi
 rm -rf /root/.cache/pip /tmp/pip-*
 
 if [ "$PURGE_TOOLS" = 1 ]; then
-    apt-get purge -y patchelf gcc binutils libc6-dev
+    apt-get purge -y gcc binutils libc6-dev
     apt-get autoremove -y --purge
     rm -rf /var/lib/apt/lists/*
 fi
