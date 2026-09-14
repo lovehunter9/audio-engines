@@ -7,9 +7,49 @@
 # libcusparseLt; cu130 links libcufile). Drop the rest of: nccl, cusolver,
 # cusparse, cusparselt, cupti, nvtx, cufile, nvshmem, triton. torch.testing
 # stays — import torch pulls it.
+#
+# nccl / nvshmem are DT_NEEDED by libtorch_cuda even for single-GPU eager.
+# patchelf drops those NEEDED entries, then the packages can go. Multi-GPU
+# and torch.distributed are not this image's contract.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+PURGE_PATCHELF=0
+if ! command -v patchelf >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y --no-install-recommends patchelf
+    PURGE_PATCHELF=1
+fi
+
+python3 - "$SITE" <<'PY'
+import glob, os, subprocess, sys
+
+sitep = sys.argv[1]
+drop_needed = ("libnccl.so.2", "libnvshmem_host.so.3", "libnvshmem.so.3")
+for path in glob.glob(os.path.join(sitep, "torch", "lib", "libtorch_nvshmem*")):
+    print("delete", path)
+    os.remove(path)
+
+def needed_of(path):
+    try:
+        return subprocess.check_output(
+            ["patchelf", "--print-needed", path], text=True
+        ).split()
+    except (OSError, subprocess.CalledProcessError):
+        return []
+
+for root, _, files in os.walk(os.path.join(sitep, "torch")):
+    for name in files:
+        if ".so" not in name:
+            continue
+        path = os.path.join(root, name)
+        have = needed_of(path)
+        for soname in drop_needed:
+            if soname in have:
+                print("patchelf --remove-needed", soname, path)
+                subprocess.check_call(["patchelf", "--remove-needed", soname, path])
+PY
+
 freeze=$(python3 -m pip freeze)
 STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile|nvshmem)[^[:space:]=]*|triton|pytorch-triton)==' \
     | cut -d= -f1 || true)
@@ -87,6 +127,12 @@ if [ -d "$SITE" ]; then
 fi
 rm -rf /root/.cache/pip /tmp/pip-*
 
+if [ "$PURGE_PATCHELF" = 1 ]; then
+    apt-get purge -y patchelf
+    apt-get autoremove -y --purge
+    rm -rf /var/lib/apt/lists/*
+fi
+
 python3 -c "\
 import torch, torchaudio
 assert torch.version.cuda, 'strip_unused_cuda dropped CUDA torch'
@@ -108,4 +154,19 @@ for name in sorted(os.listdir(s)):
                     except OSError:
                         pass
             print('  %6.1f Mi  %s' % (total / 1024 / 1024, name))
+nvidia = os.path.join(s, 'nvidia')
+if os.path.isdir(nvidia):
+    print('nvidia parts')
+    for name in sorted(os.listdir(nvidia)):
+        p = os.path.join(nvidia, name)
+        if not os.path.isdir(p):
+            continue
+        total = 0
+        for root, dirs, files in os.walk(p):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        print('  %6.1f Mi  nvidia/%s' % (total / 1024 / 1024, name))
 "
