@@ -36,8 +36,9 @@ open(os.path.join(stubdir, ".keep"), "w").close()
 
 
 def dyn_defined(path):
+    """[(name, version or None), ...] — keep @VER so ld.so does not abort."""
     out = subprocess.check_output(["readelf", "-Ws", path], text=True)
-    names = []
+    pairs = []
     for line in out.splitlines():
         if " UND " in line or " UND\t" in line:
             continue
@@ -45,26 +46,61 @@ def dyn_defined(path):
             continue
         if " GLOBAL " not in line and " WEAK " not in line:
             continue
-        name = line.split()[-1].split("@")[0]
+        raw = line.split()[-1]
+        if "@@" in raw:
+            name, ver = raw.split("@@", 1)
+        elif "@" in raw:
+            name, ver = raw.split("@", 1)
+        else:
+            name, ver = raw, None
         if name and name.isidentifier() and name not in ("_init", "_fini"):
-            names.append(name)
-    return sorted(set(names))
+            pairs.append((name, ver))
+    return sorted(set(pairs))
 
 
 def write_stub(real, soname):
-    symbols = dyn_defined(real)
-    print("stub", soname, "from", real, "symbols", len(symbols))
-    lines = []
-    for name in symbols:
-        lines.append("void %s() {}" % name)
+    pairs = dyn_defined(real)
+    names = sorted({name for name, _ in pairs})
+    print("stub", soname, "from", real, "symbols", len(names), "pairs", len(pairs))
     src = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
-    src.write("\n".join(lines) + "\n")
+    src.write("\n".join("void %s() {}" % name for name in names) + "\n")
     src.close()
+    by_ver = {}
+    unversioned = set()
+    for name, ver in pairs:
+        if ver:
+            by_ver.setdefault(ver, set()).add(name)
+            unversioned.discard(name)
+        elif name not in {n for n, v in pairs if v}:
+            unversioned.add(name)
+    map_lines = []
+    versions = sorted(by_ver)
+    for i, ver in enumerate(versions):
+        glob = "\n".join("    %s;" % s for s in sorted(by_ver[ver]))
+        inherit = " %s" % versions[i - 1] if i else ""
+        extra = "\n  local: *;" if i == 0 and not unversioned else ""
+        map_lines.append("%s {\n  global:\n%s%s\n}%s;" % (ver, glob, extra, inherit))
+    if unversioned:
+        glob = "\n".join("    %s;" % s for s in sorted(unversioned))
+        map_lines.append("{\n  global:\n%s\n  local: *;\n};" % glob)
+    mapf = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
+    mapf.write("\n".join(map_lines) + "\n")
+    mapf.close()
     dest = os.path.join("/usr/local/lib", soname)
     subprocess.check_call(
-        ["gcc", "-shared", "-fPIC", "-Wl,-soname,%s" % soname, "-o", dest, src.name]
+        [
+            "gcc",
+            "-shared",
+            "-fPIC",
+            "-Wl,-soname,%s" % soname,
+            "-Wl,--version-script,%s" % mapf.name,
+            "-o",
+            dest,
+            src.name,
+        ]
     )
     os.remove(src.name)
+    os.remove(mapf.name)
     staged = os.path.join(stubdir, soname)
     subprocess.check_call(["cp", "-a", dest, staged])
     short = soname.split(".so")[0] + ".so"
