@@ -1169,18 +1169,21 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
     def test_torch_install_and_cuda_strip_share_one_run(self):
         with open(os.path.join(self._runtime_dir(), "Dockerfile")) as fh:
             text = fh.read()
-        self.assertIn("sh /tmp/strip_unused_cuda.sh", text)
         self.assertNotIn("python3-venv", text)
-        pip = text.find("torch torchaudio")
-        strip = text.find("sh /tmp/strip_unused_cuda.sh")
-        self.assertGreater(pip, 0)
+        run = text.split("RUN set -eux;", 1)[1]
+        pip = run.find("torch torchaudio")
+        strip = run.find("sh /tmp/strip_unused_cuda.sh;")
+        self.assertGreater(pip, -1)
         self.assertGreater(strip, pip)
 
     def test_strip_script_drops_solvers_keeps_cublas_cudnn(self):
         with open(os.path.join(self._runtime_dir(), "strip_unused_cuda.sh")) as fh:
             text = fh.read()
         self.assertIn("Keep: cublas, cudnn", text)
-        self.assertNotIn("uninstall -y nvidia-cublas", text)
+        m = re.search(r"grep -iE '([^']+)'", text)
+        self.assertIsNotNone(m)
+        posix = m.group(1)
+        py = posix.replace(r"[^[:space:]=]*", r"\S*")
         freeze = (
             "nvidia-cublas-cu12==12.8\n"
             "nvidia-cudnn-cu12==9.1\n"
@@ -1188,13 +1191,8 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
             "nvidia-cusparselt-cu12==0.8\n"
             "triton==3.2.0\n"
         )
-        pat = re.compile(
-            r"^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)\S*|triton|pytorch-triton)==",
-            re.I | re.M,
-        )
-        dropped = [m.group(0).split("=")[0] for m in pat.finditer(freeze)]
+        dropped = [x.group(0).split("=")[0] for x in re.finditer(py, freeze, re.I | re.M)]
         self.assertEqual(dropped, ["nvidia-nccl-cu12", "nvidia-cusparselt-cu12", "triton"])
-        self.assertIn("nvidia-nccl-cu12", text)
 
 
 if __name__ == "__main__":
