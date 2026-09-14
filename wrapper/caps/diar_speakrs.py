@@ -53,11 +53,17 @@ _BATCHED_SEGMENTATION = re.compile(r"segmentation-[\d.]+-b\d+\.onnx")
 def _farm_for(models_dir):
     """Where the prepared models for one cache directory go.
 
-    🔴 Keyed on the directory it derives from, because /tmp is a mounted volume and two
-    replicas of this application share it. Under one fixed name the second replica deletes and
-    rebuilds the farm the first is serving from, symlinks and all, while that one holds open
-    handles to paths that now point elsewhere. The digest only has to separate cache
+    Keyed on the directory it derives from, so two engines reading different caches on one
+    machine do not tear down each other's work. The digest only has to separate cache
     directories, not identify them.
+
+    🔴 What this does NOT solve, said here because the first version of this comment claimed it
+    did: two replicas of one deployment read the SAME cache, so they land on the same key and
+    collide exactly as a fixed name would. Separating those needs a key per process or per pod,
+    not per cache. It does not arise under the chart that ships this -- one replica, and a
+    Recreate strategy, so no two pods are ever up together -- and that is the reason it is left
+    alone rather than an oversight. A chart that scales this out has to revisit the key before
+    anything else.
     """
     return "/tmp/speakrs-models-openvino-" + hashlib.sha256(
         os.path.abspath(models_dir).encode()).hexdigest()[:12]
@@ -67,9 +73,15 @@ def _openvino_models_dir(models_dir):
     """The directory to hand the engine, with a batched segmentation model OpenVINO can use.
 
     Batching segmentation is speakrs' own feature and it is on for every other backend. On
-    OpenVINO it is off, because the stock segmentation-3.0-b32 export has a static sequence
-    length and the GPU plugin cannot compile an LSTM kernel for that graph -- measured on both
-    an Arrow Lake integrated part and an Arc Pro B70. The same export with its sample dimension
+    OpenVINO's GPU plugin it is off, because the stock segmentation-3.0-b32 export has a static
+    sequence length and that plugin cannot compile an LSTM kernel for that graph -- measured on
+    both an Arrow Lake integrated part and an Arc Pro B70.
+
+    🔴 The plugin, not the backend: OpenVINO on the processor compiles the stock export and
+    speakrs takes it there. So this runs wider than the consumer that reads its output, and
+    deliberately -- deriving a file nothing asks for costs one pass over a 6 MB graph, while
+    not deriving one that is asked for turns batching off with nothing in the log. The two
+    sides live in different repositories, so the asymmetry is what keeps them safe to drift. The same export with its sample dimension
     made dynamic compiles and runs, and is 16x faster per window than going one at a time.
 
     That model is derived here rather than baked into the image, because baking it would pin a
