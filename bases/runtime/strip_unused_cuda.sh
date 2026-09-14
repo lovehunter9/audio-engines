@@ -19,7 +19,9 @@ PURGE_TOOLS=0
 if ! command -v patchelf >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1 \
         || ! command -v readelf >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y --no-install-recommends patchelf gcc binutils
+    # libc6-dev is a Recommends of gcc; --no-install-recommends drops it and
+    # then `gcc -shared` dies with `cannot find crti.o` (arm64 slim3).
+    apt-get install -y --no-install-recommends patchelf gcc binutils libc6-dev
     PURGE_TOOLS=1
 fi
 
@@ -181,7 +183,7 @@ fi
 rm -rf /root/.cache/pip /tmp/pip-*
 
 if [ "$PURGE_TOOLS" = 1 ]; then
-    apt-get purge -y patchelf gcc binutils
+    apt-get purge -y patchelf gcc binutils libc6-dev
     apt-get autoremove -y --purge
     rm -rf /var/lib/apt/lists/*
 fi
