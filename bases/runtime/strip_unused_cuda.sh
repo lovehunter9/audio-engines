@@ -2,21 +2,64 @@
 # Drop CUDA pieces eager inference does not load. Same RUN as `pip install torch`
 # or Docker keeps the fat layer.
 #
-# Keep: cublas, cudnn, cuda-runtime, nvjitlink, cufft, nvrtc, curand.
-# Drop: nccl (multi-GPU), cusolver/cusparse/cusparselt (solvers), cupti/nvtx
-# (profiler), cufile, triton (torch.compile). Breeze's fast path already needs
-# a compiler this image does not ship; eager is the contract.
+# Keep: cublas, cudnn, cuda-runtime, nvjitlink, cufft, nvrtc, curand, plus any
+# nvidia *.so that torch/*.so DT_NEEDs (cu128 links libcusparseLt; cu130 links
+# libcufile). Drop the rest of: nccl, cusolver, cusparse, cusparselt, cupti,
+# nvtx, cufile, nvshmem, triton.
 set -eu
 
-freeze=$(python3 -m pip freeze)
-echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
-    | cut -d= -f1 \
-    | while read -r pkg; do
-        [ -n "$pkg" ] || continue
-        python3 -m pip uninstall -y "$pkg" || true
-    done || true
-
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
+freeze=$(python3 -m pip freeze)
+STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile|nvshmem)[^[:space:]=]*|triton|pytorch-triton)==' \
+    | cut -d= -f1 || true)
+export STRIP_CANDIDATES
+
+python3 - "$SITE" <<'PY'
+import os, subprocess, sys
+
+sitep = sys.argv[1]
+needed = set()
+for root, _, files in os.walk(os.path.join(sitep, "torch")):
+    for name in files:
+        if not name.endswith(".so"):
+            continue
+        path = os.path.join(root, name)
+        try:
+            out = subprocess.check_output(["ldd", path], text=True, stderr=subprocess.STDOUT)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            out = getattr(exc, "output", "") or ""
+        for line in out.splitlines():
+            parts = line.split()
+            if parts and parts[0].startswith("lib"):
+                needed.add(parts[0])
+print("torch DT_NEEDED:", " ".join(sorted(needed)))
+
+for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
+    show = subprocess.check_output(
+        [sys.executable, "-m", "pip", "show", "-f", pkg], text=True
+    )
+    sonames = set()
+    in_files = False
+    for ln in show.splitlines():
+        if ln.startswith("Files:"):
+            in_files = True
+            continue
+        if not in_files:
+            continue
+        rel = ln.strip()
+        if not rel:
+            continue
+        base = os.path.basename(rel)
+        if ".so" in base:
+            sonames.add(base)
+    hit = sonames & needed
+    if hit:
+        print("keep", pkg, "provides", " ".join(sorted(hit)))
+        continue
+    print("drop", pkg)
+    subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
+PY
+
 if [ -d "$SITE" ]; then
     find "$SITE" -type d -name __pycache__ -print0 | xargs -0 -r rm -rf
     if [ -d "$SITE/nvidia" ]; then
