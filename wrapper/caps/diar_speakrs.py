@@ -9,6 +9,7 @@
 # no audio. This removes one copy of a hundreds-of-megabytes clip, not the memory it needs -- the
 # engine still holds the whole thing decoded, which is what BOUNDS below caps.
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -47,6 +48,19 @@ RUN_DIR = os.environ.get("RUN_DIR") or "/run/llm-init"
 # that this side does not have to be edited when it changes. Excludes what this function
 # writes, or a restart would derive from its own output.
 _BATCHED_SEGMENTATION = re.compile(r"segmentation-[\d.]+-b\d+\.onnx")
+
+
+def _farm_for(models_dir):
+    """Where the prepared models for one cache directory go.
+
+    🔴 Keyed on the directory it derives from, because /tmp is a mounted volume and two
+    replicas of this application share it. Under one fixed name the second replica deletes and
+    rebuilds the farm the first is serving from, symlinks and all, while that one holds open
+    handles to paths that now point elsewhere. The digest only has to separate cache
+    directories, not identify them.
+    """
+    return "/tmp/speakrs-models-openvino-" + hashlib.sha256(
+        os.path.abspath(models_dir).encode()).hexdigest()[:12]
 
 
 def _openvino_models_dir(models_dir):
@@ -104,7 +118,7 @@ def _openvino_models_dir(models_dir):
     if not stock:
         log.info("no batched segmentation model in the cache; leaving batching off")
         return models_dir
-    farm = "/tmp/speakrs-models-openvino"
+    farm = _farm_for(models_dir)
     try:
         import onnx
         from onnx import shape_inference
@@ -119,28 +133,44 @@ def _openvino_models_dir(models_dir):
         for name in os.listdir(models_dir):
             os.symlink(os.path.join(models_dir, name), os.path.join(farm, name))
 
+        # 🔴 One export failing does not take the others with it. This loop was inside the
+        # single try below, so a cache holding both a b32 and a b64 export lost BOTH when either
+        # one would not convert -- the farm was torn down and the engine ran unbatched, with the
+        # log naming a file that had nothing wrong with it. Each conversion answers for itself;
+        # the farm survives as long as one of them lands, and speakrs picks whichever it asks for.
+        derived = 0
         for source in stock:
             prepared = os.path.join(
                 farm, os.path.basename(source)[: -len(".onnx")] + "-dynseq.onnx")
-            model = onnx.load(source)
-            # The sample count, and only it. The batch dimension is deliberately left static:
-            # making that one dynamic instead was measured and does not avoid the failure.
-            dims = model.graph.input[0].type.tensor_type.shape.dim
-            dims[2].ClearField("dim_value")
-            dims[2].dim_param = "samples"
-            out = model.graph.output[0].type.tensor_type.shape.dim
-            out[1].ClearField("dim_value")
-            out[1].dim_param = "frames"
-            model = shape_inference.infer_shapes(model, strict_mode=True)
-            onnx.checker.check_model(model)
-            onnx.save(model, prepared + ".partial")
+            try:
+                model = onnx.load(source)
+                # The sample count, and only it. The batch dimension is deliberately left static:
+                # making that one dynamic instead was measured and does not avoid the failure.
+                dims = model.graph.input[0].type.tensor_type.shape.dim
+                dims[2].ClearField("dim_value")
+                dims[2].dim_param = "samples"
+                out = model.graph.output[0].type.tensor_type.shape.dim
+                out[1].ClearField("dim_value")
+                out[1].dim_param = "frames"
+                model = shape_inference.infer_shapes(model, strict_mode=True)
+                onnx.checker.check_model(model)
+                onnx.save(model, prepared + ".partial")
+            except Exception:
+                log.warning("could not prepare %s; the others are unaffected", source,
+                            exc_info=True)
+                with contextlib.suppress(OSError):
+                    os.remove(prepared + ".partial")
+                continue
             # Renamed into place. Not because a half-written model could otherwise be loaded
             # -- the farm above is deleted and rebuilt on every start, so nothing from a
             # crashed run survives to be found. It is that the engine is handed this directory
             # as soon as the function returns, and a reader arriving between the write and the
             # end of it would see a truncated file under the name speakrs looks for.
             os.replace(prepared + ".partial", prepared)
+            derived += 1
             log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
+        if not derived:
+            raise RuntimeError("no batched segmentation model could be prepared")
         return farm
     except Exception:
         log.warning("could not prepare the batched segmentation model; "

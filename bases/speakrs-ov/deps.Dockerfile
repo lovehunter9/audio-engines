@@ -69,6 +69,12 @@ RUN set -eux; \
 
 # The shell only serves HTTP and reads a file header for billing. Everything that touches audio
 # samples or the model happens in the engine process.
+# onnx is pinned because it is not a library this calls, it is one whose shape inference decides
+# whether the derived model is accepted: the derivation runs infer_shapes and checker over a
+# graph it edited, and a release that tightens either one turns batching off at startup with a
+# warning nobody reads. 1.22.0 is the version the derivation case in tests/caps_smoke.py runs
+# against, so the image and the check agree.
+#
 # onnx is here for one job: deriving the batched segmentation model OpenVINO can compile, at
 # startup, from the one in the cache. Not a runtime dependency of serving -- if the import or
 # the derivation fails, diar_speakrs logs it and runs segmentation one window at a time, which
@@ -80,7 +86,7 @@ RUN set -eux; \
 # a ReadTimeoutError on files.pythonhosted.org killed a build that had everything else cached.
 RUN python3 -m pip install --no-cache-dir --break-system-packages --root-user-action=ignore \
         --timeout 120 --retries 10 \
-        "fastapi>=0.110" "uvicorn>=0.29" python-multipart soundfile onnx
+        "fastapi>=0.110" "uvicorn>=0.29" python-multipart soundfile "onnx==1.22.0"
 
 COPY --from=engine /usr/local/bin/speakrs-engine /usr/local/bin/speakrs-engine
 # ONNX Runtime's OpenVINO provider and OpenVINO itself travel with the engine that dlopen's them,

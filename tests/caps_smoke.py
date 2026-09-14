@@ -355,7 +355,7 @@ def t_diar_speakrs_openvino_models_dir():
     from wrapper.caps import diar_speakrs as ds
 
     root = tempfile.mkdtemp(prefix="ovmodels-")
-    farm = "/tmp/speakrs-models-openvino"
+    farm = ds._farm_for(root)
     shutil.rmtree(farm, ignore_errors=True)
     original = ds.EXECUTION_MODE
     batching = ds.OPENVINO_BATCHING
@@ -516,6 +516,30 @@ def t_diar_speakrs_openvino_models_dir():
               not os.path.exists(stale))
         check("and the model is derived again rather than found",
               os.stat(prepared).st_mtime > 1000000, os.stat(prepared).st_mtime)
+        # 🔴 Two caches, two farms. /tmp is a mounted volume shared by every replica of this
+        # application, and under one fixed name the second replica tears down and rebuilds the
+        # directory the first is serving out of -- while that one holds open handles to paths
+        # that have just been replaced. Asserted as the property rather than by restating the
+        # formula, which would be this module asked twice.
+        check("a second cache directory gets a farm of its own",
+              ds._farm_for(root) != ds._farm_for(root + "-other"),
+              ds._farm_for(root))
+
+        # 🔴 One unconvertible export must not take the others with it. This loop used to sit
+        # inside a single try, so a cache carrying both a b32 and a b64 export lost BOTH when
+        # either would not convert: the farm was torn down, the engine ran a window at a time,
+        # and the log named a file that had nothing wrong with it.
+        broken = os.path.join(root, "segmentation-3.0-b64.onnx")
+        open(broken, "wb").write(b"not an onnx graph")
+        got = ds._openvino_models_dir(root)
+        check("a broken export does not cost the ones that convert", got == farm, got)
+        check("and the good one is still derived",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")),
+              sorted(os.listdir(farm)))
+        check("while the broken one leaves no half-written file behind",
+              not os.path.exists(os.path.join(farm, "segmentation-3.0-b64-dynseq.onnx.partial")))
+        os.remove(broken)
+
         # 🔴 That the function is reached at all. Every check above calls it directly, so
         # deleting the call from the engine's argv left all of them green and turned
         # batching silently off -- which is the entire reason this code exists.
