@@ -3,9 +3,10 @@
 # or Docker keeps the fat layer.
 #
 # Keep: cublas, cudnn, cuda-runtime, nvjitlink, cufft, nvrtc, curand, plus any
-# nvidia *.so that torch/*.so DT_NEEDs (cu128 links libcusparseLt; cu130 links
-# libcufile). Drop the rest of: nccl, cusolver, cusparse, cusparselt, cupti,
-# nvtx, cufile, nvshmem, triton.
+# nvidia *.so on the import-time load chain of torch/_C*.so (cu128 links
+# libcusparseLt; cu130 links libcufile). Drop the rest of: nccl, cusolver,
+# cusparse, cusparselt, cupti, nvtx, cufile, nvshmem, triton. torch.testing
+# stays — import torch pulls it.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -15,26 +16,42 @@ STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|c
 export STRIP_CANDIDATES
 
 python3 - "$SITE" <<'PY'
-import os, subprocess, sys
+import glob, os, subprocess, sys
+from collections import deque
 
 sitep = sys.argv[1]
 needed = set()
-for root, _, files in os.walk(os.path.join(sitep, "torch")):
-    for name in files:
-        if not name.endswith(".so"):
+seen = set()
+queue = deque(glob.glob(os.path.join(sitep, "torch", "_C*.so")))
+while queue:
+    path = queue.popleft()
+    if path in seen or not os.path.isfile(path):
+        continue
+    seen.add(path)
+    try:
+        out = subprocess.check_output(["ldd", path], text=True, stderr=subprocess.STDOUT)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        out = getattr(exc, "output", "") or ""
+    for line in out.splitlines():
+        parts = line.split()
+        if parts and parts[0].startswith("lib"):
+            needed.add(parts[0])
+        if "=>" not in line:
             continue
-        path = os.path.join(root, name)
-        try:
-            out = subprocess.check_output(["ldd", path], text=True, stderr=subprocess.STDOUT)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            out = getattr(exc, "output", "") or ""
-        for line in out.splitlines():
-            parts = line.split()
-            if parts and parts[0].startswith("lib"):
-                needed.add(parts[0])
-print("torch DT_NEEDED:", " ".join(sorted(needed)))
+        resolved = line.split("=>", 1)[1].strip().split()
+        if not resolved:
+            continue
+        dest = resolved[0]
+        if dest.startswith(sitep) and ".so" in os.path.basename(dest):
+            queue.append(dest)
+print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
+force_drop = {"triton", "pytorch-triton"}
 for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
+    if pkg in force_drop:
+        print("drop", pkg)
+        subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
+        continue
     show = subprocess.check_output(
         [sys.executable, "-m", "pip", "show", "-f", pkg], text=True
     )
@@ -66,7 +83,7 @@ if [ -d "$SITE" ]; then
         find "$SITE/nvidia" -type d -name include -print0 | xargs -0 -r rm -rf
         find "$SITE/nvidia" -type f \( -name '*.a' -o -name '*.h' \) -delete
     fi
-    rm -rf "$SITE/torch/testing" "$SITE/torch/test" 2>/dev/null || true
+    rm -rf "$SITE/torch/test" 2>/dev/null || true
 fi
 rm -rf /root/.cache/pip /tmp/pip-*
 
