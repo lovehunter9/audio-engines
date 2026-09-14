@@ -494,10 +494,11 @@ def t_diar_speakrs_openvino_models_dir():
         # deleting the call from the engine's argv left all of them green and turned
         # batching silently off -- which is the entire reason this code exists.
         source = open(ds.__file__, encoding="utf-8").read()
-        wired = [l for l in source.splitlines()
-                 if "--models-dir" in l or ("_openvino_models_dir(" in l and "def " not in l)]
+        wired = [line for line in source.splitlines()
+                 if "--models-dir" in line
+                 or ("_openvino_models_dir(" in line and "def " not in line)]
         check("the engine is handed the prepared directory, not the raw cache",
-              any("_openvino_models_dir(" in l for l in wired), wired)
+              any("_openvino_models_dir(" in line for line in wired), wired)
     finally:
         ds.EXECUTION_MODE = original
         shutil.rmtree(root, ignore_errors=True)
