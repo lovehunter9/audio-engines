@@ -9,11 +9,10 @@
 # import torch pulls it.
 #
 # nccl: libtorch_cuda relocates against ncclRecv, so the soname must stay.
-# nvshmem: cu130 libtorch_python relocates against
-# c10d::nvshmem_extension::is_nvshmem_available — keep libtorch_nvshmem, stub
-# only the host wheel. Replace those wheels with stubs that export the same
-# dynamic symbols, then force-uninstall the pip package. Multi-GPU is not
-# this image's contract.
+# Replace the wheel with a stub, then force-uninstall. Leave nvshmem: the host
+# lib is versioned (NVSHMEM tag collides with a symbol) and cu130
+# libtorch_python needs libtorch_nvshmem at import. Multi-GPU is not this
+# image's contract.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -36,9 +35,8 @@ open(os.path.join(stubdir, ".keep"), "w").close()
 
 
 def dyn_defined(path):
-    """[(name, version or None), ...] — keep @VER so ld.so does not abort."""
     out = subprocess.check_output(["readelf", "-Ws", path], text=True)
-    pairs = []
+    names = []
     for line in out.splitlines():
         if " UND " in line or " UND\t" in line:
             continue
@@ -46,61 +44,23 @@ def dyn_defined(path):
             continue
         if " GLOBAL " not in line and " WEAK " not in line:
             continue
-        raw = line.split()[-1]
-        if "@@" in raw:
-            name, ver = raw.split("@@", 1)
-        elif "@" in raw:
-            name, ver = raw.split("@", 1)
-        else:
-            name, ver = raw, None
+        name = line.split()[-1].split("@")[0]
         if name and name.isidentifier() and name not in ("_init", "_fini"):
-            pairs.append((name, ver))
-    return sorted(set(pairs), key=lambda item: (item[0], item[1] or ""))
+            names.append(name)
+    return sorted(set(names))
 
 
 def write_stub(real, soname):
-    pairs = dyn_defined(real)
-    names = sorted({name for name, _ in pairs})
-    print("stub", soname, "from", real, "symbols", len(names), "pairs", len(pairs))
+    symbols = dyn_defined(real)
+    print("stub", soname, "from", real, "symbols", len(symbols))
     src = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
-    src.write("\n".join("void %s() {}" % name for name in names) + "\n")
+    src.write("\n".join("void %s() {}" % name for name in symbols) + "\n")
     src.close()
-    by_ver = {}
-    unversioned = set()
-    for name, ver in pairs:
-        if ver:
-            by_ver.setdefault(ver, set()).add(name)
-            unversioned.discard(name)
-        elif name not in {n for n, v in pairs if v}:
-            unversioned.add(name)
-    map_lines = []
-    versions = sorted(by_ver)
-    for i, ver in enumerate(versions):
-        glob = "\n".join("    %s;" % s for s in sorted(by_ver[ver]))
-        inherit = " %s" % versions[i - 1] if i else ""
-        extra = "\n  local: *;" if i == 0 and not unversioned else ""
-        map_lines.append("%s {\n  global:\n%s%s\n}%s;" % (ver, glob, extra, inherit))
-    if unversioned:
-        glob = "\n".join("    %s;" % s for s in sorted(unversioned))
-        map_lines.append("{\n  global:\n%s\n  local: *;\n};" % glob)
-    mapf = tempfile.NamedTemporaryFile("w", suffix=".map", delete=False)
-    mapf.write("\n".join(map_lines) + "\n")
-    mapf.close()
     dest = os.path.join("/usr/local/lib", soname)
     subprocess.check_call(
-        [
-            "gcc",
-            "-shared",
-            "-fPIC",
-            "-Wl,-soname,%s" % soname,
-            "-Wl,--version-script,%s" % mapf.name,
-            "-o",
-            dest,
-            src.name,
-        ]
+        ["gcc", "-shared", "-fPIC", "-Wl,-soname,%s" % soname, "-o", dest, src.name]
     )
     os.remove(src.name)
-    os.remove(mapf.name)
     staged = os.path.join(stubdir, soname)
     subprocess.check_call(["cp", "-a", dest, staged])
     short = soname.split(".so")[0] + ".so"
@@ -111,34 +71,20 @@ def write_stub(real, soname):
         os.symlink(soname, link)
 
 
-def first_real(prefix):
-    found = []
-    for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
-        for name in files:
-            if name.startswith(prefix):
-                found.append(os.path.join(root, name))
-    if not found:
-        return None
-    real = next((p for p in found if not os.path.islink(p)), found[0])
-    return os.path.realpath(real)
-
-
-nccl = first_real("libnccl.so")
-if nccl:
-    write_stub(nccl, "libnccl.so.2")
-
-host = first_real("libnvshmem_host.so")
-if host:
-    write_stub(host, "libnvshmem_host.so.3")
-plain = first_real("libnvshmem.so")
-if plain:
-    write_stub(plain, "libnvshmem.so.3")
+nccl_libs = []
+for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
+    for name in files:
+        if name.startswith("libnccl.so"):
+            nccl_libs.append(os.path.join(root, name))
+if nccl_libs:
+    real = next((p for p in nccl_libs if not os.path.islink(p)), nccl_libs[0])
+    write_stub(os.path.realpath(real), "libnccl.so.2")
 
 subprocess.call(["ldconfig"])
 PY
 
 freeze=$(python3 -m pip freeze)
-STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile|nvshmem)[^[:space:]=]*|triton|pytorch-triton)==' \
+STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
     | cut -d= -f1 || true)
 export STRIP_CANDIDATES
 
@@ -175,7 +121,7 @@ print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
 force_drop = {"triton", "pytorch-triton"}
 for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
-    if pkg in force_drop or pkg.startswith("nvidia-nccl") or pkg.startswith("nvidia-nvshmem"):
+    if pkg in force_drop or pkg.startswith("nvidia-nccl"):
         print("drop", pkg)
         subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
         continue
