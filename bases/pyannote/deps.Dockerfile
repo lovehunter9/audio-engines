@@ -5,6 +5,8 @@ ARG TARGETARCH
 
 # pyannote/speechbrain can pull a CPU torch from PyPI — put CUDA back in this RUN if they do.
 # Do not unconditionally force-reinstall: that would add a second torch layer on top of runtime.
+# Reinstall + strip must share this RUN or the fat CUDA layer comes back.
+COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     if [ "${TARGETARCH}" = "arm64" ]; then \
         IDX=https://download.pytorch.org/whl/cu130; \
@@ -18,6 +20,8 @@ RUN set -eux; \
     python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch torchaudio --index-url "${IDX}"; \
+    sh /tmp/strip_unused_cuda.sh; \
+    rm -f /tmp/strip_unused_cuda.sh; \
     apt-get purge -y git build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart; \

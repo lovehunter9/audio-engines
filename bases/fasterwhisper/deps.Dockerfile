@@ -43,6 +43,7 @@ RUN set -eux; \
 FROM ${RUNTIME_IMAGE} AS base-amd64
 ARG TARGETARCH
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "faster-whisper" huggingface_hub "transformers>=4.56" \
@@ -50,6 +51,8 @@ RUN set -eux; \
     python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch --index-url https://download.pytorch.org/whl/cu128; \
+    sh /tmp/strip_unused_cuda.sh; \
+    rm -f /tmp/strip_unused_cuda.sh; \
     python3 /opt/probe_ct2_cuda.py; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
     audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
@@ -64,6 +67,7 @@ ARG TARGETARCH
 COPY --from=ct2-builder /opt/ct2-wheels /opt/ct2-wheels
 COPY --from=ct2-builder /opt/ct2-runtime /opt/ct2-runtime
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 ENV LD_LIBRARY_PATH=/opt/ct2-runtime/lib
 RUN set -eux; \
     echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
@@ -76,6 +80,8 @@ RUN set -eux; \
     python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch --index-url https://download.pytorch.org/whl/cu130; \
+    sh /tmp/strip_unused_cuda.sh; \
+    rm -f /tmp/strip_unused_cuda.sh; \
     python3 /opt/probe_ct2_cuda.py; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
     audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \

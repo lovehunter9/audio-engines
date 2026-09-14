@@ -1162,5 +1162,38 @@ class NvmlFallbackIsOptIn(unittest.TestCase):
         self.assertIn("as NVML reports it", body)
 
 
+class SlimRuntimeRecipeTest(unittest.TestCase):
+    def _runtime_dir(self):
+        return os.path.join(os.path.dirname(__file__), "../bases/runtime")
+
+    def test_torch_install_and_cuda_strip_share_one_run(self):
+        text = open(os.path.join(self._runtime_dir(), "Dockerfile")).read()
+        self.assertIn("strip_unused_cuda.sh", text)
+        self.assertNotIn("python3-venv", text)
+        pip = text.find("torch torchaudio")
+        strip = text.find("strip_unused_cuda.sh")
+        self.assertGreater(pip, 0)
+        self.assertGreater(strip, pip)
+
+    def test_strip_script_drops_solvers_keeps_cublas_cudnn(self):
+        text = open(os.path.join(self._runtime_dir(), "strip_unused_cuda.sh")).read()
+        self.assertIn("nvidia-(nccl|cusolver|cusparse", text)
+        self.assertIn("triton", text)
+        self.assertIn("Keep: cublas, cudnn", text)
+        self.assertNotIn("uninstall -y nvidia-cublas", text)
+        freeze = (
+            "nvidia-cublas-cu12==12.8\n"
+            "nvidia-cudnn-cu12==9.1\n"
+            "nvidia-nccl-cu12==2.21\n"
+            "triton==3.2.0\n"
+        )
+        pat = re.compile(
+            r"^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)|triton|pytorch-triton)==",
+            re.I | re.M,
+        )
+        dropped = [m.group(0).split("=")[0] for m in pat.finditer(freeze)]
+        self.assertEqual(dropped, ["nvidia-nccl-cu12", "triton"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,6 +5,7 @@ ARG TARGETARCH
 
 ARG FIRERED_REF=1d32ba780da6af37a71bdfd9c68c12003e908a46
 
+COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends git curl; \
     python3 -m pip install --no-cache-dir --root-user-action=ignore \
@@ -34,6 +35,8 @@ open(os.path.join(p, 'fireredtts3.pth'), 'w').write('/opt/fireredtts3\n')"; \
     python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch torchaudio --index-url "${IDX}"; \
+    sh /tmp/strip_unused_cuda.sh; \
+    rm -f /tmp/strip_unused_cuda.sh; \
     apt-get purge -y git curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
 RUN env -u PYTHONPATH python3 -c "\
