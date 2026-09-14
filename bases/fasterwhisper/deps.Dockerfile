@@ -1,4 +1,4 @@
-# FasterWhisper: own image, no shared audio-runtime, no CUDA torch.
+# FasterWhisper: own image, no shared runtime floor, no CUDA torch.
 # Decode is CTranslate2. CPU torch stays only so openai/whisper-large-v3 can
 # convert once via TransformersConverter. amd64: pip CT2 CUDA wheel. arm64:
 # compile CT2 on cudnn-devel, copy only the closure into release.

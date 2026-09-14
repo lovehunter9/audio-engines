@@ -1168,7 +1168,9 @@ class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
                             "../bases/fasterwhisper/deps.Dockerfile")
         with open(path) as fh:
             text = fh.read()
-        self.assertNotIn("audio-runtime", text)
+        self.assertNotIn("FROM ${RUNTIME_IMAGE}", text)
+        self.assertNotIn("lovehunter9/audio-runtime", text)
+        self.assertNotIn("beclab/audio-runtime", text)
         self.assertNotIn("strip_unused_cuda.sh", text)
         self.assertNotIn("download.pytorch.org/whl/cu128", text)
         self.assertNotIn("download.pytorch.org/whl/cu130", text)
