@@ -385,9 +385,11 @@ def _ov_assert_batch_generate(pipe):
 
 
 def _ov_generate_many(clips, language=None):
-    """One OpenVINO generate() for the group. Decoder already accepts batch>1;
-    the patched ASRPipeline.generate takes a list of waveforms. A TypeError is
-    the unpatched wheel, which cannot accelerate and must not pretend to.
+    """One OpenVINO generate() for the group. The patched binding takes a list
+    of waveforms and merge_chunk_results folds them back by orig_batch.
+    encode+decode inside that call stays serial: stacking encoder states into
+    one decoder.generate() made every span come back as the first clip.
+    A TypeError is the unpatched wheel, which cannot take a list at all.
     """
     if len(clips) == 1:
         return [_ov_result_text(_ov_generate(clips[0], language=language))]
