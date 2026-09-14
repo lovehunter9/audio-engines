@@ -72,6 +72,12 @@ def _openvino_models_dir(models_dir):
     """
     if not EXECUTION_MODE.startswith("openvino"):
         return models_dir
+    if OPENVINO_BATCHING.lower() == "off":
+        log.info("--openvino-batching off: segmentation will run one window at a time")
+        return models_dir
+    if OPENVINO_BATCHING.lower() != "on":
+        log.warning("--openvino-batching %r is neither on nor off; treating it as on",
+                    OPENVINO_BATCHING)
     # 🔴 Found by pattern, and the derived name follows the one found, rather than both being
     # written out here. speakrs asks for "<the batched export's name>-dynseq.onnx", building
     # the batch number from its own PRIMARY_BATCH_SIZE constant; spelling 32 on this side made
@@ -210,6 +216,12 @@ _args = EngineArgs()
 # Upstream's own spelling for the mode; "cuda-fast" trades ~0.3 points of DER for roughly double
 # the speed by stepping the segmentation window 2s instead of 1s.
 EXECUTION_MODE = _args.text("--execution-mode", "cuda")
+# The one switch on the OpenVINO batched-segmentation derivation, and it exists for measuring:
+# the 4x on the integrated part was established by turning this off and running the same clip
+# again, and the next person with a number to check should not have to break the derivation
+# to do that. "on" is the default and the only other value is "off"; anything else is a typo,
+# said so in the log, and treated as on -- silently losing 4x is the outcome to avoid.
+OPENVINO_BATCHING = _args.text("--openvino-batching", "on")
 CLUSTERING_THRESHOLD = _args.text("--clustering-threshold")
 MIN_DURATION_OFF = _args.text("--min-duration-off")
 MIN_DURATION_ON = _args.text("--min-duration-on")

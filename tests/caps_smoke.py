@@ -358,6 +358,7 @@ def t_diar_speakrs_openvino_models_dir():
     farm = "/tmp/speakrs-models-openvino"
     shutil.rmtree(farm, ignore_errors=True)
     original = ds.EXECUTION_MODE
+    batching = ds.OPENVINO_BATCHING
     try:
         # Off for every other backend: they compile the stock export and batch with it.
         open(os.path.join(root, "segmentation-3.0-b32.onnx"), "wb").close()
@@ -424,6 +425,19 @@ def t_diar_speakrs_openvino_models_dir():
 
         got = ds._openvino_models_dir(root)
         check("a derivable export produces a directory of its own", got == farm, got)
+
+        # The switch, asserted where deriving succeeds -- against a case that already returns
+        # the cache directory it would prove nothing. Off means the cache directory; a value
+        # that is neither on nor off must not quietly become off, because that is a 4x loss
+        # with nothing in the output saying why.
+        ds.OPENVINO_BATCHING = "off"
+        check("--openvino-batching off hands over the cache directory",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        ds.OPENVINO_BATCHING = "OFF"
+        check("and the value is not case-sensitive", ds._openvino_models_dir(root) == root)
+        ds.OPENVINO_BATCHING = "maybe"
+        check("an unrecognised value still derives", ds._openvino_models_dir(root) == farm)
+        ds.OPENVINO_BATCHING = batching
 
         # 🔴 A device may be named, and on a two-card machine it will be: the engine takes
         # openvino:<device> and the chart could start sending one. So the guard has to be a
@@ -513,6 +527,7 @@ def t_diar_speakrs_openvino_models_dir():
               any("_openvino_models_dir(" in line for line in wired), wired)
     finally:
         ds.EXECUTION_MODE = original
+        ds.OPENVINO_BATCHING = batching
         shutil.rmtree(root, ignore_errors=True)
         shutil.rmtree(farm, ignore_errors=True)
 
