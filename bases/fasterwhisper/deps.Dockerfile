@@ -1,40 +1,24 @@
-# audio-fasterwhisper deps (hash-tagged rebuilds). amd64: harveyff+CT2 zero-diff. arm64: CUDA CT2 from source + cu130 torch.
+# FasterWhisper on the shared slim runtime.
+# amd64: pip CT2 CUDA wheel. arm64: compile CT2 on cudnn-devel, copy the closure out
+# so the 4.3 GB devel image is not the final floor.
+ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim1
 ARG TARGETARCH
-
-# ----- amd64: byte-stable recipe (same steps as the pre-split single-FROM file) -----
-FROM docker.io/beclab/harveyff-whisper-webui:v1.0.7 AS base-amd64
-RUN set -eux; \
-    PY=; \
-    for cand in "$(command -v python3 || true)" /Whisper-WebUI/venv/bin/python3 /usr/bin/python3; do \
-        [ -n "$cand" ] && [ -x "$cand" ] || continue; \
-        if "$cand" -c "import faster_whisper" >/dev/null 2>&1; then PY="$cand"; break; fi; \
-    done; \
-    : "${PY:?no interpreter in this image can import faster_whisper}"; \
-    "$PY" -m pip install --no-cache-dir --root-user-action=ignore --ignore-installed \
-        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    "$PY" -m pip install --no-cache-dir --root-user-action=ignore "transformers>=4.56"; \
-    printf '#!/bin/sh\nexec %s "$@"\n' "$PY" > /usr/local/bin/audio-python; \
-    chmod 755 /usr/local/bin/audio-python; \
-    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
-    audio-python -c "from ctranslate2.converters import TransformersConverter; \
-import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
-assert v >= (4, 56), t.__version__"; \
-    command -v ffmpeg >/dev/null
-
-# ----- arm64: CUDA CT2 from source + CUDA torch (cu130) -----
-FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04 AS base-arm64
 ARG CT2_REF=v4.6.0
-# FindCUDA arch list: 8.7;8.9;9.0+PTX (semicolon-separated; covers GB10 via PTX JIT).
+
+# ----- arm64 builder (skipped on amd64) -----
+FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04 AS ct2-builder
+ARG CT2_REF
 ENV DEBIAN_FRONTEND=noninteractive \
-    CUDA_ARCH_LIST="8.7;8.9;9.0+PTX"
-# Probe lives in its own file so try/except is not smashed by Dockerfile line continuations.
+    CUDA_ARCH_LIST="8.7;8.9;9.0+PTX" \
+    PIP_BREAK_SYSTEM_PACKAGES=1
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+COPY bases/fasterwhisper/collect_ct2_runtime.py /opt/collect_ct2_runtime.py
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         python3 python3-pip python3-dev python3-venv \
         git cmake ninja-build build-essential pkg-config \
-        libopenblas-dev ffmpeg libsndfile1 ca-certificates; \
+        libopenblas-dev ca-certificates; \
     rm -rf /var/lib/apt/lists/*; \
     python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
     git clone --recursive --depth 1 --branch "${CT2_REF}" \
@@ -52,17 +36,48 @@ RUN set -eux; \
     mkdir -p /opt/ct2-wheels; \
     (cd /tmp/CT2/python && python3 setup.py bdist_wheel -d /opt/ct2-wheels); \
     python3 -m pip install --no-cache-dir /opt/ct2-wheels/ctranslate2-*.whl; \
-    rm -rf /tmp/CT2; \
-    # CUDA torch for device=auto; faster-whisper may pull a CPU CT2 wheel — put ours back.
-    python3 -m pip install --no-cache-dir \
-        torch --index-url https://download.pytorch.org/whl/cu130; \
-    python3 -m pip install --no-cache-dir \
+    python3 /opt/collect_ct2_runtime.py /opt/ct2-runtime; \
+    rm -rf /tmp/CT2
+
+# ----- amd64: pip faster-whisper + official CT2 CUDA wheel -----
+FROM ${RUNTIME_IMAGE} AS base-amd64
+ARG TARGETARCH
+COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+RUN set -eux; \
+    python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "faster-whisper" huggingface_hub "transformers>=4.56" \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    python3 -m pip install --no-cache-dir --force-reinstall --no-deps /opt/ct2-wheels/ctranslate2-*.whl; \
+    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
+        || python3 -m pip install --no-cache-dir --force-reinstall \
+            torch --index-url https://download.pytorch.org/whl/cu128; \
     python3 /opt/probe_ct2_cuda.py; \
-    printf '#!/bin/sh\nexec python3 "$@"\n' > /usr/local/bin/audio-python; \
-    chmod 755 /usr/local/bin/audio-python; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    audio-python -c "from ctranslate2.converters import TransformersConverter; \
+import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
+assert v >= (4, 56), t.__version__"; \
+    command -v ffmpeg >/dev/null
+
+# ----- arm64: runtime + copied CT2/CUDA closure (no devel leftover) -----
+FROM ${RUNTIME_IMAGE} AS base-arm64
+ARG TARGETARCH
+COPY --from=ct2-builder /opt/ct2-wheels /opt/ct2-wheels
+COPY --from=ct2-builder /opt/ct2-runtime /opt/ct2-runtime
+COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+ENV LD_LIBRARY_PATH=/opt/ct2-runtime/lib
+RUN set -eux; \
+    echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
+    ldconfig; \
+    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "faster-whisper" huggingface_hub "transformers>=4.56" \
+        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
+    python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
+        /opt/ct2-wheels/ctranslate2-*.whl; \
+    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
+        || python3 -m pip install --no-cache-dir --force-reinstall \
+            torch --index-url https://download.pytorch.org/whl/cu130; \
+    python3 /opt/probe_ct2_cuda.py; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
     audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
     audio-python -c "from ctranslate2.converters import TransformersConverter; \
 import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \

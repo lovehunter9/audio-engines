@@ -1,20 +1,14 @@
-# fasterwhisper CI: triggers only; the build is the shared build-image.yml.
-name: fasterwhisper-ci
+# Shared slim CUDA+torch floor. Not an engine; families FROM this image.
+name: runtime-ci
 
 on:
-  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
   push:
     tags: ['v*']
-  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
   pull_request:
     paths:
-      - 'wrapper/**'
-      - 'tests/**'
-      - 'bases/fasterwhisper/**'
       - 'bases/runtime/**'
-      - '.github/workflows/fasterwhisper-ci.yml'
+      - '.github/workflows/runtime-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
   workflow_dispatch:
     inputs:
       namespace:
@@ -30,15 +24,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: fasterwhisper-ci-${{ github.ref }}
+  group: runtime-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     uses: ./.github/workflows/build-image.yml
     with:
-      base: fasterwhisper
-      repo: audio-fasterwhisper
+      base: runtime
+      repo: audio-runtime
       namespace: ${{ inputs.namespace || 'beclab' }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

@@ -11,6 +11,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/pyannote/**'
+      - 'bases/runtime/**'
       - '.github/workflows/pyannote-ci.yml'
       - '.github/workflows/build-image.yml'
   # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.

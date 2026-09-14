@@ -1,40 +1,30 @@
-# audio-pyannote deps (hash-tagged rebuilds). amd64: maximsachs zero-diff. arm64: cu130 torch stack (no arm64 upstream mirror).
+# Pyannote / Silero / SpeechBrain on the shared slim runtime (no 4.6 GB maximsachs image).
+ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim1
+FROM ${RUNTIME_IMAGE}
 ARG TARGETARCH
-FROM docker.io/beclab/maximsachs-pyannote_fastapi:4.0.4 AS base-amd64
 
-FROM python:3.11-slim-bookworm AS base-arm64
+# pyannote/speechbrain can pull a CPU torch from PyPI — put CUDA back in this RUN if they do.
+# Do not unconditionally force-reinstall: that would add a second torch layer on top of runtime.
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends ffmpeg libsndfile1 git build-essential; \
-    rm -rf /var/lib/apt/lists/*; \
-    python3 -m pip install --no-cache-dir --upgrade pip; \
-    python3 -m pip install --no-cache-dir \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu130; \
-    python3 -m pip install --no-cache-dir "pyannote.audio>=3.3.0" speechbrain; \
-    # pyannote/speechbrain deps can silently pull CPU torch from PyPI on aarch64 — put CUDA back.
-    python3 -m pip install --no-cache-dir --force-reinstall \
-        torch torchaudio --index-url https://download.pytorch.org/whl/cu130; \
-    python3 -c "import torch; \
-assert torch.version.cuda, 'arm64 pyannote deps must be CUDA torch, got %s' % (torch.__version__,); \
-print('torch', torch.__version__, 'cuda', torch.version.cuda)"
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+        IDX=https://download.pytorch.org/whl/cu130; \
+    else \
+        IDX=https://download.pytorch.org/whl/cu128; \
+    fi; \
+    apt-get update && apt-get install -y --no-install-recommends git build-essential; \
+    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "pyannote.audio>=3.3.0" speechbrain silero-vad omegaconf soundfile \
+        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
+    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
+        || python3 -m pip install --no-cache-dir --force-reinstall \
+            torch torchaudio --index-url "${IDX}"; \
+    apt-get purge -y git build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
 
-FROM base-${TARGETARCH}
-ARG TARGETARCH
-
-# Build-time deps only: the amd64 base has torch + pyannote; arm64 stage installed those above.
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        silero-vad omegaconf speechbrain soundfile python-multipart \
-        "fastapi>=0.110" "uvicorn>=0.29"
-
-# Import-check deps; re-assert CUDA torch on arm64 after shared pip (PyPI may overwrite).
 RUN python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart; \
-import os; \
-arch=os.environ.get('TARGETARCH') or '''${TARGETARCH}'''; \
-print('TARGETARCH', arch, 'torch', torch.__version__, 'cuda', torch.version.cuda); \
-assert arch != 'arm64' or torch.version.cuda, 'arm64 lost CUDA torch after pip install'" \
+print('TARGETARCH', '''${TARGETARCH}''', 'torch', torch.__version__, 'cuda', torch.version.cuda); \
+assert torch.version.cuda, 'lost CUDA torch after pip install'" \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
-# Log which containers enhance can return; it degrades to FLAC then WAV, so this is informational.
 RUN python3 -c "import soundfile as sf; \
     print('libsndfile', sf.__libsndfile_version__); \
     [print(c, s, sf.check_format(c, s)) for c, s in \
