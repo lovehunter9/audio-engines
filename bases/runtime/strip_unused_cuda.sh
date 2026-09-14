@@ -51,7 +51,7 @@ def dyn_defined(path):
         name = line.split()[-1].split("@")[0]
         if name and name.isidentifier() and name not in ("_init", "_fini"):
             names.append(name)
-    return names
+    return sorted(set(names))
 
 
 nccl_libs = []
