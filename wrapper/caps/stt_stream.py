@@ -386,9 +386,9 @@ def _ov_assert_batch_generate(pipe):
 
 def _ov_generate_many(clips, language=None):
     """One OpenVINO generate() for the group. The patched binding takes a list
-    of waveforms and merge_chunk_results folds them back by orig_batch.
-    encode+decode inside that call stays serial: stacking encoder states into
-    one decoder.generate() made every span come back as the first clip.
+    of waveforms; infer() encodes per clip then one decoder.generate() on the
+    stacked hidden states. The decoder IR is reshaped so encoder_hidden_states
+    has a dynamic batch; without that, every span copies clip 0 (intel-ov17).
     A TypeError is the unpatched wheel, which cannot take a list at all.
     """
     if len(clips) == 1:
