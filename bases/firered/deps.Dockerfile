@@ -1,6 +1,6 @@
 # FireRed on the shared slim runtime (no official pytorch/pytorch 4.3 GB image).
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim1
-FROM ${RUNTIME_IMAGE}
+ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
+FROM ${RUNTIME_IMAGE} AS build
 ARG TARGETARCH
 
 ARG FIRERED_REF=1d32ba780da6af37a71bdfd9c68c12003e908a46
@@ -36,10 +36,17 @@ open(os.path.join(p, 'fireredtts3.pth'), 'w').write('/opt/fireredtts3\n')"; \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch torchaudio --index-url "${IDX}"; \
     sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh; \
-    apt-get purge -y git curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/strip_unused_cuda.sh
 
-RUN env -u PYTHONPATH python3 -c "\
+FROM ${RUNTIME_IMAGE} AS release
+ARG TARGETARCH
+COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
+COPY --from=build /opt/fireredtts3 /opt/fireredtts3
+RUN set -eux; \
+    ldconfig; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    env -u PYTHONPATH python3 -c "\
 import os, shutil, torch, transformers, fasttext; \
 from fireredtts3.core import FireRedTTS3Instruct; \
 arch=os.environ.get('TARGETARCH') or '''${TARGETARCH}'''; \
@@ -48,7 +55,6 @@ print('TARGETARCH', arch, 'torch', torch.__version__, 'cuda', torch.version.cuda
       'transformers', transformers.__version__); \
 assert transformers.__version__.startswith('5.6.'), \
     'FireRedTTS3-Instruct config targets transformers 5.6.x, got %s' % transformers.__version__; \
-assert torch.version.cuda, 'lost CUDA torch after pip install'" \
-    && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+assert torch.version.cuda, 'lost CUDA torch after pip install'"
 
 LABEL org.opencontainers.image.title="audio-firered-deps"

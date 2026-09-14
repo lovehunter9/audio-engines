@@ -1,11 +1,11 @@
 # FasterWhisper on the shared slim runtime.
-# amd64: pip CT2 CUDA wheel. arm64: compile CT2 on cudnn-devel, copy the closure out
-# so the 4.3 GB devel image is not the final floor.
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim1
+# amd64: pip CT2 CUDA wheel. arm64: compile CT2 on cudnn-devel, copy the closure
+# into the release image so the devel tree never publishes.
+ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
 ARG TARGETARCH
 ARG CT2_REF=v4.6.0
 
-# ----- arm64 builder (skipped on amd64) -----
+# ----- arm64 builder (not the published image) -----
 FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04 AS ct2-builder
 ARG CT2_REF
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -39,8 +39,8 @@ RUN set -eux; \
     python3 /opt/collect_ct2_runtime.py /opt/ct2-runtime; \
     rm -rf /tmp/CT2
 
-# ----- amd64: pip faster-whisper + official CT2 CUDA wheel -----
-FROM ${RUNTIME_IMAGE} AS base-amd64
+# ----- amd64 build -----
+FROM ${RUNTIME_IMAGE} AS build-amd64
 ARG TARGETARCH
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
@@ -52,17 +52,10 @@ RUN set -eux; \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch --index-url https://download.pytorch.org/whl/cu128; \
     sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh; \
-    python3 /opt/probe_ct2_cuda.py; \
-    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
-    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
-    audio-python -c "from ctranslate2.converters import TransformersConverter; \
-import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
-assert v >= (4, 56), t.__version__"; \
-    command -v ffmpeg >/dev/null
+    rm -f /tmp/strip_unused_cuda.sh
 
-# ----- arm64: runtime + copied CT2/CUDA closure (no devel leftover) -----
-FROM ${RUNTIME_IMAGE} AS base-arm64
+# ----- arm64 build: runtime + CT2 closure, not the devel image -----
+FROM ${RUNTIME_IMAGE} AS build-arm64
 ARG TARGETARCH
 COPY --from=ct2-builder /opt/ct2-wheels /opt/ct2-wheels
 COPY --from=ct2-builder /opt/ct2-runtime /opt/ct2-runtime
@@ -82,13 +75,40 @@ RUN set -eux; \
             torch --index-url https://download.pytorch.org/whl/cu130; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh; \
-    python3 /opt/probe_ct2_cuda.py; \
+    rm -rf /opt/ct2-wheels
+
+FROM ${RUNTIME_IMAGE} AS release-amd64
+ARG TARGETARCH
+COPY --from=build-amd64 /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build-amd64 /opt/cuda-stubs/ /usr/local/lib/
+COPY --from=build-amd64 /opt/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+RUN set -eux; \
+    ldconfig; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    python3 /opt/probe_ct2_cuda.py; \
     audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
     audio-python -c "from ctranslate2.converters import TransformersConverter; \
 import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
 assert v >= (4, 56), t.__version__"; \
     command -v ffmpeg >/dev/null
 
-FROM base-${TARGETARCH}
+FROM ${RUNTIME_IMAGE} AS release-arm64
+ARG TARGETARCH
+COPY --from=build-arm64 /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build-arm64 /opt/cuda-stubs/ /usr/local/lib/
+COPY --from=build-arm64 /opt/ct2-runtime /opt/ct2-runtime
+COPY --from=build-arm64 /opt/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
+ENV LD_LIBRARY_PATH=/opt/ct2-runtime/lib
+RUN set -eux; \
+    echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
+    ldconfig; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    python3 /opt/probe_ct2_cuda.py; \
+    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    audio-python -c "from ctranslate2.converters import TransformersConverter; \
+import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
+assert v >= (4, 56), t.__version__"; \
+    command -v ffmpeg >/dev/null
+
+FROM release-${TARGETARCH}
 LABEL org.opencontainers.image.title="audio-fasterwhisper-deps"

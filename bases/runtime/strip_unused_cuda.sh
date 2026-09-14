@@ -8,15 +8,12 @@
 # cusparse, cusparselt, cupti, nvtx, cufile, triton. torch.testing stays —
 # import torch pulls it.
 #
-# Do not unlink nvshmem. cu130 libtorch_python relocates against
-# c10d::nvshmem_extension::is_nvshmem_available; deleting libtorch_nvshmem
-# blows import torch (arm64 slim3). Leave that for a later pass.
-#
 # nccl: libtorch_cuda relocates against ncclRecv, so the soname must stay.
-# Replace the 300 Mi wheel with a stub that exports the same dynamic symbols,
-# then force-uninstall the pip package — otherwise ldd still sees the real
-# libnccl.so.2 and the second pass keeps the wheel. Multi-GPU is not this
-# image's contract.
+# nvshmem: cu130 libtorch_python relocates against
+# c10d::nvshmem_extension::is_nvshmem_available — keep libtorch_nvshmem, stub
+# only the host wheel. Replace those wheels with stubs that export the same
+# dynamic symbols, then force-uninstall the pip package. Multi-GPU is not
+# this image's contract.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
@@ -33,6 +30,9 @@ python3 - "$SITE" <<'PY'
 import os, subprocess, sys, tempfile
 
 sitep = sys.argv[1]
+stubdir = "/opt/cuda-stubs"
+os.makedirs(stubdir, exist_ok=True)
+open(os.path.join(stubdir, ".keep"), "w").close()
 
 
 def dyn_defined(path):
@@ -51,38 +51,58 @@ def dyn_defined(path):
     return sorted(set(names))
 
 
-nccl_libs = []
-for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
-    for name in files:
-        if name.startswith("libnccl.so"):
-            nccl_libs.append(os.path.join(root, name))
-if nccl_libs:
-    real = next((p for p in nccl_libs if not os.path.islink(p)), nccl_libs[0])
-    real = os.path.realpath(real)
+def write_stub(real, soname):
     symbols = dyn_defined(real)
-    print("stub libnccl.so.2 from", real, "symbols", len(symbols))
-    # C, not C++: gcc without g++ has no cc1plus.
+    print("stub", soname, "from", real, "symbols", len(symbols))
     lines = []
     for name in symbols:
         lines.append("void %s() {}" % name)
     src = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
     src.write("\n".join(lines) + "\n")
     src.close()
-    dest = "/usr/local/lib/libnccl.so.2"
+    dest = os.path.join("/usr/local/lib", soname)
     subprocess.check_call(
-        ["gcc", "-shared", "-fPIC", "-Wl,-soname,libnccl.so.2", "-o", dest, src.name]
+        ["gcc", "-shared", "-fPIC", "-Wl,-soname,%s" % soname, "-o", dest, src.name]
     )
     os.remove(src.name)
-    link = "/usr/local/lib/libnccl.so"
-    if os.path.islink(link) or os.path.exists(link):
-        os.remove(link)
-    os.symlink("libnccl.so.2", link)
-    subprocess.call(["ldconfig"])
+    staged = os.path.join(stubdir, soname)
+    subprocess.check_call(["cp", "-a", dest, staged])
+    short = soname.split(".so")[0] + ".so"
+    for directory in ("/usr/local/lib", stubdir):
+        link = os.path.join(directory, short)
+        if os.path.islink(link) or os.path.exists(link):
+            os.remove(link)
+        os.symlink(soname, link)
 
+
+def first_real(prefix):
+    found = []
+    for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
+        for name in files:
+            if name.startswith(prefix):
+                found.append(os.path.join(root, name))
+    if not found:
+        return None
+    real = next((p for p in found if not os.path.islink(p)), found[0])
+    return os.path.realpath(real)
+
+
+nccl = first_real("libnccl.so")
+if nccl:
+    write_stub(nccl, "libnccl.so.2")
+
+host = first_real("libnvshmem_host.so")
+if host:
+    write_stub(host, "libnvshmem_host.so.3")
+plain = first_real("libnvshmem.so")
+if plain:
+    write_stub(plain, "libnvshmem.so.3")
+
+subprocess.call(["ldconfig"])
 PY
 
 freeze=$(python3 -m pip freeze)
-STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
+STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile|nvshmem)[^[:space:]=]*|triton|pytorch-triton)==' \
     | cut -d= -f1 || true)
 export STRIP_CANDIDATES
 
@@ -119,7 +139,7 @@ print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
 force_drop = {"triton", "pytorch-triton"}
 for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
-    if pkg in force_drop or pkg.startswith("nvidia-nccl"):
+    if pkg in force_drop or pkg.startswith("nvidia-nccl") or pkg.startswith("nvidia-nvshmem"):
         print("drop", pkg)
         subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
         continue
@@ -154,7 +174,10 @@ if [ -d "$SITE" ]; then
         find "$SITE/nvidia" -type d -name include -print0 | xargs -0 -r rm -rf
         find "$SITE/nvidia" -type f \( -name '*.a' -o -name '*.h' \) -delete
     fi
-    rm -rf "$SITE/torch/test" 2>/dev/null || true
+    if [ -d "$SITE/torch" ]; then
+        rm -rf "$SITE/torch/include" "$SITE/torch/test" 2>/dev/null || true
+        find "$SITE/torch" -type f \( -name '*.a' -o -name '*.h' \) -delete
+    fi
 fi
 rm -rf /root/.cache/pip /tmp/pip-*
 

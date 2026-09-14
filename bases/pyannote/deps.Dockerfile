@@ -1,6 +1,6 @@
 # Pyannote / Silero / SpeechBrain on the shared slim runtime (no 4.6 GB maximsachs image).
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim1
-FROM ${RUNTIME_IMAGE}
+ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
+FROM ${RUNTIME_IMAGE} AS build
 ARG TARGETARCH
 
 # pyannote/speechbrain can pull a CPU torch from PyPI — put CUDA back in this RUN if they do.
@@ -21,15 +21,19 @@ RUN set -eux; \
         || python3 -m pip install --no-cache-dir --force-reinstall \
             torch torchaudio --index-url "${IDX}"; \
     sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh; \
-    apt-get purge -y git build-essential && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    rm -f /tmp/strip_unused_cuda.sh
 
-RUN python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart; \
+FROM ${RUNTIME_IMAGE} AS release
+ARG TARGETARCH
+COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
+COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
+RUN set -eux; \
+    ldconfig; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart; \
 print('TARGETARCH', '''${TARGETARCH}''', 'torch', torch.__version__, 'cuda', torch.version.cuda); \
-assert torch.version.cuda, 'lost CUDA torch after pip install'" \
-    && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
-
-RUN python3 -c "import soundfile as sf; \
+assert torch.version.cuda, 'lost CUDA torch after pip install'"; \
+    python3 -c "import soundfile as sf; \
     print('libsndfile', sf.__libsndfile_version__); \
     [print(c, s, sf.check_format(c, s)) for c, s in \
      (('FLAC', 'PCM_16'), ('OGG', 'OPUS'), ('OGG', 'VORBIS'))]"
