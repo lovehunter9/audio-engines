@@ -14,7 +14,8 @@ ARG BUILD_DATE=unknown
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_BREAK_SYSTEM_PACKAGES=1
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore
 
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 
@@ -33,7 +34,7 @@ RUN set -eux; \
     else \
         IDX=https://download.pytorch.org/whl/cu128; \
     fi; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+    python3 -m pip install --no-cache-dir \
         torch torchaudio --index-url "${IDX}"; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh; \

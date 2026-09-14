@@ -8,7 +8,7 @@ ARG FIRERED_REF=1d32ba780da6af37a71bdfd9c68c12003e908a46
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends git curl; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+    python3 -m pip install --no-cache-dir \
         "transformers==5.6.2" einops regex python-dotenv wetext fasttext-wheel \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets; \

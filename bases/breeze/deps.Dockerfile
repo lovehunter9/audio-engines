@@ -10,7 +10,7 @@ ARG BREEZE_REF=ca632ce6c4d05f7985da4eab29b1a5d445b43f7b
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends git; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+    python3 -m pip install --no-cache-dir \
         "transformers==4.57.3" "qwen-tts==0.1.1" \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.115" "uvicorn>=0.30" httpx python-multipart websockets; \

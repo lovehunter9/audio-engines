@@ -14,7 +14,7 @@ RUN set -eux; \
         IDX=https://download.pytorch.org/whl/cu128; \
     fi; \
     apt-get update && apt-get install -y --no-install-recommends git build-essential; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+    python3 -m pip install --no-cache-dir \
         "pyannote.audio>=3.3.0" speechbrain silero-vad omegaconf soundfile \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
     python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
