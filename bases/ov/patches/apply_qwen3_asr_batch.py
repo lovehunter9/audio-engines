@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Patch a checked-out openvino.genai tree so Qwen3-ASR generate() takes many waveforms.
+"""Patch openvino.genai so Qwen3-ASR generate() takes many waveforms and decodes them as a batch.
 
 Public generate() only accepted one vector<float>. split_audio_into_chunks already
-knows a list of waveforms and stamps orig_batch; merge_chunk_results already folds
-chunks back to one text per input. This patch only opens that binding.
+knows a list and stamps orig_batch; merge_chunk_results already folds chunks back.
+This opens that binding and sends N>1 through one decoder.generate().
 
-infer() stays the upstream serial encode+decode. A stacked decoder.generate() was
-tried (intel-ov17) and failed on device: the compiled decoder takes one encoder
-tensor, so every span came back as the first clip's text (or empty). Do not put
-that path back without a per-clip encoder that the IR actually batches.
+intel-ov17 stacked encoder states into [N, max_t, H] but compiled the decoder IR
+with encoder_hidden_states batch frozen at 1, so every span copied the first clip.
+The decoder constructor must reshape that batch dim before compile_model.
+Encoder stays per-clip: its batch axis is already mel chunks of one utterance.
 """
 from __future__ import annotations
 
@@ -47,6 +47,55 @@ GENERATE_UNWRAP_NEW = """    std::vector<std::vector<float>> audios;
 
 GENERATE_UNWRAP_OLD_LOOSE = "split_audio_into_chunks({audio},"
 GENERATE_UNWRAP_NEW_LOOSE = "split_audio_into_chunks(audios,"
+
+INFER_LOOP_MARK = "    for (size_t batch = 0; batch < batch_size; ++batch) {"
+
+INFER_BATCH_HELPER = r'''
+ov::Tensor stack_encoder_hiddens(const std::vector<ov::Tensor>& hiddens) {
+    OPENVINO_ASSERT(!hiddens.empty(), "stack_encoder_hiddens: empty");
+    const size_t n = hiddens.size();
+    const size_t hidden_dim = hiddens[0].get_shape().at(2);
+    size_t max_t = 0;
+    for (const auto& h : hiddens) {
+        OPENVINO_ASSERT(h.get_shape().size() == 3 && h.get_shape()[0] == 1,
+                        "encoder hidden states must be [1, T, H]");
+        max_t = std::max(max_t, h.get_shape()[1]);
+    }
+    ov::Tensor out(ov::element::f32, {n, max_t, hidden_dim});
+    float* dst = out.data<float>();
+    std::fill_n(dst, n * max_t * hidden_dim, 0.f);
+    for (size_t i = 0; i < n; ++i) {
+        const size_t t = hiddens[i].get_shape()[1];
+        std::memcpy(dst + i * max_t * hidden_dim,
+                    hiddens[i].data<float>(),
+                    t * hidden_dim * sizeof(float));
+    }
+    return out;
+}
+
+'''
+
+DECODER_COMPILE_OLD = (
+    '    ov::CompiledModel compiled_model =\n'
+    '        core.compile_model(models_path / "openvino_decoder_model.xml", device, properties);'
+)
+
+DECODER_COMPILE_NEW = r'''    auto model = core.read_model(models_path / "openvino_decoder_model.xml");
+    // Exported IR freezes encoder_hidden_states at batch=1. generate() already
+    // walks input_ids.shape[0], but set_tensor cannot widen a static batch, so
+    // a stacked [N, T, H] still cross-attends every sequence to clip 0.
+    std::map<std::string, ov::PartialShape> shapes;
+    for (const auto& input : model->inputs()) {
+        auto shape = input.get_partial_shape();
+        const auto name = input.get_any_name();
+        if ((name == "encoder_hidden_states" || name == "input_ids" || name == "beam_idx") &&
+            !shape.rank().is_dynamic() && shape.size() >= 1) {
+            shape[0] = ov::Dimension::dynamic();
+        }
+        shapes[name] = shape;
+    }
+    model->reshape(shapes);
+    ov::CompiledModel compiled_model = core.compile_model(model, device, properties);'''
 
 
 def _read(path: pathlib.Path) -> str:
@@ -105,6 +154,71 @@ def patch_generate_unwrap(src: str, path: str) -> str:
     return src
 
 
+def patch_infer(src: str, path: str) -> str:
+    if "stack_encoder_hiddens" in src:
+        print("infer already patched", path)
+        return src
+    if INFER_LOOP_MARK not in src:
+        raise SystemExit("infer loop not found in %s" % path)
+    start = src.find(INFER_LOOP_MARK)
+    end = src.find("    return results;", start)
+    if end < 0:
+        raise SystemExit("return results not found after infer loop in %s" % path)
+    replacement = """    const bool force_serial = bool(streamer_ptr) || batch_size == 1;
+    if (force_serial) {
+""" + src[start:end] + """        return results;
+    }
+
+    std::vector<ov::Tensor> hiddens;
+    std::vector<size_t> audio_token_counts;
+    hiddens.reserve(batch_size);
+    audio_token_counts.reserve(batch_size);
+    for (size_t i = 0; i < batch_size; ++i) {
+        const auto encoder_start_time = std::chrono::steady_clock::now();
+        ov::Tensor hidden = m_encoder->encode(features[i]);
+        const auto encoder_stop_time = std::chrono::steady_clock::now();
+        const auto encoder_infer_ms = PerfMetrics::get_microsec(encoder_stop_time - encoder_start_time);
+        perf_metrics.raw_metrics.m_inference_durations[0] += MicroSeconds(encoder_infer_ms);
+        perf_metrics.asr_raw_metrics.encode_inference_durations.emplace_back(encoder_infer_ms);
+        audio_token_counts.push_back(hidden.get_shape()[1]);
+        hiddens.push_back(std::move(hidden));
+    }
+
+    const std::vector<std::string> processed_prompts = extend_audio_tokens(prompts, audio_token_counts);
+    const auto tokenization_start_time = std::chrono::steady_clock::now();
+    const ov::Tensor input_ids = m_tokenizer.encode(processed_prompts).input_ids;
+    const auto tokenization_stop_time = std::chrono::steady_clock::now();
+    perf_metrics.raw_metrics.tokenization_durations.emplace_back(
+        MicroSeconds(PerfMetrics::get_microsec(tokenization_stop_time - tokenization_start_time)));
+
+    const ov::Tensor encoder_batch = stack_encoder_hiddens(hiddens);
+    const auto encoded_results = m_decoder->generate(input_ids,
+                                                     encoder_batch,
+                                                     config,
+                                                     perf_metrics.raw_metrics,
+                                                     perf_metrics.asr_raw_metrics,
+                                                     nullptr);
+
+    const auto detokenization_start_time = std::chrono::steady_clock::now();
+    for (size_t i = 0; i < batch_size; ++i) {
+        results.push_back(m_tokenizer.decode(encoded_results.tokens[i]));
+    }
+    const auto detokenization_stop_time = std::chrono::steady_clock::now();
+    perf_metrics.raw_metrics.detokenization_durations.emplace_back(
+        MicroSeconds(PerfMetrics::get_microsec(detokenization_stop_time - detokenization_start_time)));
+"""
+    src = src[:start] + replacement + src[end:]
+    if "#include <cstring>" not in src:
+        src = src.replace("#include <algorithm>", "#include <algorithm>\n#include <cstring>", 1)
+    if "#include <algorithm>" not in src:
+        src = src.replace("#include \"pipeline.hpp\"", "#include \"pipeline.hpp\"\n#include <algorithm>", 1)
+    ns = src.find("namespace ov::genai {")
+    if ns < 0:
+        raise SystemExit("namespace ov::genai not found in %s" % path)
+    src = src[:ns] + INFER_BATCH_HELPER + src[ns:]
+    return src
+
+
 OTHER_VISIT_ARM = """
             [](const std::vector<std::vector<float>>&) -> const std::vector<float>& {
                 OPENVINO_THROW("batched audio is only implemented for Qwen3-ASR");
@@ -135,12 +249,25 @@ def patch_qwen3_pipeline(root: pathlib.Path) -> None:
         raise SystemExit("qwen3-asr/pipeline.cpp not found")
     path = hits[0]
     src = _read(path)
-    if "stack_encoder_hiddens" in src:
-        raise SystemExit(
-            "%s still has stack_encoder_hiddens; that path copies the first "
-            "clip onto the whole group and must not ship" % path
-        )
     src = patch_generate_unwrap(src, str(path))
+    src = patch_infer(src, str(path))
+    _write(path, src)
+
+
+def patch_decoder_batch_dim(root: pathlib.Path) -> None:
+    hits = list(root.rglob("qwen3-asr/decoder.cpp"))
+    if not hits:
+        raise SystemExit("qwen3-asr/decoder.cpp not found")
+    path = hits[0]
+    src = _read(path)
+    if "encoder_hidden_states" in src and "Dimension::dynamic()" in src:
+        print("decoder batch dim already patched", path)
+        return
+    if DECODER_COMPILE_OLD not in src:
+        raise SystemExit("decoder compile_model marker not found in %s" % path)
+    src = src.replace(DECODER_COMPILE_OLD, DECODER_COMPILE_NEW, 1)
+    if "#include <map>" not in src:
+        src = src.replace("#include \"decoder.hpp\"", "#include \"decoder.hpp\"\n#include <map>", 1)
     _write(path, src)
 
 
@@ -152,6 +279,7 @@ def main() -> None:
         raise SystemExit("not a directory: %s" % root)
     patch_audio_inputs(root)
     patch_qwen3_pipeline(root)
+    patch_decoder_batch_dim(root)
     patch_other_backends(root)
     print("qwen3-asr multi-audio patch applied")
 

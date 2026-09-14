@@ -662,7 +662,7 @@ class OpenVINOModeTest(unittest.TestCase):
         finally:
             q.MAX_BATCH_SPANS = was
 
-    def test_ov_qwen3_batch_patch_opens_list_and_leaves_serial_infer(self):
+    def test_ov_qwen3_batch_patch_stacks_decoder_and_reshapes_encoder_batch(self):
         spec = importlib.util.spec_from_file_location(
             "apply_qwen3_asr_batch",
             os.path.join(os.path.dirname(__file__),
@@ -673,6 +673,9 @@ class OpenVINOModeTest(unittest.TestCase):
 
         hpp = "using AudioInputs = std::variant<std::vector<float>>;\n"
         cpp = (
+            "#include \"pipeline.hpp\"\n"
+            "#include <algorithm>\n"
+            "namespace ov::genai {\n"
             "    const std::vector<float>& audio = std::visit(\n"
             "        ov::genai::utils::overloaded{\n"
             "            [](const std::vector<float>& input) -> const std::vector<float>& {\n"
@@ -686,6 +689,13 @@ class OpenVINOModeTest(unittest.TestCase):
             "        const auto text = m_tokenizer.decode(encoded_results.tokens[0]);\n"
             "        results.push_back(text);\n"
             "    }\n"
+            "    return results;\n"
+            "}\n"
+        )
+        decoder = (
+            "#include \"decoder.hpp\"\n"
+            "    ov::CompiledModel compiled_model =\n"
+            "        core.compile_model(models_path / \"openvino_decoder_model.xml\", device, properties);\n"
         )
         other = (
             "            [](const std::vector<float>& input) -> const std::vector<float>& {\n"
@@ -699,6 +709,7 @@ class OpenVINOModeTest(unittest.TestCase):
             os.makedirs(os.path.join(asr, "models", "whisper"))
             open(os.path.join(asr, "pipeline.hpp"), "w").write(hpp)
             open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp"), "w").write(cpp)
+            open(os.path.join(asr, "models", "qwen3-asr", "decoder.cpp"), "w").write(decoder)
             whisper = os.path.join(asr, "models", "whisper", "pipeline.cpp")
             open(whisper, "w").write(other)
             old = sys.argv
@@ -709,11 +720,14 @@ class OpenVINOModeTest(unittest.TestCase):
                 sys.argv = old
             got_hpp = open(os.path.join(asr, "pipeline.hpp")).read()
             got_cpp = open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp")).read()
+            got_dec = open(os.path.join(asr, "models", "qwen3-asr", "decoder.cpp")).read()
             got_wh = open(whisper).read()
         self.assertIn("std::vector<std::vector<float>>", got_hpp)
         self.assertIn("split_audio_into_chunks(audios,", got_cpp)
-        self.assertIn("tokens[0]", got_cpp)
-        self.assertNotIn("stack_encoder_hiddens", got_cpp)
+        self.assertIn("stack_encoder_hiddens", got_cpp)
+        self.assertIn("tokens[i]", got_cpp)
+        self.assertIn("Dimension::dynamic()", got_dec)
+        self.assertIn("encoder_hidden_states", got_dec)
         self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)
 
     def test_ov_base_implements_stt_and_align(self):
