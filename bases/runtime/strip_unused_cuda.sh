@@ -9,7 +9,7 @@
 set -eu
 
 freeze=$(python3 -m pip freeze)
-echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)|triton|pytorch-triton)==' \
+echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
     | cut -d= -f1 \
     | while read -r pkg; do
         [ -n "$pkg" ] || continue
