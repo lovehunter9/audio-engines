@@ -1,17 +1,17 @@
-# FasterWhisper on the shared slim runtime.
-# amd64: pip CT2 CUDA wheel. arm64: compile CT2 on cudnn-devel, copy the closure
-# into the release image so the devel tree never publishes.
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
+# FasterWhisper: own image, no shared audio-runtime, no CUDA torch.
+# Decode is CTranslate2. CPU torch stays only so openai/whisper-large-v3 can
+# convert once via TransformersConverter. amd64: pip CT2 CUDA wheel. arm64:
+# compile CT2 on cudnn-devel, copy only the closure into release.
 ARG TARGETARCH
 ARG CT2_REF=v4.6.0
+FROM docker.io/nvidia/cuda:12.8.1-base-ubuntu22.04 AS amd64
+FROM docker.io/nvidia/cuda:13.0.3-base-ubuntu22.04 AS arm64
 
-# ----- arm64 builder (not the published image) -----
 FROM docker.io/nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04 AS ct2-builder
 ARG CT2_REF
 ENV DEBIAN_FRONTEND=noninteractive \
     CUDA_ARCH_LIST="8.7;8.9;9.0+PTX" \
     PIP_BREAK_SYSTEM_PACKAGES=1
-COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
 COPY bases/fasterwhisper/collect_ct2_runtime.py /opt/collect_ct2_runtime.py
 RUN set -eux; \
     apt-get update; \
@@ -39,72 +39,86 @@ RUN set -eux; \
     python3 /opt/collect_ct2_runtime.py /opt/ct2-runtime; \
     rm -rf /tmp/CT2
 
-# ----- amd64 build -----
-FROM ${RUNTIME_IMAGE} AS build-amd64
-ARG TARGETARCH
+FROM amd64 AS build-amd64
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
-COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     python3 -m pip install --no-cache-dir \
         "faster-whisper" huggingface_hub "transformers>=4.56" \
-        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
-        || python3 -m pip install --no-cache-dir --force-reinstall \
-            torch --index-url https://download.pytorch.org/whl/cu128; \
-    sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh
+        python-multipart "fastapi>=0.110" "uvicorn>=0.29" nvidia-ml-py; \
+    python3 -m pip install --no-cache-dir --force-reinstall \
+        torch --index-url https://download.pytorch.org/whl/cpu; \
+    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda is None else 1)"
 
-# ----- arm64 build: runtime + CT2 closure, not the devel image -----
-FROM ${RUNTIME_IMAGE} AS build-arm64
-ARG TARGETARCH
+FROM arm64 AS build-arm64
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore \
+    LD_LIBRARY_PATH=/opt/ct2-runtime/lib
 COPY --from=ct2-builder /opt/ct2-wheels /opt/ct2-wheels
 COPY --from=ct2-builder /opt/ct2-runtime /opt/ct2-runtime
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
-COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
-ENV LD_LIBRARY_PATH=/opt/ct2-runtime/lib
 RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
     ldconfig; \
     python3 -m pip install --no-cache-dir \
         "faster-whisper" huggingface_hub "transformers>=4.56" \
-        python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
+        python-multipart "fastapi>=0.110" "uvicorn>=0.29" nvidia-ml-py; \
     python3 -m pip install --no-cache-dir --force-reinstall --no-deps \
         /opt/ct2-wheels/ctranslate2-*.whl; \
-    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
-        || python3 -m pip install --no-cache-dir --force-reinstall \
-            torch --index-url https://download.pytorch.org/whl/cu130; \
-    sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh; \
+    python3 -m pip install --no-cache-dir --force-reinstall \
+        torch --index-url https://download.pytorch.org/whl/cpu; \
+    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda is None else 1)"; \
     rm -rf /opt/ct2-wheels
 
-FROM ${RUNTIME_IMAGE} AS release-amd64
-ARG TARGETARCH
+FROM amd64 AS release-amd64
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
 COPY --from=build-amd64 /usr/local/lib/python3.10 /usr/local/lib/python3.10
-COPY --from=build-amd64 /opt/cuda-stubs/ /usr/local/lib/
 COPY --from=build-amd64 /opt/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
 RUN set -eux; \
-    ldconfig; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    ldconfig; \
     python3 /opt/probe_ct2_cuda.py; \
-    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    audio-python -c "import faster_whisper, huggingface_hub, fastapi, uvicorn, multipart, pynvml"; \
     audio-python -c "from ctranslate2.converters import TransformersConverter; \
 import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
 assert v >= (4, 56), t.__version__"; \
     command -v ffmpeg >/dev/null
 
-FROM ${RUNTIME_IMAGE} AS release-arm64
-ARG TARGETARCH
+FROM arm64 AS release-arm64
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    LD_LIBRARY_PATH=/opt/ct2-runtime/lib
 COPY --from=build-arm64 /usr/local/lib/python3.10 /usr/local/lib/python3.10
-COPY --from=build-arm64 /opt/cuda-stubs/ /usr/local/lib/
 COPY --from=build-arm64 /opt/ct2-runtime /opt/ct2-runtime
 COPY --from=build-arm64 /opt/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
-ENV LD_LIBRARY_PATH=/opt/ct2-runtime/lib
 RUN set -eux; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
     echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
     ldconfig; \
-    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
     python3 /opt/probe_ct2_cuda.py; \
-    audio-python -c "import faster_whisper, huggingface_hub, torch, fastapi, uvicorn, multipart"; \
+    audio-python -c "import faster_whisper, huggingface_hub, fastapi, uvicorn, multipart, pynvml"; \
     audio-python -c "from ctranslate2.converters import TransformersConverter; \
 import transformers as t; v=tuple(int(x) for x in t.__version__.split('.')[:2]); \
 assert v >= (4, 56), t.__version__"; \

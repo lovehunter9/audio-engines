@@ -1,11 +1,16 @@
-# Pyannote / Silero / SpeechBrain on the shared slim runtime (no 4.6 GB maximsachs image).
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
-FROM ${RUNTIME_IMAGE} AS build
+# Pyannote / Silero / SpeechBrain: own image, no shared audio-runtime.
+ARG TARGETARCH
+FROM docker.io/nvidia/cuda:12.8.1-base-ubuntu22.04 AS amd64
+FROM docker.io/nvidia/cuda:13.0.3-base-ubuntu22.04 AS arm64
+
+FROM ${TARGETARCH} AS build
 ARG TARGETARCH
 
-# pyannote/speechbrain can pull a CPU torch from PyPI — put CUDA back in this RUN if they do.
-# Do not unconditionally force-reinstall: that would add a second torch layer on top of runtime.
-# Reinstall + strip must share this RUN or the fat CUDA layer comes back.
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     if [ "${TARGETARCH}" = "arm64" ]; then \
@@ -13,23 +18,31 @@ RUN set -eux; \
     else \
         IDX=https://download.pytorch.org/whl/cu128; \
     fi; \
-    apt-get update && apt-get install -y --no-install-recommends git build-essential; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates git build-essential; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     python3 -m pip install --no-cache-dir \
         "pyannote.audio>=3.3.0" speechbrain silero-vad omegaconf soundfile \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
-        || python3 -m pip install --no-cache-dir --force-reinstall \
-            torch torchaudio --index-url "${IDX}"; \
+    python3 -m pip install --no-cache-dir --force-reinstall \
+        torch torchaudio --index-url "${IDX}"; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh
 
-FROM ${RUNTIME_IMAGE} AS release
+FROM ${TARGETARCH} AS release
 ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
 COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
 COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
 RUN set -eux; \
-    ldconfig; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    ldconfig; \
     python3 -c "import torch, pyannote.audio, silero_vad, omegaconf, speechbrain, soundfile, fastapi, uvicorn, multipart; \
 print('TARGETARCH', '''${TARGETARCH}''', 'torch', torch.__version__, 'cuda', torch.version.cuda); \
 assert torch.version.cuda, 'lost CUDA torch after pip install'"; \

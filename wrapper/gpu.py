@@ -18,6 +18,24 @@ def quota_mib():
     return _quota_bytes() // (2 ** 20)
 
 
+def cuda_visible():
+    """True when this process can see a CUDA device, without needing CUDA torch.
+
+    NVML first (no CUDA context). /dev/nvidia0 next. torch last, for images that
+    still have it. All three miss on a CPU-only box.
+    """
+    if _nvml_stats() is not None:
+        return True
+    if os.path.exists("/dev/nvidia0"):
+        return True
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
+    except Exception:
+        return False
+
+
 def visible_memory_bytes():
     """What CUDA reports as this device's total, or 0 when there is no device to ask."""
     try:

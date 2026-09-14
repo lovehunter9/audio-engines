@@ -1,6 +1,7 @@
-# Shared CUDA+torch floor for breeze / firered / pyannote / fasterwhisper.
-# nvidia/cuda *-base is ~0.1 GB; pip torch brings its own CUDA libs. *-runtime +
-# pip torch would ship CUDA twice.
+# Leftover CUDA+torch floor. Family images no longer FROM this; each
+# deps.Dockerfile starts from nvidia/cuda *-base and installs its own torch.
+# Kept so strip_unused_cuda.sh and runtime-ci stay in-tree. Do not put the
+# four families back on top of this image.
 #
 # build installs and strips. release is a fresh base that only receives the
 # stripped site-packages and CUDA stubs — gcc, pip, and strip leftovers stay

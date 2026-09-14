@@ -12,7 +12,7 @@ from .. import hfgate
 from .. import tasks
 from ..audioio import wav_seconds
 from ..batch import parse_segments
-from ..gpu import mount_metrics, quota_mib
+from ..gpu import mount_metrics, quota_mib, cuda_visible
 from ..contract import register, EngineArgs
 from ..runtime import Runtime
 
@@ -101,12 +101,11 @@ def _ensure_ct2(src, quantization):
 
 def _load():
     try:
-        import torch
         from faster_whisper import WhisperModel
 
         dev = DEVICE
         if dev == "auto":
-            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            dev = "cuda" if cuda_visible() else "cpu"
         ctype = COMPUTE_TYPE if dev == "cuda" else "int8"
         path = _ensure_ct2(_locate(), ctype)
         model = WhisperModel(path, device=dev, compute_type=ctype)
@@ -290,7 +289,7 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
 
 def build_app(supports):
     app = FastAPI(title="audio-whisper (faster-whisper)")
-    mount_metrics(app)
+    mount_metrics(app, nvml_fallback=True)
 
     register(app, model_name=MODEL_NAME, module="whisper", served=supports, repo=MODEL_REPO,
              model_format="ctranslate2", quantization=COMPUTE_TYPE,

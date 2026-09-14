@@ -1,19 +1,35 @@
-# Breeze on the shared slim runtime (no official pytorch/pytorch 4.3 GB image).
-ARG RUNTIME_IMAGE=docker.io/lovehunter9/audio-runtime:slim3
-FROM ${RUNTIME_IMAGE} AS build
+# Breeze: own image, no shared audio-runtime. build/release so git and pip
+# stay off the published layers.
 ARG TARGETARCH
+FROM docker.io/nvidia/cuda:12.8.1-base-ubuntu22.04 AS amd64
+FROM docker.io/nvidia/cuda:13.0.3-base-ubuntu22.04 AS arm64
 
+FROM ${TARGETARCH} AS build
+ARG TARGETARCH
 ARG BREEZE_REF=ca632ce6c4d05f7985da4eab29b1a5d445b43f7b
 
-# torch stays the runtime image's unless a dep overwrites it with CPU. git is fetch-only.
-# Reinstall + strip must share this RUN or the fat CUDA layer comes back.
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_ROOT_USER_ACTION=ignore
+
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
-    apt-get update && apt-get install -y --no-install-recommends git; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates git; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+        IDX=https://download.pytorch.org/whl/cu130; \
+    else \
+        IDX=https://download.pytorch.org/whl/cu128; \
+    fi; \
     python3 -m pip install --no-cache-dir \
         "transformers==4.57.3" "qwen-tts==0.1.1" \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.115" "uvicorn>=0.30" httpx python-multipart websockets; \
+    python3 -m pip install --no-cache-dir --force-reinstall \
+        torch torchaudio --index-url "${IDX}"; \
     mkdir -p /opt/breeze-tts /tmp/breeze-src; \
     cd /tmp/breeze-src; \
     git init -q .; \
@@ -26,25 +42,23 @@ RUN set -eux; \
     python3 -c "import sysconfig, os; \
 p = sysconfig.get_paths()['purelib']; \
 open(os.path.join(p, 'breeze.pth'), 'w').write('/opt/breeze-tts\n')"; \
-    if [ "${TARGETARCH}" = "arm64" ]; then \
-        IDX=https://download.pytorch.org/whl/cu130; \
-    else \
-        IDX=https://download.pytorch.org/whl/cu128; \
-    fi; \
-    python3 -c "import torch; raise SystemExit(0 if torch.version.cuda else 1)" \
-        || python3 -m pip install --no-cache-dir --force-reinstall \
-            torch torchaudio --index-url "${IDX}"; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh
 
-FROM ${RUNTIME_IMAGE} AS release
+FROM ${TARGETARCH} AS release
 ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1
 COPY --from=build /usr/local/lib/python3.10 /usr/local/lib/python3.10
 COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
 COPY --from=build /opt/breeze-tts /opt/breeze-tts
 RUN set -eux; \
-    ldconfig; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        python3 ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    ldconfig; \
     env -u PYTHONPATH python3 -c "\
 import os, shutil, torch, transformers; \
 from breeze_infer.runtime import load_runtime; \

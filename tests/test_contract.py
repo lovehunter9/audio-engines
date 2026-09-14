@@ -1162,6 +1162,20 @@ class NvmlFallbackIsOptIn(unittest.TestCase):
         self.assertIn("as NVML reports it", body)
 
 
+class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
+    def test_family_does_not_install_cuda_torch(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/fasterwhisper/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertNotIn("audio-runtime", text)
+        self.assertNotIn("strip_unused_cuda.sh", text)
+        self.assertNotIn("download.pytorch.org/whl/cu128", text)
+        self.assertNotIn("download.pytorch.org/whl/cu130", text)
+        self.assertIn("download.pytorch.org/whl/cpu", text)
+        self.assertIn("nvidia-ml-py", text)
+
+
 class SlimRuntimeRecipeTest(unittest.TestCase):
     def _runtime_dir(self):
         return os.path.join(os.path.dirname(__file__), "../bases/runtime")
