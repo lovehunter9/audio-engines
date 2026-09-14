@@ -25,10 +25,12 @@ python3 - "$SITE" <<'PY'
 import glob, os, subprocess, sys
 
 sitep = sys.argv[1]
-drop_needed = ("libnccl.so.2", "libnvshmem_host.so.3", "libnvshmem.so.3")
-for path in glob.glob(os.path.join(sitep, "torch", "lib", "libtorch_nvshmem*")):
-    print("delete", path)
-    os.remove(path)
+drop_needed = (
+    "libnccl.so.2",
+    "libnvshmem_host.so.3",
+    "libnvshmem.so.3",
+    "libtorch_nvshmem.so",
+)
 
 def needed_of(path):
     try:
@@ -48,6 +50,10 @@ for root, _, files in os.walk(os.path.join(sitep, "torch")):
             if soname in have:
                 print("patchelf --remove-needed", soname, path)
                 subprocess.check_call(["patchelf", "--remove-needed", soname, path])
+
+for path in glob.glob(os.path.join(sitep, "torch", "lib", "libtorch_nvshmem*")):
+    print("delete", path)
+    os.remove(path)
 PY
 
 freeze=$(python3 -m pip freeze)
