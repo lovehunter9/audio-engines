@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -91,7 +92,6 @@ def _openvino_models_dir(models_dir):
     farm = "/tmp/speakrs-models-openvino"
     try:
         import onnx
-        import shutil
         from onnx import shape_inference
 
         # 🔴 Rebuilt, never reused. /tmp is a mounted volume here and survives a restart, so
@@ -119,17 +119,22 @@ def _openvino_models_dir(models_dir):
             model = shape_inference.infer_shapes(model, strict_mode=True)
             onnx.checker.check_model(model)
             onnx.save(model, prepared + ".partial")
-        # Renamed into place. Not because a half-written model could otherwise be loaded --
-        # the farm above is deleted and rebuilt on every start, so nothing from a crashed run
-        # survives to be found. It is that the engine is handed this directory as soon as the
-        # function returns, and a reader arriving between the write and the end of it would
-        # see a truncated file under the name speakrs looks for.
+            # Renamed into place. Not because a half-written model could otherwise be loaded
+            # -- the farm above is deleted and rebuilt on every start, so nothing from a
+            # crashed run survives to be found. It is that the engine is handed this directory
+            # as soon as the function returns, and a reader arriving between the write and the
+            # end of it would see a truncated file under the name speakrs looks for.
             os.replace(prepared + ".partial", prepared)
             log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
         return farm
     except Exception:
         log.warning("could not prepare the batched segmentation model; "
                     "OpenVINO will run segmentation one window at a time", exc_info=True)
+        # Nothing points at the half-built farm once the cache directory is returned, so
+        # leaving it would not break anything. It is removed because a directory full of
+        # symlinks named like a working farm is the first thing someone debugging "why is
+        # batching off" will find, and it says the opposite of what happened.
+        shutil.rmtree(farm, ignore_errors=True)
         return models_dir
 
 

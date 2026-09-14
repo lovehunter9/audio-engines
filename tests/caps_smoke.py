@@ -379,6 +379,10 @@ def t_diar_speakrs_openvino_models_dir():
         # rather than not at all.
         check("an unreadable batched export falls back to the cache directory",
               ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        # The farm is built before the export is read, so a failure used to leave a directory
+        # of symlinks that looked exactly like a working one -- to anyone asking why batching
+        # was off, evidence pointing the wrong way.
+        check("and takes its half-built farm with it", not os.path.exists(farm))
 
         try:
             import onnx
