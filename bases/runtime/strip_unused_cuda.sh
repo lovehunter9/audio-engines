@@ -55,7 +55,7 @@ def dyn_defined(path):
             name, ver = raw, None
         if name and name.isidentifier() and name not in ("_init", "_fini"):
             pairs.append((name, ver))
-    return sorted(set(pairs))
+    return sorted(set(pairs), key=lambda item: (item[0], item[1] or ""))
 
 
 def write_stub(real, soname):
