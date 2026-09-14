@@ -30,7 +30,10 @@ ARG DEBIAN_FRONTEND=noninteractive
 # from a machine with no GPU. So Intel's own compute-runtime and matching IGC are pinned here.
 #
 # Checksums from the upstream release notes; the .ddeb debug packages are skipped.
-# Recipe taken from bases/ov, which established it for the ASR line on the same hardware.
+# Recipe taken from bases/ov on the showcase/intel-openvino-asr branch, which established it
+# for the ASR line on the same hardware. Said with the branch because that base is not on main:
+# a reader who greps bases/ for it here finds nothing and has to decide whether the pinned
+# versions below came from anywhere at all.
 ARG NEO_VER=26.22.38646.4
 ARG IGC_TAG=v2.36.3
 ARG IGC_DEB=2.36.3+21719

@@ -3,7 +3,7 @@
 # The Intel sibling of speakrs-ci. Separate rather than another base in that one, because the
 # repositories differ -- audio-speakrs against audio-speakrs-ov -- and build-image.yml takes one
 # repo per call. That naming follows the convention already here: a deps image is named after its
-# base, which is why ov publishes audio-ov.
+# base, so base speakrs publishes audio-speakrs and base speakrs-ov publishes audio-speakrs-ov.
 name: speakrs-ov-ci
 
 on:
