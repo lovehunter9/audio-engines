@@ -8,29 +8,26 @@
 # cusparse, cusparselt, cupti, nvtx, cufile, nvshmem, triton. torch.testing
 # stays — import torch pulls it.
 #
-# nccl / nvshmem are DT_NEEDED by libtorch_cuda even for single-GPU eager.
-# patchelf drops those NEEDED entries, then the packages can go. Multi-GPU
-# and torch.distributed are not this image's contract.
+# nvshmem is only pulled in through libtorch_nvshmem; drop that NEEDED and
+# delete the file. nccl is different: libtorch_cuda relocates against ncclRecv
+# and friends, so the soname must stay. Replace the 300 Mi wheel with a stub
+# that exports the same dynamic symbols. Multi-GPU is not this image's contract.
 set -eu
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
-PURGE_PATCHELF=0
-if ! command -v patchelf >/dev/null 2>&1; then
+PURGE_TOOLS=0
+if ! command -v patchelf >/dev/null 2>&1 || ! command -v gcc >/dev/null 2>&1 \
+        || ! command -v readelf >/dev/null 2>&1; then
     apt-get update
-    apt-get install -y --no-install-recommends patchelf
-    PURGE_PATCHELF=1
+    apt-get install -y --no-install-recommends patchelf gcc binutils
+    PURGE_TOOLS=1
 fi
 
 python3 - "$SITE" <<'PY'
-import glob, os, subprocess, sys
+import glob, os, subprocess, sys, tempfile
 
 sitep = sys.argv[1]
-drop_needed = (
-    "libnccl.so.2",
-    "libnvshmem_host.so.3",
-    "libnvshmem.so.3",
-    "libtorch_nvshmem.so",
-)
+
 
 def needed_of(path):
     try:
@@ -40,6 +37,56 @@ def needed_of(path):
     except (OSError, subprocess.CalledProcessError):
         return []
 
+
+def dyn_defined(path):
+    out = subprocess.check_output(["readelf", "-Ws", path], text=True)
+    names = []
+    for line in out.splitlines():
+        if " UND " in line or " UND\t" in line:
+            continue
+        if " FUNC " not in line and " OBJECT " not in line:
+            continue
+        if " GLOBAL " not in line and " WEAK " not in line:
+            continue
+        name = line.split()[-1].split("@")[0]
+        if name and name not in ("_init", "_fini"):
+            names.append(name)
+    return names
+
+
+nccl_libs = []
+for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
+    for name in files:
+        if name.startswith("libnccl.so"):
+            nccl_libs.append(os.path.join(root, name))
+if nccl_libs:
+    real = next((p for p in nccl_libs if not os.path.islink(p)), nccl_libs[0])
+    real = os.path.realpath(real)
+    symbols = dyn_defined(real)
+    print("stub libnccl.so.2 from", real, "symbols", len(symbols))
+    lines = ['extern "C" {']
+    for name in symbols:
+        lines.append("void %s() {}" % name)
+    lines.append("}")
+    src = tempfile.NamedTemporaryFile("w", suffix=".cc", delete=False)
+    src.write("\n".join(lines) + "\n")
+    src.close()
+    dest = "/usr/local/lib/libnccl.so.2"
+    subprocess.check_call(
+        ["gcc", "-shared", "-fPIC", "-Wl,-soname,libnccl.so.2", "-o", dest, src.name]
+    )
+    os.remove(src.name)
+    link = "/usr/local/lib/libnccl.so"
+    if os.path.islink(link) or os.path.exists(link):
+        os.remove(link)
+    os.symlink("libnccl.so.2", link)
+    subprocess.call(["ldconfig"])
+
+drop_needed = (
+    "libnvshmem_host.so.3",
+    "libnvshmem.so.3",
+    "libtorch_nvshmem.so",
+)
 for root, _, files in os.walk(os.path.join(sitep, "torch")):
     for name in files:
         if ".so" not in name:
@@ -133,8 +180,8 @@ if [ -d "$SITE" ]; then
 fi
 rm -rf /root/.cache/pip /tmp/pip-*
 
-if [ "$PURGE_PATCHELF" = 1 ]; then
-    apt-get purge -y patchelf
+if [ "$PURGE_TOOLS" = 1 ]; then
+    apt-get purge -y patchelf gcc binutils
     apt-get autoremove -y --purge
     rm -rf /var/lib/apt/lists/*
 fi
