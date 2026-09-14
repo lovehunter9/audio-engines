@@ -49,7 +49,7 @@ def dyn_defined(path):
         if " GLOBAL " not in line and " WEAK " not in line:
             continue
         name = line.split()[-1].split("@")[0]
-        if name and name not in ("_init", "_fini"):
+        if name and name.isidentifier() and name not in ("_init", "_fini"):
             names.append(name)
     return names
 
@@ -64,11 +64,11 @@ if nccl_libs:
     real = os.path.realpath(real)
     symbols = dyn_defined(real)
     print("stub libnccl.so.2 from", real, "symbols", len(symbols))
-    lines = ['extern "C" {']
+    # C, not C++: gcc without g++ has no cc1plus.
+    lines = []
     for name in symbols:
         lines.append("void %s() {}" % name)
-    lines.append("}")
-    src = tempfile.NamedTemporaryFile("w", suffix=".cc", delete=False)
+    src = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
     src.write("\n".join(lines) + "\n")
     src.close()
     dest = "/usr/local/lib/libnccl.so.2"
