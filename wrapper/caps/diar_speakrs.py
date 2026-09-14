@@ -81,11 +81,20 @@ def _openvino_models_dir(models_dir):
     #
     # Every match is derived, not just one, so a cache carrying more than one batched export
     # has a prepared model for whichever the engine turns out to ask for.
-    stock = sorted(
-        os.path.join(models_dir, name)
-        for name in os.listdir(models_dir)
-        if _BATCHED_SEGMENTATION.fullmatch(name)
-    )
+    # 🔴 Inside a try, like everything below it. _models_dir hands over a directory that may
+    # not exist yet -- the wrapper script starts this process offline when llm-init's sentinel
+    # never arrives, and its comment says the engine reports the missing weights by name,
+    # which is a better error than one invented here. Listing that directory unguarded turned
+    # the engine's clean report into a traceback at import, before the engine was ever run.
+    try:
+        stock = sorted(
+            os.path.join(models_dir, name)
+            for name in os.listdir(models_dir)
+            if _BATCHED_SEGMENTATION.fullmatch(name)
+        )
+    except OSError as e:
+        log.info("cannot list %s (%s); leaving batching to the engine's own report", models_dir, e)
+        return models_dir
     if not stock:
         log.info("no batched segmentation model in the cache; leaving batching off")
         return models_dir

@@ -365,8 +365,16 @@ def t_diar_speakrs_openvino_models_dir():
         check("non-openvino modes are handed the cache directory untouched",
               ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
 
-        # No stock export to derive from -- the cpu file list does not fetch one.
         ds.EXECUTION_MODE = "openvino"
+        # 🔴 A directory that is not there. The wrapper script starts this process offline when
+        # llm-init never names the model, and _models_dir then returns a path that does not
+        # exist so the engine can report the missing weights by name. Listing it unguarded
+        # raised at import, on the Intel image only, and the engine never got to say anything.
+        absent = os.path.join(root, "not-downloaded-yet")
+        check("a models directory that does not exist is handed over untouched",
+              ds._openvino_models_dir(absent) == absent, ds._openvino_models_dir(absent))
+
+        # No stock export to derive from -- the cpu file list does not fetch one.
         empty = tempfile.mkdtemp(prefix="ovempty-")
         try:
             check("a cache with no batched export is handed over untouched",
