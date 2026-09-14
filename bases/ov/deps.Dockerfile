@@ -96,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         "pybind11-stubgen==2.5.5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps --no-build-isolation \
         /tmp/genai/src \
+    && cd / \
     && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
     && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
