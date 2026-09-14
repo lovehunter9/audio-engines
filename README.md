@@ -311,8 +311,9 @@ on device `GPU` when `OLARES_GPU_MODE` starts with `intel` (a written `--device`
 still wins; quota `0` infers `CPU`). Converted IR is
 preferred (`openvino/` next to the HF snapshot); a missing IR is exported once
 with `optimum-cli` and reused. `--batch-max-spans` above 1 sends the group to
-one `generate()` so the decoder runs as a batch (this image patches GenAI to
-accept a list of waveforms). `stt_stream` keeps the same WebSocket contract
+one `generate()` (this image patches GenAI to accept a list of waveforms);
+encode+decode inside that call stays serial — a stacked decoder copied the
+first clip onto every span. `stt_stream` keeps the same WebSocket contract
 (`partial` / `final`) but **does not transcribe until the client stops** —
 OpenVINO streams decoder tokens after the utterance, which is the Intel
 tradeoff against vLLM's incremental encoder cache. Do not emit live partials

@@ -1,5 +1,6 @@
 import glob
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -660,6 +661,60 @@ class OpenVINOModeTest(unittest.TestCase):
             self.assertIn("rejects a list of waveforms", str(ctx.exception))
         finally:
             q.MAX_BATCH_SPANS = was
+
+    def test_ov_qwen3_batch_patch_opens_list_and_leaves_serial_infer(self):
+        spec = importlib.util.spec_from_file_location(
+            "apply_qwen3_asr_batch",
+            os.path.join(os.path.dirname(__file__),
+                         "../bases/ov/patches/apply_qwen3_asr_batch.py"),
+        )
+        patch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(patch)
+
+        hpp = "using AudioInputs = std::variant<std::vector<float>>;\n"
+        cpp = (
+            "    const std::vector<float>& audio = std::visit(\n"
+            "        ov::genai::utils::overloaded{\n"
+            "            [](const std::vector<float>& input) -> const std::vector<float>& {\n"
+            "                return input;\n"
+            "            },\n"
+            "        },\n"
+            "        audio_inputs);\n"
+            "    const std::vector<AudioChunk> chunks =\n"
+            "        split_audio_into_chunks({audio}, m_feature_extractor.sampling_rate, MAX_ASR_INPUT_SECONDS);\n"
+            "    for (size_t batch = 0; batch < batch_size; ++batch) {\n"
+            "        const auto text = m_tokenizer.decode(encoded_results.tokens[0]);\n"
+            "        results.push_back(text);\n"
+            "    }\n"
+        )
+        other = (
+            "            [](const std::vector<float>& input) -> const std::vector<float>& {\n"
+            "                return input;\n"
+            "            },\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "src")
+            asr = os.path.join(root, "automatic_speech_recognition")
+            os.makedirs(os.path.join(asr, "models", "qwen3-asr"))
+            os.makedirs(os.path.join(asr, "models", "whisper"))
+            open(os.path.join(asr, "pipeline.hpp"), "w").write(hpp)
+            open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp"), "w").write(cpp)
+            whisper = os.path.join(asr, "models", "whisper", "pipeline.cpp")
+            open(whisper, "w").write(other)
+            old = sys.argv
+            try:
+                sys.argv = ["apply_qwen3_asr_batch.py", tmp]
+                patch.main()
+            finally:
+                sys.argv = old
+            got_hpp = open(os.path.join(asr, "pipeline.hpp")).read()
+            got_cpp = open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp")).read()
+            got_wh = open(whisper).read()
+        self.assertIn("std::vector<std::vector<float>>", got_hpp)
+        self.assertIn("split_audio_into_chunks(audios,", got_cpp)
+        self.assertIn("tokens[0]", got_cpp)
+        self.assertNotIn("stack_encoder_hiddens", got_cpp)
+        self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)
 
     def test_ov_base_implements_stt_and_align(self):
         self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream", "align"])
