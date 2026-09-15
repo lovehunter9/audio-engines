@@ -61,14 +61,13 @@ FROM arm64 AS build-arm64
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
-    PIP_ROOT_USER_ACTION=ignore \
-    LD_LIBRARY_PATH=/opt/ct2-runtime/lib
+    PIP_ROOT_USER_ACTION=ignore
 COPY --from=ct2-builder /opt/ct2-wheels /opt/ct2-wheels
 COPY --from=ct2-builder /opt/ct2-runtime /opt/ct2-runtime
 COPY bases/fasterwhisper/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg libsndfile1 ca-certificates; \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates libopenblas0; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     echo /opt/ct2-runtime/lib > /etc/ld.so.conf.d/ct2.conf; \
@@ -104,14 +103,13 @@ assert v >= (4, 56), t.__version__"; \
 
 FROM arm64 AS release-arm64
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    LD_LIBRARY_PATH=/opt/ct2-runtime/lib
+    PYTHONUNBUFFERED=1
 COPY --from=build-arm64 /usr/local/lib/python3.10 /usr/local/lib/python3.10
 COPY --from=build-arm64 /opt/ct2-runtime /opt/ct2-runtime
 COPY --from=build-arm64 /opt/probe_ct2_cuda.py /opt/probe_ct2_cuda.py
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
-        python3 ffmpeg libsndfile1 ca-certificates; \
+        python3 ffmpeg libsndfile1 ca-certificates libopenblas0; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \

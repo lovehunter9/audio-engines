@@ -1176,6 +1176,7 @@ class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
         self.assertNotIn("download.pytorch.org/whl/cu130", text)
         self.assertIn("download.pytorch.org/whl/cpu", text)
         self.assertIn("nvidia-ml-py", text)
+        self.assertNotIn("LD_LIBRARY_PATH=/opt/ct2-runtime/lib", text)
 
 
 class SlimRuntimeRecipeTest(unittest.TestCase):

@@ -23,6 +23,13 @@ SKIP_PREFIX = (
     "libpthread.so",
     "libgcc_s.so",
     "libstdc++.so",
+    # System OpenBLAS in the image; the copy would sit on ld.so.cache and
+    # steal sbgemm_ from CPU torch 2.14's own OpenBLAS (arm64 slim-fw1).
+    "libopenblas",
+    "libblas.so",
+    "liblapack.so",
+    "libgfortran",
+    "libquadmath",
 )
 
 

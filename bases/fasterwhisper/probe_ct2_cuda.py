@@ -1,7 +1,8 @@
 # CUDA-built CT2 is required. CUDA torch is not: decode is CT2, convert uses CPU torch.
 # Driver-missing on CI runners is OK; a CPU-only CT2 wheel is not.
-import ctranslate2 as c
+# Import torch first so its OpenBLAS wins the soname if CT2 is also linked to it.
 import torch
+import ctranslate2 as c
 
 assert torch.version.cuda is None, (
     "CUDA torch leaked into the FasterWhisper image: %s" % torch.__version__
