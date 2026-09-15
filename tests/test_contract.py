@@ -697,8 +697,10 @@ class OpenVINOModeTest(unittest.TestCase):
         )
         decoder = (
             "#include \"decoder.hpp\"\n"
+            "namespace ov::genai {\n"
             "    ov::CompiledModel compiled_model =\n"
             "        core.compile_model(models_path / \"openvino_decoder_model.xml\", device, properties);\n"
+            "}\n"
         )
         other = (
             "            [](const std::vector<float>& input) -> const std::vector<float>& {\n"
