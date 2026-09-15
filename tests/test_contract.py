@@ -1196,6 +1196,7 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         self.assertGreater(four, pin)
         uninstall = text.split("pip uninstall", 1)[1]
         self.assertNotIn("pandas", uninstall)
+        self.assertNotIn("opentelemetry", uninstall)
 
 
 class SlimBreezeRecipeTest(unittest.TestCase):
