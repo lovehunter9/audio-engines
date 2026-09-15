@@ -2,18 +2,18 @@
 # Drop CUDA pieces eager inference does not load. Same RUN as `pip install torch`
 # or Docker keeps the fat layer.
 #
-# Keep: cublas, cudnn, cuda-runtime, nvjitlink, cufft, nvrtc, curand, plus any
-# nvidia *.so on the import-time load chain of torch/_C*.so (cu128 links
-# libcusparseLt; cu130 links libcufile). Drop the rest of: nccl, cusolver,
-# cusparse, cusparselt, cupti, nvtx, cufile, triton. torch.testing stays —
-# import torch pulls it.
+# Walk torch/_C*.so with ldd. Keep a nvidia-* / cuda-* wheel only when one of
+# its files is the resolved path on that chain. Soname matching is not enough:
+# a leftover CUDA 13 wheel can advertise the same libcusparse.so.12 as the
+# CUDA 12 wheel the current torch actually maps.
 #
 # nccl: libtorch_cuda relocates against ncclRecv, so the soname must stay.
-# Replace the wheel with a stub, then force-uninstall. Leave nvshmem: the host
-# lib is versioned (NVSHMEM tag collides with a symbol) and cu130
-# libtorch_python needs libtorch_nvshmem at import. Multi-GPU is not this
+# Replace the wheel with a stub, then force-uninstall. Multi-GPU is not this
 # image's contract.
 set -eu
+# Callers that `cd` into a dir they then delete leave us without a cwd;
+# Ubuntu pip then dies on os.getcwd() in __main__.
+cd /
 
 SITE=$(python3 -c "import site; print(site.getsitepackages()[0])")
 PURGE_TOOLS=0
@@ -84,7 +84,7 @@ subprocess.call(["ldconfig"])
 PY
 
 freeze=$(python3 -m pip freeze)
-STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-(nccl|cusolver|cusparse|cusparselt|cuda-cupti|nvtx|cufile)[^[:space:]=]*|triton|pytorch-triton)==' \
+STRIP_CANDIDATES=$(echo "$freeze" | grep -iE '^(nvidia-[^=]+|cuda-toolkit|cuda-bindings|cuda-pathfinder|triton|pytorch-triton)==' \
     | cut -d= -f1 || true)
 export STRIP_CANDIDATES
 
@@ -94,6 +94,7 @@ from collections import deque
 
 sitep = sys.argv[1]
 needed = set()
+resolved_files = set()
 seen = set()
 queue = deque(glob.glob(os.path.join(sitep, "torch", "_C*.so")))
 while queue:
@@ -117,6 +118,10 @@ while queue:
         dest = resolved[0]
         if dest.startswith(sitep) and ".so" in os.path.basename(dest):
             queue.append(dest)
+            try:
+                resolved_files.add(os.path.realpath(dest))
+            except OSError:
+                pass
 print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
 force_drop = {"triton", "pytorch-triton"}
@@ -128,23 +133,32 @@ for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
     show = subprocess.check_output(
         [sys.executable, "-m", "pip", "show", "-f", pkg], text=True
     )
-    sonames = set()
+    files = []
     in_files = False
+    location = ""
     for ln in show.splitlines():
+        if ln.startswith("Location:"):
+            location = ln.split(":", 1)[1].strip()
+            continue
         if ln.startswith("Files:"):
             in_files = True
             continue
         if not in_files:
             continue
         rel = ln.strip()
-        if not rel:
+        if rel:
+            files.append(rel)
+    hit = []
+    for rel in files:
+        path = os.path.join(location, rel) if location else os.path.join(sitep, rel)
+        try:
+            real = os.path.realpath(path)
+        except OSError:
             continue
-        base = os.path.basename(rel)
-        if ".so" in base:
-            sonames.add(base)
-    hit = sonames & needed
+        if real in resolved_files:
+            hit.append(os.path.basename(rel))
     if hit:
-        print("keep", pkg, "provides", " ".join(sorted(hit)))
+        print("keep", pkg, "maps", " ".join(sorted(set(hit))))
         continue
     print("drop", pkg)
     subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])

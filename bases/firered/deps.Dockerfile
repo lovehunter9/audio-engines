@@ -24,11 +24,11 @@ RUN set -eux; \
         IDX=https://download.pytorch.org/whl/cu128; \
     fi; \
     python3 -m pip install --no-cache-dir \
+        torch torchaudio --index-url "${IDX}"; \
+    python3 -m pip install --no-cache-dir \
         "transformers==5.6.2" einops regex python-dotenv wetext fasttext-wheel \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets; \
-    python3 -m pip install --no-cache-dir --force-reinstall \
-        torch torchaudio --index-url "${IDX}"; \
     mkdir -p /opt/fireredtts3 /tmp/firered-src; \
     cd /tmp/firered-src; \
     git init -q .; \
@@ -40,6 +40,7 @@ RUN set -eux; \
     curl -fsSL -o /opt/fireredtts3/fireredtts3/utils/llm_tn/models/lid.176.ftz \
         https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.ftz; \
     echo "${FIRERED_REF}" > /opt/fireredtts3/COMMIT; \
+    cd /; \
     rm -rf /tmp/firered-src; \
     python3 -c "import sysconfig, os; \
 p = sysconfig.get_paths()['purelib']; \

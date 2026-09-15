@@ -25,11 +25,11 @@ RUN set -eux; \
         IDX=https://download.pytorch.org/whl/cu128; \
     fi; \
     python3 -m pip install --no-cache-dir \
+        torch torchaudio --index-url "${IDX}"; \
+    python3 -m pip install --no-cache-dir \
         "transformers==4.57.3" "qwen-tts==0.1.1" \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.115" "uvicorn>=0.30" httpx python-multipart websockets; \
-    python3 -m pip install --no-cache-dir --force-reinstall \
-        torch torchaudio --index-url "${IDX}"; \
     mkdir -p /opt/breeze-tts /tmp/breeze-src; \
     cd /tmp/breeze-src; \
     git init -q .; \
@@ -38,6 +38,7 @@ RUN set -eux; \
     git checkout -q FETCH_HEAD; \
     cp -r breeze_infer models configs /opt/breeze-tts/; \
     echo "${BREEZE_REF}" > /opt/breeze-tts/COMMIT; \
+    cd /; \
     rm -rf /tmp/breeze-src; \
     python3 -c "import sysconfig, os; \
 p = sysconfig.get_paths()['purelib']; \
