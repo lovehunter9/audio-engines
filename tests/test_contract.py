@@ -1232,6 +1232,12 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
         # the current torch actually maps.
         self.assertIn("resolved_files", text)
         self.assertIn("\ncd /\n", text)
+        self.assertIn("libnvshmem_host.so", text)
+        self.assertIn("libcupti.so", text)
+        self.assertIn("libcufile.so", text)
+        self.assertIn("nvidia-nvshmem", text)
+        self.assertIn("nvidia-cuda-cupti", text)
+        self.assertIn("nvidia-cufile", text)
         m = re.search(r"grep -iE '([^']+)'", text)
         self.assertIsNotNone(m)
         posix = m.group(1)
