@@ -23,6 +23,19 @@ FROM ${ENGINE_IMAGE} AS engine
 FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 
+# 🔴 GPU only. `ort` passes the device string through untouched and the engine accepts
+# `openvino:NPU`, so the library layer supports an NPU and this image does not: the NPU plugin
+# needs intel-driver-compiler-npu and intel-level-zero-npu, neither of which is installed below,
+# and the device node it opens is /dev/accel, which the chart does not mount. An NPU device
+# asked for here fails when the session is built, some way from the flag that asked for it.
+#
+# Nothing selects it today -- the chart offers cpu, intel and intel-gpu, and the compute mode
+# overrides EXECUTION_MODE, so an NPU string typed into settings is discarded before it arrives.
+# Written down because the two layers disagree and the disagreement is invisible from either
+# one. Adding it is a base, a chart mode and a device mount, and one thing nobody has measured:
+# whether the NPU plugin also refuses a static sequence length, which decides whether it wants
+# the derived model or the stock one.
+#
 # OpenVINO's GPU plugin reaches the device through Level Zero / OpenCL, and the stock driver is
 # too old to see the hardware this targets: Ubuntu 24.04 ships intel-opencl-icd 23.43, which does
 # not know Arrow Lake-S (PCI 8086:7D67). The symptom is not an error -- clinfo reports 0
