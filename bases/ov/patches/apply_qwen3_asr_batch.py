@@ -5,10 +5,12 @@ Public generate() only accepted one vector<float>. split_audio_into_chunks alrea
 knows a list and stamps orig_batch; merge_chunk_results already folds chunks back.
 This opens that binding and sends N>1 through one decoder.generate().
 
-intel-ov17 stacked encoder states into [N, max_t, H] but compiled the decoder IR
-with encoder_hidden_states batch frozen at 1, so every span copied the first clip.
-The decoder constructor must reshape that batch dim before compile_model.
-Encoder stays per-clip: its batch axis is already mel chunks of one utterance.
+intel-ov17 stacked encoder states into [N, max_t, H] but the compiled decoder
+still read only clip 0. intel-ov19 dynamized the three input names; the exported
+IR already had those dims dynamic. The real freeze is inside the graph:
+[B,T,H] -> Reshape[-1,H] -> Unsqueeze[1,B*T,H] -> Broadcast across batch, so
+GatherElements(axis=1) picks the first span for every row. ov20 rewires that
+Unsqueeze to keep [B,T,H]. Encoder stays per-clip.
 """
 from __future__ import annotations
 
@@ -80,10 +82,69 @@ DECODER_COMPILE_OLD = (
     '        core.compile_model(models_path / "openvino_decoder_model.xml", device, properties);'
 )
 
+KEEP_ENCODER_BATCH_HELPER = r'''
+size_t keep_encoder_hidden_batch(const std::shared_ptr<ov::Model>& model) {
+    // Exported decoder flattens encoder [B,T,H] to [-1,H], Unsqueeze to
+    // [1,B*T,H], then broadcasts that one row across the batch. GatherElements
+    // along time then reads clip 0 for every span. Feed [B,T,H] through instead.
+    size_t hidden = 0;
+    for (const auto& input : model->inputs()) {
+        if (input.get_any_name() != "encoder_hidden_states") {
+            continue;
+        }
+        const auto shape = input.get_partial_shape();
+        if (shape.size() == 3 && shape[2].is_static()) {
+            hidden = static_cast<size_t>(shape[2].get_length());
+        }
+    }
+    OPENVINO_ASSERT(hidden > 0, "encoder_hidden_states is not [B,T,H]");
+
+    size_t rewired = 0;
+    for (const auto& op : model->get_ops()) {
+        if (std::string(op->get_type_name()) != "Unsqueeze") {
+            continue;
+        }
+        const auto out_shape = op->get_output_partial_shape(0);
+        if (out_shape.rank().is_dynamic() || out_shape.size() != 3) {
+            continue;
+        }
+        if (!out_shape[0].is_static() || out_shape[0].get_length() != 1) {
+            continue;
+        }
+        if (!out_shape[2].is_static() || static_cast<size_t>(out_shape[2].get_length()) != hidden) {
+            continue;
+        }
+        const auto reshape = op->get_input_node_shared_ptr(0);
+        if (!reshape || std::string(reshape->get_type_name()) != "Reshape") {
+            continue;
+        }
+        const auto src = reshape->get_input_node_shared_ptr(0);
+        if (!src) {
+            continue;
+        }
+        const auto src_shape = src->get_output_partial_shape(0);
+        if (src_shape.rank().is_dynamic() || src_shape.size() != 3) {
+            continue;
+        }
+        if (!src_shape[2].is_static() || static_cast<size_t>(src_shape[2].get_length()) != hidden) {
+            continue;
+        }
+        const auto consumers = op->output(0).get_target_inputs();
+        for (auto& in : consumers) {
+            in.replace_source_output(src->output(0));
+        }
+        ++rewired;
+    }
+    model->validate_nodes_and_infer_types();
+    return rewired;
+}
+
+'''
+
 DECODER_COMPILE_NEW = r'''    auto model = core.read_model(models_path / "openvino_decoder_model.xml");
-    // Exported IR freezes encoder_hidden_states at batch=1. generate() already
-    // walks input_ids.shape[0], but set_tensor cannot widen a static batch, so
-    // a stacked [N, T, H] still cross-attends every sequence to clip 0.
+    // Input names are already dynamic on current exports. The clip-0 bug is
+    // the flatten+Unsqueeze inside the graph; keep_encoder_hidden_batch
+    // rewires that. Still dynamize the three names for older static IRs.
     std::map<std::string, ov::PartialShape> shapes;
     for (const auto& input : model->inputs()) {
         auto shape = input.get_partial_shape();
@@ -95,6 +156,9 @@ DECODER_COMPILE_NEW = r'''    auto model = core.read_model(models_path / "openvi
         shapes[name] = shape;
     }
     model->reshape(shapes);
+    OPENVINO_ASSERT(keep_encoder_hidden_batch(model) > 0,
+                    "Qwen3-ASR decoder IR is missing the encoder flatten Unsqueeze; "
+                    "refusing a compile that would copy clip 0");
     ov::CompiledModel compiled_model = core.compile_model(model, device, properties);'''
 
 
@@ -260,14 +324,28 @@ def patch_decoder_batch_dim(root: pathlib.Path) -> None:
         raise SystemExit("qwen3-asr/decoder.cpp not found")
     path = hits[0]
     src = _read(path)
-    if "encoder_hidden_states" in src and "Dimension::dynamic()" in src:
-        print("decoder batch dim already patched", path)
+    if "keep_encoder_hidden_batch" in src:
+        print("decoder encoder-batch rewrite already patched", path)
         return
-    if DECODER_COMPILE_OLD not in src:
-        raise SystemExit("decoder compile_model marker not found in %s" % path)
-    src = src.replace(DECODER_COMPILE_OLD, DECODER_COMPILE_NEW, 1)
-    if "#include <map>" not in src:
-        src = src.replace("#include \"decoder.hpp\"", "#include \"decoder.hpp\"\n#include <map>", 1)
+    if "namespace ov::genai {" not in src:
+        raise SystemExit("namespace ov::genai not found in %s" % path)
+    src = src.replace("namespace ov::genai {", "namespace ov::genai {" + KEEP_ENCODER_BATCH_HELPER, 1)
+    if DECODER_COMPILE_OLD in src:
+        src = src.replace(DECODER_COMPILE_OLD, DECODER_COMPILE_NEW, 1)
+    elif "model->reshape(shapes);" in src:
+        src = src.replace(
+            "model->reshape(shapes);",
+            "model->reshape(shapes);\n"
+            "    OPENVINO_ASSERT(keep_encoder_hidden_batch(model) > 0,\n"
+            "                    \"Qwen3-ASR decoder IR is missing the encoder flatten Unsqueeze; "
+            "refusing a compile that would copy clip 0\");",
+            1,
+        )
+    else:
+        raise SystemExit("decoder compile_model / reshape marker not found in %s" % path)
+    for inc in ('#include <map>', '#include <string>'):
+        if inc not in src:
+            src = src.replace('#include "decoder.hpp"', '#include "decoder.hpp"\n' + inc, 1)
     _write(path, src)
 
 

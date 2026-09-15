@@ -3,6 +3,7 @@ import os
 import json
 import asyncio
 import logging
+import math
 import threading
 import time
 import types
@@ -262,7 +263,9 @@ def _load_ov():
     src = _resolve_hf_dir(MODEL_REPO)
     model_dir = _ensure_ov_ir(src)
     device = _ov_device()
-    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache")
+    # ov19 blobs were compiled with the flatten+Unsqueeze graph. A new
+    # CACHE_DIR name forces a recompile after the [B,T,H] rewire.
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_ov20")
     os.makedirs(cache, exist_ok=True)
     _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
     pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
@@ -319,11 +322,20 @@ def _ov_result_texts(result, n):
 
 
 def _ov_assert_batch_generate(pipe):
-    """--batch-max-spans above 1 is a real batch. Fail load if generate() cannot take a list."""
+    """Fail load if generate() cannot take a list, or if two clips copy one text.
+
+    Silence-only probes used to pass TypeError and still ship the clip-0
+    flatten. Two short tones that both come back empty are inconclusive;
+    two nonempty identical strings are the ov17/ov19 bug and abort load.
+    The decoder constructor also asserts the Unsqueeze was rewired.
+    """
     if MAX_BATCH_SPANS <= 1:
         return
+    def _tone(freq, n=3200):
+        return [math.sin(2.0 * math.pi * freq * i / 16000.0) for i in range(n)]
+
     try:
-        pipe.generate([[0.0] * 1600, [0.0] * 1600], max_new_tokens=1)
+        result = pipe.generate([_tone(440.0), _tone(880.0)], max_new_tokens=8)
     except TypeError as e:
         raise RuntimeError(
             "ENGINE_ARGS --batch-max-spans is %d but this OpenVINO build "
@@ -332,13 +344,20 @@ def _ov_assert_batch_generate(pipe):
         ) from e
     except Exception as e:
         _p("batch generate probe accepted a list (%s); continuing" % e)
+        return
+    texts = [(t or "").strip() for t in (getattr(result, "texts", None) or [])]
+    nonempty = [t for t in texts if t]
+    if len(nonempty) >= 2 and len(set(nonempty)) == 1:
+        raise RuntimeError(
+            "openvino batch generate copied one text onto every clip: %r" % texts
+        )
 
 
 def _ov_generate_many(clips, language=None):
     """One OpenVINO generate() for the group. The patched binding takes a list
     of waveforms; infer() encodes per clip then one decoder.generate() on the
-    stacked hidden states. The decoder IR is reshaped so encoder_hidden_states
-    has a dynamic batch; without that, every span copies clip 0 (intel-ov17).
+    stacked hidden states. The decoder graph must keep encoder [B,T,H];
+    flatten+Unsqueeze to [1,B*T,H] copies clip 0 (intel-ov17/ov19).
     A TypeError is the unpatched wheel, which cannot take a list at all.
     """
     if len(clips) == 1:
