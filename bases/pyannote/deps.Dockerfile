@@ -34,7 +34,7 @@ RUN set -eux; \
         "pyannote.audio>=4,<5" speechbrain silero-vad omegaconf soundfile \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
     python3 -m pip uninstall -y \
-        matplotlib pandas optuna pyannoteai-sdk \
+        matplotlib optuna pyannoteai-sdk \
         opentelemetry-api opentelemetry-sdk opentelemetry-exporter-otlp \
         opentelemetry-exporter-otlp-proto-grpc \
         opentelemetry-exporter-otlp-proto-http \

@@ -1194,6 +1194,21 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         four = text.find('"pyannote.audio>=4,<5"')
         self.assertGreater(pin, torch)
         self.assertGreater(four, pin)
+        uninstall = text.split("pip uninstall", 1)[1]
+        self.assertNotIn("pandas", uninstall)
+
+
+class SlimBreezeRecipeTest(unittest.TestCase):
+    def test_numpy_and_sox_are_present_before_qwen_tts(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/breeze/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn("sox", text)
+        numpy = text.find("pip install --no-cache-dir numpy")
+        qwen = text.find('"qwen-tts==0.1.1"')
+        self.assertGreater(numpy, -1)
+        self.assertGreater(qwen, numpy)
 
 
 class SlimRuntimeRecipeTest(unittest.TestCase):

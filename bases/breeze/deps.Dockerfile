@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg libsndfile1 ca-certificates git; \
+        python3 python3-pip ffmpeg libsndfile1 ca-certificates git sox; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     if [ "${TARGETARCH}" = "arm64" ]; then \
@@ -26,10 +26,12 @@ RUN set -eux; \
     fi; \
     python3 -m pip install --no-cache-dir \
         torch torchaudio --index-url "${IDX}"; \
+    python3 -m pip install --no-cache-dir numpy; \
     python3 -m pip install --no-cache-dir \
         "transformers==4.57.3" "qwen-tts==0.1.1" \
-        "huggingface-hub>=0.34" soundfile librosa numpy \
+        "huggingface-hub>=0.34" soundfile librosa \
         "fastapi>=0.115" "uvicorn>=0.30" httpx python-multipart websockets; \
+    python3 -m pip uninstall -y gradio || true; \
     mkdir -p /opt/breeze-tts /tmp/breeze-src; \
     cd /tmp/breeze-src; \
     git init -q .; \
@@ -55,7 +57,7 @@ COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
 COPY --from=build /opt/breeze-tts /opt/breeze-tts
 RUN set -eux; \
     apt-get update && apt-get install -y --no-install-recommends \
-        python3 ffmpeg libsndfile1 ca-certificates; \
+        python3 ffmpeg libsndfile1 ca-certificates sox; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
