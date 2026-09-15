@@ -33,10 +33,8 @@ RUN set -eux; \
     python3 -m pip install --no-cache-dir -c /tmp/torch.pin \
         "pyannote.audio>=4,<5" speechbrain silero-vad omegaconf soundfile \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
-    # 4.x imports telemetry on `import pyannote.audio` (OTLP HTTP exporter).
-    # pandas and the opentelemetry stack stay; they are not CUDA bloat.
-    python3 -m pip uninstall -y \
-        matplotlib optuna pyannoteai-sdk || true; \
+    # Do not pip-uninstall 4.x extras: import pulls pandas, otel, and optuna.
+    # Size comes from pinning torch + strip_unused_cuda, not from guessing deps.
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh /tmp/torch.pin
 

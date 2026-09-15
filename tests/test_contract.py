@@ -1194,9 +1194,7 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         four = text.find('"pyannote.audio>=4,<5"')
         self.assertGreater(pin, torch)
         self.assertGreater(four, pin)
-        uninstall = text.split("pip uninstall", 1)[1]
-        self.assertNotIn("pandas", uninstall)
-        self.assertNotIn("opentelemetry", uninstall)
+        self.assertNotIn("pip uninstall", text)
 
 
 class SlimBreezeRecipeTest(unittest.TestCase):
