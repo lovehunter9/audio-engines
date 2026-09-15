@@ -1179,6 +1179,23 @@ class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
         self.assertNotIn("LD_LIBRARY_PATH=/opt/ct2-runtime/lib", text)
 
 
+class SlimPyannoteRecipeTest(unittest.TestCase):
+    def test_four_x_cannot_upgrade_the_torch_already_installed(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/pyannote/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn('pyannote.audio>=4,<5', text)
+        self.assertIn("/tmp/torch.pin", text)
+        self.assertIn("-c /tmp/torch.pin", text)
+        self.assertNotIn("pyannote.audio>=3.3.0,<4", text)
+        torch = text.find("torch torchaudio --index-url")
+        pin = text.find("pip freeze | grep -E '^(torch|torchaudio)=='")
+        four = text.find('"pyannote.audio>=4,<5"')
+        self.assertGreater(pin, torch)
+        self.assertGreater(four, pin)
+
+
 class SlimRuntimeRecipeTest(unittest.TestCase):
     def _runtime_dir(self):
         return os.path.join(os.path.dirname(__file__), "../bases/runtime")

@@ -1,7 +1,9 @@
 # Pyannote / Silero / SpeechBrain: own image, no shared audio-runtime.
-# Stay on pyannote.audio 3.x: 4.x pulls torch 2.14 + a second CUDA 13 stack
-# and changes the Pipeline API. Torch goes on first so pip does not bring
-# that stack in, then strip drops any leftover nvidia-* that ldd does not map.
+# 4.x is the line that still imports on current cu128 / cu130 torch
+# (2.9+ dropped torchaudio.AudioMetaData, which 3.x still names).
+# Install our torch first, then pin that pair so pip cannot let 4.x
+# pull torch 2.14 and a second CUDA 13 stack. strip drops leftover
+# nvidia-* that ldd does not map.
 ARG TARGETARCH
 FROM docker.io/nvidia/cuda:12.8.1-base-ubuntu22.04 AS amd64
 FROM docker.io/nvidia/cuda:13.0.3-base-ubuntu22.04 AS arm64
@@ -27,8 +29,9 @@ RUN set -eux; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     python3 -m pip install --no-cache-dir \
         torch torchaudio --index-url "${IDX}"; \
-    python3 -m pip install --no-cache-dir \
-        "pyannote.audio>=3.3.0,<4" speechbrain silero-vad omegaconf soundfile \
+    python3 -m pip freeze | grep -E '^(torch|torchaudio)==' > /tmp/torch.pin; \
+    python3 -m pip install --no-cache-dir -c /tmp/torch.pin \
+        "pyannote.audio>=4,<5" speechbrain silero-vad omegaconf soundfile \
         python-multipart "fastapi>=0.110" "uvicorn>=0.29"; \
     python3 -m pip uninstall -y \
         matplotlib pandas optuna pyannoteai-sdk \
@@ -39,7 +42,7 @@ RUN set -eux; \
         opentelemetry-proto opentelemetry-semantic-conventions \
         || true; \
     sh /tmp/strip_unused_cuda.sh; \
-    rm -f /tmp/strip_unused_cuda.sh
+    rm -f /tmp/strip_unused_cuda.sh /tmp/torch.pin
 
 FROM ${TARGETARCH} AS release
 ARG TARGETARCH
@@ -59,7 +62,7 @@ print('TARGETARCH', '''${TARGETARCH}''', 'torch', torch.__version__, 'cuda', tor
       'pyannote.audio', getattr(pyannote.audio, '__version__', '?')); \
 assert torch.version.cuda, 'lost CUDA torch after pip install'; \
 v=getattr(pyannote.audio, '__version__', '0'); \
-assert v.startswith('3.'), 'expected pyannote.audio 3.x, got %s' % v"; \
+assert v.startswith('4.'), 'expected pyannote.audio 4.x, got %s' % v"; \
     python3 -c "import soundfile as sf; \
     print('libsndfile', sf.__libsndfile_version__); \
     [print(c, s, sf.check_format(c, s)) for c, s in \
