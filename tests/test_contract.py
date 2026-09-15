@@ -1196,7 +1196,11 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
     def test_strip_script_drops_solvers_keeps_cublas_cudnn(self):
         with open(os.path.join(self._runtime_dir(), "strip_unused_cuda.sh")) as fh:
             text = fh.read()
-        self.assertIn("Keep: cublas, cudnn", text)
+        # Keep/drop is ldd's resolved path, not a hard-coded wheel list.
+        # A leftover CUDA 13 wheel can share a soname with the CUDA 12 wheel
+        # the current torch actually maps.
+        self.assertIn("resolved_files", text)
+        self.assertIn("\ncd /\n", text)
         m = re.search(r"grep -iE '([^']+)'", text)
         self.assertIsNotNone(m)
         posix = m.group(1)
@@ -1204,12 +1208,22 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
         freeze = (
             "nvidia-cublas-cu12==12.8\n"
             "nvidia-cudnn-cu12==9.1\n"
+            "nvidia-cublas==13.1\n"
             "nvidia-nccl-cu12==2.21\n"
             "nvidia-cusparselt-cu12==0.8\n"
+            "cuda-toolkit==13.0.3\n"
             "triton==3.2.0\n"
         )
-        dropped = [x.group(0).split("=")[0] for x in re.finditer(py, freeze, re.I | re.M)]
-        self.assertEqual(dropped, ["nvidia-nccl-cu12", "nvidia-cusparselt-cu12", "triton"])
+        candidates = [x.group(0).split("=")[0] for x in re.finditer(py, freeze, re.I | re.M)]
+        self.assertEqual(candidates, [
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
+            "nvidia-cublas",
+            "nvidia-nccl-cu12",
+            "nvidia-cusparselt-cu12",
+            "cuda-toolkit",
+            "triton",
+        ])
 
 
 if __name__ == "__main__":
