@@ -327,9 +327,12 @@ def patch_decoder_batch_dim(root: pathlib.Path) -> None:
     if "keep_encoder_hidden_batch" in src:
         print("decoder encoder-batch rewrite already patched", path)
         return
-    if "namespace ov::genai {" not in src:
-        raise SystemExit("namespace ov::genai not found in %s" % path)
-    src = src.replace("namespace ov::genai {", "namespace ov::genai {" + KEEP_ENCODER_BATCH_HELPER, 1)
+    if "namespace ov::genai {" in src:
+        src = src.replace("namespace ov::genai {", "namespace ov::genai {" + KEEP_ENCODER_BATCH_HELPER, 1)
+    elif '#include "decoder.hpp"' in src:
+        src = src.replace('#include "decoder.hpp"', '#include "decoder.hpp"\n' + KEEP_ENCODER_BATCH_HELPER, 1)
+    else:
+        raise SystemExit("no insertion point for keep_encoder_hidden_batch in %s" % path)
     if DECODER_COMPILE_OLD in src:
         src = src.replace(DECODER_COMPILE_OLD, DECODER_COMPILE_NEW, 1)
     elif "model->reshape(shapes);" in src:
