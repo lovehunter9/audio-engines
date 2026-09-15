@@ -7,9 +7,10 @@
 # a leftover CUDA 13 wheel can advertise the same libcusparse.so.12 as the
 # CUDA 12 wheel the current torch actually maps.
 #
-# Import-only NVIDIA libs: torch relocates against the soname, but this
-# image never uses multi-GPU / GDS / CUPTI. Stub the host lib, then
-# force-uninstall the wheel. Keep libtorch_nvshmem.so — that lives in torch.
+# nccl: libtorch_cuda relocates against ncclRecv, so the soname must stay.
+# Replace the wheel with a stub, then force-uninstall. Multi-GPU is not this
+# image's contract. Do not stub nvshmem / cupti / cufile the same way:
+# those .so carry ELF symbol versions and an empty stub aborts ld.so.
 set -eu
 # Callers that `cd` into a dir they then delete leave us without a cwd;
 # Ubuntu pip then dies on os.getcwd() in __main__.
@@ -71,27 +72,14 @@ def write_stub(real, soname):
         os.symlink(soname, link)
 
 
-stub_prefixes = (
-    "libnccl.so",
-    "libnvshmem_host.so",
-    "libcupti.so",
-    "libcufile.so",
-)
-found = {prefix: [] for prefix in stub_prefixes}
-nvidia_root = os.path.join(sitep, "nvidia")
-if os.path.isdir(nvidia_root):
-    for root, _, files in os.walk(nvidia_root):
-        for name in files:
-            for prefix in stub_prefixes:
-                if name.startswith(prefix):
-                    found[prefix].append(os.path.join(root, name))
-                    break
-for prefix, paths in found.items():
-    if not paths:
-        continue
-    real = next((p for p in paths if not os.path.islink(p)), paths[0])
-    real = os.path.realpath(real)
-    write_stub(real, os.path.basename(real))
+nccl_libs = []
+for root, _, files in os.walk(os.path.join(sitep, "nvidia")):
+    for name in files:
+        if name.startswith("libnccl.so"):
+            nccl_libs.append(os.path.join(root, name))
+if nccl_libs:
+    real = next((p for p in nccl_libs if not os.path.islink(p)), nccl_libs[0])
+    write_stub(os.path.realpath(real), "libnccl.so.2")
 
 subprocess.call(["ldconfig"])
 PY
@@ -138,14 +126,8 @@ while queue:
 print("import-time DT_NEEDED:", " ".join(sorted(needed)))
 
 force_drop = {"triton", "pytorch-triton"}
-force_drop_prefix = (
-    "nvidia-nccl",
-    "nvidia-nvshmem",
-    "nvidia-cuda-cupti",
-    "nvidia-cufile",
-)
 for pkg in os.environ.get("STRIP_CANDIDATES", "").split():
-    if pkg in force_drop or pkg.startswith(force_drop_prefix):
+    if pkg in force_drop or pkg.startswith("nvidia-nccl"):
         print("drop", pkg)
         subprocess.check_call([sys.executable, "-m", "pip", "uninstall", "-y", pkg])
         continue
