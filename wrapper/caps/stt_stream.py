@@ -263,9 +263,9 @@ def _load_ov():
     src = _resolve_hf_dir(MODEL_REPO)
     model_dir = _ensure_ov_ir(src)
     device = _ov_device()
-    # ov19 blobs were compiled with the flatten+Unsqueeze graph. A new
-    # CACHE_DIR name forces a recompile after the [B,T,H] rewire.
-    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_ov20")
+    # ov20 blobs rewired Unsqueeze to [B,T,H] and Intel GPU dies on short T.
+    # ov21 keeps the flatten layout and retargets GatherElements indices.
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_ov21")
     os.makedirs(cache, exist_ok=True)
     _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
     pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
@@ -327,7 +327,7 @@ def _ov_assert_batch_generate(pipe):
     Silence-only probes used to pass TypeError and still ship the clip-0
     flatten. Two short tones that both come back empty are inconclusive;
     two nonempty identical strings are the ov17/ov19 bug and abort load.
-    The decoder constructor also asserts the Unsqueeze was rewired.
+    The decoder constructor asserts GatherElements indices were shifted.
     """
     if MAX_BATCH_SPANS <= 1:
         return
@@ -356,8 +356,8 @@ def _ov_assert_batch_generate(pipe):
 def _ov_generate_many(clips, language=None):
     """One OpenVINO generate() for the group. The patched binding takes a list
     of waveforms; infer() encodes per clip then one decoder.generate() on the
-    stacked hidden states. The decoder graph must keep encoder [B,T,H];
-    flatten+Unsqueeze to [1,B*T,H] copies clip 0 (intel-ov17/ov19).
+    stacked hidden states. Flatten [1,B*T,H] plus unshifted GatherElements
+    copies clip 0 (intel-ov17/ov19); ov20's [B,T,H] rewire dies on short T.
     A TypeError is the unpatched wheel, which cannot take a list at all.
     """
     if len(clips) == 1:
