@@ -25,6 +25,7 @@ Every image MUST expose, on the engine port (default `8000`):
 |---|---|
 | `GET /v1/models` | The standard model list, exactly like any other engine: Ollama `models[]` (with `capabilities`, `details`) merged with OpenAI `data[]`. `id` / `name` MUST equal `MODEL_NAME`; capabilities are the coarse `audio` plus the fine-grained keys this instance serves. Returns **200 only when the model is loaded**, `503` while loading — `llm-init` polls it for liveness/readiness (`WaitAlive`/`Ready`). |
 | `GET /api/engine-spec` | Internal, never load-gated: the versioned account of this engine's proxied data plane. `llm-init` merges it into `/api/endpoints`. |
+| `GET /api/engine-capacity` | Internal, never load-gated: reports `{\"max_concurrency\": 1}` because all inference uses the same single worker. It does not report queue depth or current load. |
 | `GET /metrics` | Prometheus text with the generic gauges `gpu_present`, `gpu_mem_used_bytes`, `gpu_mem_total_bytes`, `gpu_util_ratio` (NOT `audio_*`). `llm-init` relays these for the GPU UI. |
 | `GET /health` \| `/healthz` \| `/readyz` | The engine's own health (200 ready / 503 loading). |
 | `POST\|GET /v1/audio/*` | The actual capability endpoints; an unsupported op returns its own `404`. |
@@ -478,4 +479,3 @@ builder; see the `EXTRA` hook in the `Makefile`.
 4. `.github/workflows/<base>-ci.yml` — copy `qwen-ci.yml` and change the paths,
    `base` and `repo`; the build itself is the shared `build-image.yml`.
 5. Update the **Bases** table above.
-
