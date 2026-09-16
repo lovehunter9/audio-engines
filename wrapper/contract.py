@@ -372,6 +372,12 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
             report["endpoints"].append(endpoint)
         return report
 
+    @app.get("/api/engine-capacity")
+    def engine_capacity():
+        # Every audio process owns one model and funnels synchronous and
+        # asynchronous inference through the same single worker.
+        return {"max_concurrency": 1}
+
     @app.get("/health")
     def health():
         if is_ready():
