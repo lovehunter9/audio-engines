@@ -737,8 +737,9 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertIn("tokens[i]", got_cpp)
         self.assertIn("Dimension::dynamic()", got_dec)
         self.assertIn("encoder_hidden_states", got_dec)
-        self.assertIn("keep_encoder_hidden_batch", got_dec)
-        self.assertIn("replace_source_output", got_dec)
+        self.assertIn("fix_encoder_gather_batch", got_dec)
+        self.assertIn("GatherElements", got_dec)
+        self.assertIn("batch*T", got_dec)
         self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)
 
     def test_ov_base_implements_stt_and_align(self):
