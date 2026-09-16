@@ -82,7 +82,9 @@ def _openvino_models_dir(models_dir):
     deliberately -- deriving a file nothing asks for costs one pass over a 6 MB graph, while
     not deriving one that is asked for turns batching off with nothing in the log. The two
     sides live in different repositories, so the asymmetry is what keeps them safe to drift. The same export with its sample dimension
-    made dynamic compiles and runs, and is 16x faster per window than going one at a time.
+    made dynamic compiles and runs, and is 15x faster per window than going one at a time --
+    529.5 ms against 34.9, one card, 64 windows, best of three, recorded with the rest of the
+    conditions in beclab/speakrs-diarization's README.
 
     That model is derived here rather than baked into the image, because baking it would pin a
     copy of weights the engine resolves separately: a new revision upstream and the two drift
