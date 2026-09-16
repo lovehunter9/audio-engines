@@ -948,6 +948,13 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertEqual(transcription["protocol"], "openai.audio.v1")
         self.assertTrue(all("max_input_seconds" not in endpoint for endpoint in spec["endpoints"]))
 
+    def test_engine_capacity_reports_the_single_inference_worker(self):
+        response = self.client.get("/api/engine-capacity")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"max_concurrency": 1})
+        self.assertNotIn("queue", response.json())
+
     def test_metrics_expose_exactly_the_four_generic_gpu_gauges(self):
         response = self.client.get("/metrics")
         expected = {
