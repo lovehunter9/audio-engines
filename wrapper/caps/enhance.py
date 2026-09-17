@@ -48,10 +48,9 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = _runtime.state
-_OV_STAMP = ".ov-enhance-v2"
-# SpeechBrain's STFT bakes n_fft against the traced length. 1s IR 500s on 11s JFK
-# (in_fft_dim). Export a 30s window (same as CHUNK_S when no CUDA quota) and pad.
-_OV_WINDOW = 30 * SR
+_OV_STAMP = ".ov-enhance-v3"
+# ISTFT in the IR wants freq at data_shape[-3]; SpeechBrain traces [B,F,T].
+# Export CNN+DNN only. STFT / ISTFT stay in torch on CPU.
 
 
 def _is_ov_enhance():
@@ -100,21 +99,26 @@ def _pcm_numpy(noisy):
     return pcm
 
 
-def _ov_forward(inner):
+def _enhance_mod(model):
+    inner = getattr(getattr(model, "mods", None), "enhance_model", None)
+    if inner is None:
+        raise RuntimeError("SpeechBrain model has no mods.enhance_model; cannot export OpenVINO")
+    return inner
+
+
+def _mask_forward(inner):
     import torch
 
-    class _Fwd(torch.nn.Module):
-        def __init__(self, mod):
+    class _Mask(torch.nn.Module):
+        def __init__(self, cnn, dnn):
             super().__init__()
-            self.mod = mod
+            self.CNN = cnn
+            self.DNN = dnn
 
-        def forward(self, noisy):
-            out = self.mod(noisy)
-            if isinstance(out, (tuple, list)):
-                return out[0]
-            return out
+        def forward(self, log_mag):
+            return self.DNN(self.CNN(log_mag)).clamp(min=0, max=1)
 
-    wrapped = _Fwd(inner)
+    wrapped = _Mask(inner.CNN, inner.DNN)
     wrapped.eval()
     return wrapped
 
@@ -128,18 +132,15 @@ def _ensure_ir(src, model):
     stamp = os.path.join(ir_dir, _OV_STAMP)
     if os.path.isfile(xml) and os.path.isfile(stamp):
         return xml
-    inner = getattr(getattr(model, "mods", None), "enhance_model", None)
-    if inner is None:
-        raise RuntimeError("SpeechBrain model has no mods.enhance_model; cannot export OpenVINO")
+    inner = _enhance_mod(model)
     os.makedirs(ir_dir, exist_ok=True)
-    example = torch.zeros(1, _OV_WINDOW, dtype=torch.float32)
-    log.info("exporting SpeechBrain enhance_model to OpenVINO IR (window=%d)", _OV_WINDOW)
-    # Static T. Dynamic [-1,-1] compiled, then ISTFT rejected 11s JFK
-    # (in_fft_dim vs frame_size/2+1). Pad at infer instead.
-    ov_model = ov.convert_model(_ov_forward(inner), example_input=example)
+    with torch.no_grad():
+        example = inner.extract_feats(inner.stft(torch.zeros(1, 2 * SR)))
+    log.info("exporting EnhanceResnet CNN+DNN (log-mag %s)", tuple(example.shape))
+    ov_model = ov.convert_model(_mask_forward(inner), example_input=example)
     ov.save_model(ov_model, xml)
     open(stamp, "w").close()
-    log.info("wrote enhance IR %s", xml)
+    log.info("wrote enhance mask IR %s", xml)
     return xml
 
 
@@ -150,33 +151,28 @@ def _load_ov():
     device = _require_ov_gpu()
     src = snapshot_download(MODEL_REPO, local_files_only=True,
                             cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
-    ir_dir = os.path.join(src, "openvino")
-    xml = os.path.join(ir_dir, "enhance_model.xml")
-    stamp = os.path.join(ir_dir, _OV_STAMP)
-    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
-        last = None
-        model = None
-        for kind, cls in _sb_classes():
-            try:
-                savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
-                log.info("speechbrain %s from_hparams on cpu (OpenVINO export only)", kind)
-                model = cls.from_hparams(source=src, savedir=savedir,
-                                         run_opts={"device": "cpu"})
-                log.info("speechbrain %s cpu load done; exporting IR", kind)
-                xml = _ensure_ir(src, model)
-                break
-            except Exception as e:
-                last = e
-                model = None
-                log.info("model is not a %s class (%s)", kind, e)
-        else:
-            raise last or RuntimeError("no compatible speechbrain enhancement class")
-        del model
+    last = None
+    model = None
+    for kind, cls in _sb_classes():
+        try:
+            savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+            log.info("speechbrain %s from_hparams on cpu (STFT/ISTFT stay here)", kind)
+            model = cls.from_hparams(source=src, savedir=savedir,
+                                     run_opts={"device": "cpu"})
+            log.info("speechbrain %s cpu load done; exporting mask IR if needed", kind)
+            xml = _ensure_ir(src, model)
+            break
+        except Exception as e:
+            last = e
+            model = None
+            log.info("model is not a %s class (%s)", kind, e)
+    else:
+        raise last or RuntimeError("no compatible speechbrain enhancement class")
     cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_enhance")
     os.makedirs(cache, exist_ok=True)
     compiled = ov.Core().compile_model(xml, device, {"CACHE_DIR": cache})
-    _state.update(compiled=compiled, model=None, kind="waveform-ov", device=device, ready=True)
-    log.info("enhance OpenVINO compiled from %s on %s", xml, device)
+    _state.update(compiled=compiled, model=model, kind="waveform-ov", device=device, ready=True)
+    log.info("enhance OpenVINO mask compiled from %s on %s", xml, device)
 
 
 def _load_torch():
@@ -214,16 +210,24 @@ def _load():
 
 def _run_ov(noisy):
     import numpy as np
+    import torch
 
-    pcm = _pcm_numpy(noisy)
-    n = pcm.shape[-1]
-    if n < _OV_WINDOW:
-        pcm = np.pad(pcm, ((0, 0), (0, _OV_WINDOW - n)))
-    elif n > _OV_WINDOW:
-        pcm = pcm[:, :_OV_WINDOW]
-    result = _state["compiled"](pcm)
-    out = np.asarray(result[0]).reshape(-1).astype("float32")
-    return out[:n]
+    inner = _enhance_mod(_state["model"])
+    pcm = torch.from_numpy(np.ascontiguousarray(_pcm_numpy(noisy))).float()
+    n = int(pcm.shape[-1])
+    with torch.no_grad():
+        spec = inner.stft(pcm)
+        log_mag = inner.extract_feats(spec)
+    mask = np.asarray(_state["compiled"](log_mag.numpy())[0])
+    mask = torch.from_numpy(np.ascontiguousarray(mask)).clamp(0, 1)
+    while mask.ndim < spec.ndim:
+        mask = mask.unsqueeze(-1)
+    if mask.shape[-1] != spec.shape[-1] and spec.shape[-1] == 2:
+        mask = mask.unsqueeze(-1)
+    w = float(getattr(inner, "mask_weight", 0.99))
+    with torch.no_grad():
+        out = inner.istft(w * mask * spec + (1.0 - w) * spec)
+    return np.ascontiguousarray(out.detach().cpu().float().numpy().reshape(-1)[:n])
 
 
 def _run(noisy):
