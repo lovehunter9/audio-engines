@@ -662,6 +662,13 @@ class OpenVINOModeTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 q._ov_assert_batch_generate(types.SimpleNamespace(generate=echo))
             self.assertIn("copied one text", str(ctx.exception))
+
+            def boom(raw, **kw):
+                raise RuntimeError("[GPU] CL_OUT_OF_RESOURCES exception.")
+
+            with self.assertRaises(RuntimeError) as ctx:
+                q._ov_assert_batch_generate(types.SimpleNamespace(generate=boom))
+            self.assertIn("died on GPU", str(ctx.exception))
         finally:
             q.MAX_BATCH_SPANS = was
 
@@ -733,9 +740,11 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertIn("tokens[i]", got_cpp)
         self.assertIn("Dimension::dynamic()", got_dec)
         self.assertIn("encoder_hidden_states", got_dec)
-        self.assertIn("fix_encoder_gather_batch", got_dec)
-        self.assertIn("GatherElements", got_dec)
-        self.assertIn("batch*T", got_dec)
+        self.assertIn("keep_encoder_hidden_batch", got_dec)
+        self.assertIn("encoder flatten Unsqueeze", got_dec)
+        self.assertIn("min_intel_gpu_audio_samples", got_cpp)
+        self.assertNotIn("fix_encoder_gather_batch", got_dec)
+        self.assertNotIn("batch*T", got_dec)
         self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)
 
     def test_ov_base_implements_stt_and_align(self):
