@@ -262,6 +262,103 @@ def _to_hf_names(ct2_state, config):
     return out
 
 
+def _count_layers(state, prefix):
+    n = 0
+    key = "%s/layer_%d/self_attention/linear_layers/0/weight"
+    while key % (prefix, n) in state:
+        n += 1
+    return n
+
+
+def _whisper_hf_config(state):
+    # Systran config.json is CT2 (alignment_heads / suppress_ids), not transformers.
+    embed = state.get("decoder/embeddings")
+    enc_pos = state.get("encoder/position_encodings")
+    dec_pos = state.get("decoder/position_encodings")
+    conv1 = state.get("encoder/conv1/weight")
+    fc1 = state.get("encoder/layer_0/ffn/linear_0/weight")
+    d_model = int(embed.shape[-1]) if embed is not None else 1280
+    vocab = int(embed.shape[0]) if embed is not None else 51866
+    n_enc = _count_layers(state, "encoder") or 32
+    n_dec = _count_layers(state, "decoder") or 32
+    n_mels = int(conv1.shape[1]) if conv1 is not None and getattr(conv1, "ndim", 0) == 3 else 128
+    n_heads = max(1, d_model // 64)
+    ffn = int(fc1.shape[0]) if fc1 is not None else d_model * 4
+    return {
+        "model_type": "whisper",
+        "architectures": ["WhisperForConditionalGeneration"],
+        "activation_function": "gelu",
+        "d_model": d_model,
+        "encoder_layers": n_enc,
+        "decoder_layers": n_dec,
+        "num_hidden_layers": n_enc,
+        "encoder_attention_heads": n_heads,
+        "decoder_attention_heads": n_heads,
+        "encoder_ffn_dim": ffn,
+        "decoder_ffn_dim": ffn,
+        "max_source_positions": int(enc_pos.shape[0]) if enc_pos is not None else 1500,
+        "max_target_positions": int(dec_pos.shape[0]) if dec_pos is not None else 448,
+        "num_mel_bins": n_mels,
+        "vocab_size": vocab,
+        "dropout": 0.0,
+        "attention_dropout": 0.0,
+        "activation_dropout": 0.0,
+        "encoder_layerdrop": 0.0,
+        "decoder_layerdrop": 0.0,
+        "init_std": 0.02,
+        "scale_embedding": False,
+        "use_cache": True,
+        "is_encoder_decoder": True,
+        "bos_token_id": 50257,
+        "eos_token_id": 50257,
+        "pad_token_id": 50256,
+        "decoder_start_token_id": 50258,
+        "max_length": 448,
+        "begin_suppress_tokens": [220, 50257],
+    }
+
+
+def _hf_config_ok(path):
+    cfg = os.path.join(path, "config.json")
+    try:
+        with open(cfg, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return False
+    return data.get("model_type") == "whisper"
+
+
+def _write_whisper_hf_config(dest, state):
+    os.makedirs(dest, exist_ok=True)
+    cfg = _whisper_hf_config(state)
+    with open(os.path.join(dest, "config.json"), "w", encoding="utf-8") as fh:
+        json.dump(cfg, fh, indent=2)
+        fh.write("\n")
+    pre = os.path.join(dest, "preprocessor_config.json")
+    if not os.path.isfile(pre):
+        with open(pre, "w", encoding="utf-8") as fh:
+            json.dump({
+                "chunk_length": 30,
+                "feature_extractor_type": "WhisperFeatureExtractor",
+                "feature_size": cfg["num_mel_bins"],
+                "hop_length": 160,
+                "n_fft": 400,
+                "n_samples": 480000,
+                "nb_max_frames": 3000,
+                "padding_side": "right",
+                "padding_value": 0.0,
+                "processor_class": "WhisperProcessor",
+                "return_attention_mask": False,
+                "sampling_rate": 16000,
+            }, fh, indent=2)
+            fh.write("\n")
+
+
+def _repair_hf_dir(dest, src):
+    _copy_sidecar(src, dest)
+    _write_whisper_hf_config(dest, {})
+
+
 def to_transformers_dir(src, dest):
     """src is the llm-init snapshot. dest is written next to it. No Hub."""
     if is_transformers(src):
@@ -269,19 +366,28 @@ def to_transformers_dir(src, dest):
     if not is_ct2(src):
         raise RuntimeError("%s is neither transformers nor CTranslate2 Whisper" % src)
     marker = os.path.join(dest, ".hf-from-ct2")
-    if os.path.isfile(marker) and is_transformers(dest):
-        return dest
+    if is_transformers(dest):
+        if not _hf_config_ok(dest):
+            _repair_hf_dir(dest, src)
+        if _hf_config_ok(dest):
+            open(marker, "w").close()
+            return dest
     cfg_path = os.path.join(src, "config.json")
     if not os.path.isfile(cfg_path):
         raise RuntimeError("CT2 snapshot %s has no config.json" % src)
     with open(cfg_path, encoding="utf-8") as fh:
         config = json.load(fh)
-    state = _to_hf_names(_dump_ct2_state_dict(src), config)
+    raw = _dump_ct2_state_dict(src)
+    state = _to_hf_names(raw, {
+        "encoder_layers": _count_layers(raw, "encoder") or config.get("encoder_layers") or 32,
+        "decoder_layers": _count_layers(raw, "decoder") or config.get("decoder_layers") or 32,
+    })
     os.makedirs(dest, exist_ok=True)
     _copy_sidecar(src, dest)
     from safetensors.numpy import save_file
 
     save_file(state, os.path.join(dest, "model.safetensors"))
+    _write_whisper_hf_config(dest, raw)
     open(marker, "w").close()
     log.info("rebuilt transformers Whisper at %s from CT2 %s", dest, src)
     return dest
