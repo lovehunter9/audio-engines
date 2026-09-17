@@ -19,6 +19,8 @@ GatherElements by batch*T so iGPU short T lived; Arc B>1 speech then died
 CL_OUT_OF_RESOURCES (the flatten is broadcast to [B,B*T,H]). ov22 goes back
 to [B,T,H] and pads clips shorter than 16s with silence so encoder T matches
 a length the plugin already compiles (11s JFK N=1 lived; 1.4s slices died).
+The feature extractor drops trailing silence, so speech B>1 still arrived
+short. intel1 also pads stacked encoder T to 400 frames (16s at 25 Hz).
 Encoder stays per-clip.
 """
 from __future__ import annotations
@@ -74,7 +76,10 @@ ov::Tensor stack_encoder_hiddens(const std::vector<ov::Tensor>& hiddens) {
     OPENVINO_ASSERT(!hiddens.empty(), "stack_encoder_hiddens: empty");
     const size_t n = hiddens.size();
     const size_t hidden_dim = hiddens[0].get_shape().at(2);
-    size_t max_t = 0;
+    // Whisper/Qwen encoder is 25 Hz. 16s is 400 frames. Waveform silence pad
+    // does not survive feature extraction, so pad T here.
+    const size_t min_intel_gpu_encoder_frames = 400;
+    size_t max_t = min_intel_gpu_encoder_frames;
     for (const auto& h : hiddens) {
         OPENVINO_ASSERT(h.get_shape().size() == 3 && h.get_shape()[0] == 1,
                         "encoder hidden states must be [1, T, H]");
