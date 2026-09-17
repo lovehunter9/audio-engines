@@ -1,16 +1,28 @@
-# Require CUDA-built CT2 + CUDA torch; driver-missing on CI runners is OK, CPU-only CT2 is not.
-import ctranslate2 as c
-import torch
+# CUDA-built CT2 required (cublas .so.12 or .so.13 on the loader); CUDA torch is not.
+import subprocess
 
-assert torch.version.cuda, "arm64 fw deps need CUDA torch, got %s" % (torch.__version__,)
+import torch
+import ctranslate2 as c
+
+assert torch.version.cuda is None, (
+    "CUDA torch leaked into the FasterWhisper image: %s" % torch.__version__
+)
+
+loader = subprocess.check_output(["ldconfig", "-p"], text=True)
+if "libcublas.so.12" not in loader and "libcublas.so.13" not in loader:
+    raise SystemExit("fw deps: libcublas.so is not on the loader path")
+if "libcudnn.so" not in loader and "libcudnn_" not in loader:
+    raise SystemExit("fw deps: libcudnn.so is not on the loader path")
+print("loader has libcublas and libcudnn")
+
 try:
     types = set(c.get_supported_compute_types("cuda"))
     assert types, "empty cuda compute types"
-    print("torch", torch.__version__, "cuda", torch.version.cuda)
     print("ct2", c.__version__, "cuda_types", sorted(types))
+    print("cpu torch", torch.__version__, "for TransformersConverter only")
 except Exception as e:
     msg = str(e)
     if "not compiled with CUDA" in msg:
-        raise SystemExit("arm64 fw deps: CPU-only ctranslate2: " + msg)
-    print("torch", torch.__version__, "cuda", torch.version.cuda)
+        raise SystemExit("fw deps: CPU-only ctranslate2: " + msg)
     print("ct2", c.__version__, "cuda_probe deferred_no_driver:", msg)
+    print("cpu torch", torch.__version__, "for TransformersConverter only")

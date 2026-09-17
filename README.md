@@ -209,7 +209,7 @@ passes. For the same reason the build's final import check must go **through**
 
 | Base | Image | Capabilities | Engine / runtime | Status |
 |---|---|---|---|---|
-| `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr in-process vLLM (`Qwen3ASRModel.LLM`) | validated |
+| `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr transformers; one package, two loads | in progress |
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
@@ -223,31 +223,23 @@ passes. For the same reason the build's final import check must go **through**
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2),
 which is why routing is keyed on `AUDIO_BASE` and not on the capability alone.
-Within a base, capabilities that need DIFFERENT models (`align` vs the `stt`
-pair; each of the four pyannote caps) are separate clones — the wrapper serves
-the first match and says so in the log.
+Within a base, capabilities that need DIFFERENT models (each of the four
+pyannote caps, and Qwen ASR vs Align) are separate clones — the wrapper
+serves the first match and says so in the log.
 
 > Keep this table in sync whenever a base is added or its capabilities change.
 
 ### Per-base notes worth knowing before editing
 
-**`qwen`.** One vLLM load serves `stt` (task-based) and `stt_stream` (WebSocket),
-so the two are kept off each other with a plain `threading.Lock` the task worker
-also takes — an `asyncio` lock cannot span the worker thread. vLLM is asked to
-capture only the shapes `1,2,4,8` because capture is where startup has been seen
-to wedge holding the vGPU lock; the field name is probed off `CompilationConfig`
-rather than assumed, and `--enforce-eager` skips graphs altogether if that ever
-needs to be ruled out. Those four shapes were picked when inference here was
-always batch 1, which `--batch-max-spans` above 1 makes untrue: vLLM takes the
-largest entry as its capture ceiling, so a larger group decodes outside the
-graphs. That costs speed, not correctness, and the batching measurements were
-taken that way; matching the list to the cap wants its own measurement. Deps `FROM` is
-arch-selected:
-amd64 keeps the validated cu129 / v0.23 image; arm64 uses the general aarch64
-CUDA track (`vllm …:v0.16.0-cu130`) plus an **arm64-only** post-install patch that
-moves `qwen-asr`'s `_get_data_parser` onto `ProcessingInfo.get_data_parser` /
-`build_data_parser` (v0.15.1 lacks `configs.qwen3_asr` and cannot load ASR).
-Wrapper code is identical across arches.
+**`qwen`.** One CUDA-torch image. `qwen-asr` is a single PyPI package: ASR
+(`Qwen3ASRModel.from_pretrained`) and Align (`Qwen3ForcedAligner.from_pretrained`)
+are two loads of different checkpoints, same recipe as the four pyannote caps
+on one image. Offline `stt` and WebSocket `stt_stream` share one ASR load,
+kept off each other with a `threading.Lock`. Official streaming is gated to
+vLLM; this wrapper runs the same 2s accumulate + prefix-rollback state machine
+on `model.generate`. Chart `ENGINE_ARGS` that named vLLM flags are still parsed
+so they do not show up as leftovers. `qwen-asr` is installed `--no-deps`;
+gradio / flask / sox stay out.
 
 **`fasterwhisper`.** Arch-selected deps (`base-amd64` / `base-arm64`):
 
@@ -404,8 +396,12 @@ does land.
 
 ## Build
 
-**CI (release).** Each `bases/<base>/**` change (or a `v*` tag, or a manual
-`workflow_dispatch`) runs `.github/workflows/<base>-ci.yml`, which builds
+**CI (release).** Listing bases (`qwen`, `fasterwhisper`,
+`pyannote`, `firered`, `breeze`) and `speakrs` keep live triggers. Other
+`<base>-ci.yml` files stay, with `push` / `pull_request` / `workflow_dispatch`
+commented out, so a wrapper edit or `v*` tag does not rebuild them. Each live
+`bases/<base>/**` change (or a `v*` tag, or a manual `workflow_dispatch`) runs
+`.github/workflows/<base>-ci.yml`, which builds
 `linux/amd64` **and** `linux/arm64` (native runners: `ubuntu-latest` +
 `ubuntu-24.04-arm`), merges them into one multi-arch tag on `beclab/audio-<base>`
 (`:latest` + `:sha-<short>`, or `:<tag>` on a release tag). PRs lint only. Uses
@@ -476,6 +472,8 @@ builder; see the `EXTRA` hook in the `Makefile`.
 3. Add the base to `BASES` in `wrapper/catalog.py`, its capability endpoints to
    `_MOUNTS` and its family to `FAMILIES`; that table is what the engine spec,
    the `/v1/models` details and the entrypoint dispatch all read.
-4. `.github/workflows/<base>-ci.yml` — copy `qwen-ci.yml` and change the paths,
-   `base` and `repo`; the build itself is the shared `build-image.yml`.
+4. `.github/workflows/<base>-ci.yml` — copy `qwen-ci.yml` and change the
+   paths, `base` and `repo`; the build itself is the shared `build-image.yml`.
+   Park a non-listing base by commenting out its `on` triggers (leave `speakrs`
+   live).
 5. Update the **Bases** table above.
