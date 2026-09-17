@@ -58,15 +58,28 @@ def compile_module(mod, example, xml, stamp, device):
 
 
 def force_cpu_torch_device():
-    """Official FireRed __init__ hardcodes torch.device('cuda'). Lie for the load."""
+    """Official FireRed __init__ hardcodes torch.device('cuda'). Lie for the load.
+
+    Must stay a type: transformers 5.6 does isinstance(device_map, torch.device).
+    A function replacement raises TypeError and the engine never leaves loading.
+    """
     import torch
 
     real = torch.device
 
-    def device(x="cpu", *args, **kwargs):
-        if x == "cuda" or (isinstance(x, str) and x.startswith("cuda")):
-            return real("cpu")
-        return real(x, *args, **kwargs)
+    class _Meta(type):
+        def __instancecheck__(cls, instance):
+            return isinstance(instance, real)
+
+        def __subclasscheck__(cls, subclass):
+            return subclass is cls or issubclass(subclass, real)
+
+    class device(metaclass=_Meta):
+        def __new__(cls, *args, **kwargs):
+            x = args[0] if args else kwargs.get("type", "cpu")
+            if x == "cuda" or (isinstance(x, str) and x.startswith("cuda")):
+                return real("cpu")
+            return real(*args, **kwargs)
 
     torch.device = device
     return lambda: setattr(torch, "device", real)
