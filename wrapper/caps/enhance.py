@@ -1,4 +1,5 @@
 # Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
+# Intel (AUDIO_BASE=enhancexpu): OpenVINO GPU. torch.xpu SIGSEGV'd; do not use it.
 import contextlib
 import io
 import os
@@ -47,76 +48,183 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = _runtime.state
+_OV_STAMP = ".ov-enhance-v1"
+
+
+def _is_ov_enhance():
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "enhancexpu"
+
+
+def _require_ov_gpu():
+    from .. import ovutil
+
+    device = ovutil.device()
+    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+    if mode.startswith("intel") and device.upper() != "GPU":
+        raise RuntimeError("enhancexpu on %s must use GPU, got %s" % (mode, device))
+    if device.upper() != "GPU":
+        raise RuntimeError("enhancexpu requires OpenVINO GPU; refusing CPU")
+    return device
 
 
 def _speechbrain_device(torch):
-    # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
-    base = (os.environ.get("AUDIO_BASE") or "").strip()
-    if base == "enhancexpu":
-        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
-            raise RuntimeError("enhancexpu requires an Intel XPU; refusing CPU")
-        return "xpu:0"
+    # CUDA pyannote image only. Intel enhance never comes through here.
     return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _sb_classes():
+    try:
+        from speechbrain.inference.enhancement import (
+            WaveformEnhancement, SpectralMaskEnhancement)
+        from speechbrain.inference.separation import SepformerSeparation
+    except ImportError:
+        from speechbrain.pretrained import (
+            WaveformEnhancement, SpectralMaskEnhancement, SepformerSeparation)
+    return [("waveform", WaveformEnhancement),
+            ("spectralmask", SpectralMaskEnhancement),
+            ("sepformer", SepformerSeparation)]
+
+
+def _pcm_numpy(noisy):
+    import numpy as np
+
+    if hasattr(noisy, "detach"):
+        pcm = noisy.detach().cpu().float().numpy()
+    else:
+        pcm = np.asarray(noisy, dtype=np.float32)
+    if pcm.ndim == 1:
+        pcm = pcm[None, :]
+    return pcm
+
+
+def _ov_forward(inner):
+    import torch
+
+    class _Fwd(torch.nn.Module):
+        def __init__(self, mod):
+            super().__init__()
+            self.mod = mod
+
+        def forward(self, noisy):
+            out = self.mod(noisy)
+            if isinstance(out, (tuple, list)):
+                return out[0]
+            return out
+
+    wrapped = _Fwd(inner)
+    wrapped.eval()
+    return wrapped
+
+
+def _ensure_ir(src, model):
+    import openvino as ov
+    import torch
+
+    ir_dir = os.path.join(src, "openvino")
+    xml = os.path.join(ir_dir, "enhance_model.xml")
+    stamp = os.path.join(ir_dir, _OV_STAMP)
+    if os.path.isfile(xml) and os.path.isfile(stamp):
+        return xml
+    inner = getattr(getattr(model, "mods", None), "enhance_model", None)
+    if inner is None:
+        raise RuntimeError("SpeechBrain model has no mods.enhance_model; cannot export OpenVINO")
+    os.makedirs(ir_dir, exist_ok=True)
+    example = torch.zeros(1, SR, dtype=torch.float32)
+    log.info("exporting SpeechBrain enhance_model to OpenVINO IR")
+    ov_model = ov.convert_model(_ov_forward(inner), example_input=example, input=[-1, -1])
+    ov.save_model(ov_model, xml)
+    open(stamp, "w").close()
+    log.info("wrote enhance IR %s", xml)
+    return xml
+
+
+def _load_ov():
+    import openvino as ov
+    from huggingface_hub import snapshot_download
+
+    device = _require_ov_gpu()
+    src = snapshot_download(MODEL_REPO, local_files_only=True,
+                            cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+    ir_dir = os.path.join(src, "openvino")
+    xml = os.path.join(ir_dir, "enhance_model.xml")
+    stamp = os.path.join(ir_dir, _OV_STAMP)
+    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
+        last = None
+        model = None
+        for kind, cls in _sb_classes():
+            try:
+                savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+                log.info("speechbrain %s from_hparams on cpu (OpenVINO export only)", kind)
+                model = cls.from_hparams(source=src, savedir=savedir,
+                                         run_opts={"device": "cpu"})
+                log.info("speechbrain %s cpu load done; exporting IR", kind)
+                xml = _ensure_ir(src, model)
+                break
+            except Exception as e:
+                last = e
+                model = None
+                log.info("model is not a %s class (%s)", kind, e)
+        else:
+            raise last or RuntimeError("no compatible speechbrain enhancement class")
+        del model
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_enhance")
+    os.makedirs(cache, exist_ok=True)
+    compiled = ov.Core().compile_model(xml, device, {"CACHE_DIR": cache})
+    _state.update(compiled=compiled, model=None, kind="waveform-ov", device=device, ready=True)
+    log.info("enhance OpenVINO compiled from %s on %s", xml, device)
+
+
+def _load_torch():
+    from huggingface_hub import snapshot_download
+    import torch
+
+    src = snapshot_download(MODEL_REPO, local_files_only=True,
+                            cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+    last = None
+    for kind, cls in _sb_classes():
+        try:
+            savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+            dev = _speechbrain_device(torch)
+            model = cls.from_hparams(source=src, savedir=savedir,
+                                     run_opts={"device": dev})
+            _state.update(model=model, compiled=None, kind=kind, device=dev, ready=True)
+            log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
+            return
+        except Exception as e:
+            last = e
+            log.info("model is not a %s class (%s)", kind, e)
+    raise last or RuntimeError("no compatible speechbrain enhancement class")
 
 
 def _load():
     try:
-        from huggingface_hub import snapshot_download
-
-        src = snapshot_download(MODEL_REPO, local_files_only=True,
-                                cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
-        # Repos need different inference classes; try each in turn (1.x moved the module path).
-        try:
-            from speechbrain.inference.enhancement import (
-                WaveformEnhancement, SpectralMaskEnhancement)
-            from speechbrain.inference.separation import SepformerSeparation
-        except ImportError:
-            from speechbrain.pretrained import (
-                WaveformEnhancement, SpectralMaskEnhancement, SepformerSeparation)
-        candidates = [("waveform", WaveformEnhancement),
-                      ("spectralmask", SpectralMaskEnhancement),
-                      ("sepformer", SepformerSeparation)]
-        last = None
-        # from_hparams(..., device=xpu) and torch.xpu.get_device_name both
-        # SIGSEGV'd (intel2 ~30s, intel4 ~1.5s). Load on CPU first; only then
-        # ask XPU anything. Arc still may die on .to — the log line before
-        # the move tells us which side.
-        want_xpu = (os.environ.get("AUDIO_BASE") or "").strip() == "enhancexpu"
-        for kind, cls in candidates:
-            try:
-                savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
-                log.info("speechbrain %s from_hparams on cpu", kind)
-                model = cls.from_hparams(source=src, savedir=savedir,
-                                         run_opts={"device": "cpu"})
-                log.info("speechbrain %s cpu load done", kind)
-                # intel2/intel5: model.to("xpu:0") SIGSEGV after cpu load
-                # (exit 139, not catchable). Stay on CPU. The enhancexpu
-                # image still has XPU torch; using it kills the process.
-                if want_xpu:
-                    log.warning(
-                        "enhancexpu: not calling model.to(xpu); "
-                        "to('xpu:0') SIGSEGV'd on this GPU after cpu load")
-                dev = "cpu"
-                _state.update(model=model, kind=kind, device=dev, ready=True)
-                log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
-                return
-            except Exception as e:
-                last = e
-                log.info("model is not a %s class (%s)", kind, e)
-        raise last or RuntimeError("no compatible speechbrain enhancement class")
+        if _is_ov_enhance():
+            _load_ov()
+        else:
+            _load_torch()
     except Exception as e:
         _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("enhance load failed: %s", e)
 
 
+def _run_ov(noisy):
+    import numpy as np
+
+    pcm = _pcm_numpy(noisy)
+    result = _state["compiled"](pcm)
+    out = result[0]
+    return np.asarray(out).reshape(-1).astype("float32")
+
+
 def _run(noisy):
-    # Enhance one (1, time) tensor -> 1-D float32 numpy of the same length.
+    if _state.get("compiled") is not None:
+        return _run_ov(noisy)
     import torch
 
     model = _state["model"]
     # SpeechBrain's enhance_batch has no no-grad of its own, and that dead graph dominates VRAM.
     kind = _state["device"].split(":", 1)[0]
-    amp = AMP and kind in ("cuda", "xpu")
+    amp = AMP and kind in ("cuda",)
     with torch.no_grad(), (torch.autocast(kind, dtype=torch.float16) if amp
                            else contextlib.nullcontext()):
         if _state["kind"] == "sepformer":
@@ -127,10 +235,7 @@ def _run(noisy):
             enhanced = model.enhance_batch(noisy, lengths=lengths)
         arr = enhanced.float().detach().cpu().numpy().reshape(-1)
     try:
-        if _state["device"].startswith("xpu"):
-            torch.xpu.empty_cache()
-        else:
-            torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
     except Exception:
         pass
     return arr

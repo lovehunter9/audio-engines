@@ -1,4 +1,4 @@
-# audio-enhance-xpu deps. SpeechBrain + Intel PyTorch XPU. No CUDA, no OpenVINO, no pyannote.
+# audio-enhance-xpu deps. SpeechBrain export + OpenVINO GPU infer. No CUDA, no torch.xpu.
 # Intel GPU is amd64 only; CI passes a single-arch slice.
 FROM ubuntu:24.04
 
@@ -41,9 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
+# CPU torch is only for the one-time IR export. Inference is OpenVINO GPU.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        torch torchaudio --index-url https://download.pytorch.org/whl/xpu \
+        torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        openvino \
         speechbrain \
         huggingface_hub \
         librosa \
@@ -52,9 +54,9 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "uvicorn>=0.29" \
         python-multipart \
         numpy \
-    && python3 -c "import torch, torchaudio, speechbrain, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
-assert hasattr(torch, 'xpu'), 'torch has no xpu'; \
-print('torch', torch.__version__, 'xpu_attr', True); \
+    && python3 -c "import torch, torchaudio, openvino, speechbrain, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+print('torch', torch.__version__); \
+print('openvino', openvino.__version__); \
 print('speechbrain', getattr(speechbrain, '__version__', 'ok'))"
 
 LABEL org.opencontainers.image.title="audio-enhance-xpu-deps" \
