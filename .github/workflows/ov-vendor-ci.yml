@@ -1,15 +1,11 @@
-# Warm Hub vendor/ovbase for audio-qwen-ov. Manual only — never push, never
-# tag, never PR. A v* tag must not rebuild vendor or qwen-ov-ci would have
-# to follow a new vendor/deps tag every release.
+# Warm Hub ov-vendor. Manual only — never push, never tag, never PR.
+# Image is always lovehunter9/ov-vendor:v0.0.1 (+ :v0.0.1-base). A v*
+# git tag must not rebuild this or qwen-ov-ci would have to follow a new
+# vendor tag every release.
 name: ov-vendor-ci
 
 on:
   workflow_dispatch:
-    inputs:
-      namespace:
-        description: 'Docker Hub namespace'
-        required: false
-        default: beclab
 
 permissions:
   contents: read
@@ -36,15 +32,11 @@ jobs:
           set -euo pipefail
           curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
             | sudo tar -xz -C /usr/local/bin crane
-      - name: build vendor and ovbase if missing
-        env:
-          DH_NAMESPACE: ${{ inputs.namespace || 'beclab' }}
+      - name: build lovehunter9/ov-vendor:v0.0.1 if missing
         run: |
           set -euo pipefail
-          [ -n "${DH_NAMESPACE}" ] || { echo "empty namespace"; exit 1; }
-          REPO="${DH_NAMESPACE}/audio-qwen-ov"
-          VENDOR=$(./scripts/vendor-image.sh ov "$REPO" vendor)-amd64
-          OVBASE=$(./scripts/vendor-image.sh ov "$REPO" ovbase)-amd64
+          VENDOR=$(./scripts/vendor-image.sh ov lovehunter9/ov-vendor vendor)
+          OVBASE=$(./scripts/vendor-image.sh ov lovehunter9/ov-vendor ovbase)
           echo "vendor=$VENDOR"
           echo "ovbase=$OVBASE"
           if crane manifest "$VENDOR" >/dev/null 2>&1 && crane manifest "$OVBASE" >/dev/null 2>&1; then

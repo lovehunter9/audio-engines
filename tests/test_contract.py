@@ -2072,13 +2072,18 @@ class QwenOvDepsCacheTest(unittest.TestCase):
         deps_sh = open(deps_script).read()
         self.assertNotIn("patches", vendor_sh)
         self.assertIn("vendor.Dockerfile", vendor_sh)
+        self.assertIn("v0.0.1", vendor_sh)
+        self.assertIn("lovehunter9/ov-vendor", vendor_sh)
         self.assertIn("vendor.Dockerfile", deps_sh)
         self.assertIn("patches", deps_sh)
         vendor = subprocess.check_output(
             ["bash", script, "ov", "lovehunter9/audio-qwen-ov", "vendor"], text=True).strip()
+        ovbase = subprocess.check_output(
+            ["bash", script, "ov", "lovehunter9/audio-qwen-ov", "ovbase"], text=True).strip()
         deps = subprocess.check_output(
             ["bash", deps_script, "ov", "lovehunter9/audio-qwen-ov"], text=True).strip()
-        self.assertTrue(vendor.startswith("lovehunter9/audio-qwen-ov:vendor-"), vendor)
+        self.assertEqual(vendor, "lovehunter9/ov-vendor:v0.0.1")
+        self.assertEqual(ovbase, "lovehunter9/ov-vendor:v0.0.1-base")
         self.assertTrue(deps.startswith("lovehunter9/audio-qwen-ov:deps-"), deps)
         self.assertNotEqual(vendor.split(":")[-1], deps.split(":")[-1])
 
