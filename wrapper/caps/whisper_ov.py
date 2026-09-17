@@ -88,9 +88,18 @@ def _load():
 
         device = _require_gpu()
         src = _prepare_hf(_locate())
+        ct2_whisper.ensure_whisper_generation_config(src)
+        nested = os.path.join(src, "openvino")
+        stamp = os.path.join(nested, ".genai-lang-to-id")
+        # intel3 reused the intel2 IR and then 200'd empty text. Rebuild once
+        # after lang_to_id lands so GenAI compiles against the new sidecar.
+        if os.path.isdir(nested) and not os.path.isfile(stamp):
+            log.info("dropping stale Whisper IR at %s", nested)
+            shutil.rmtree(nested)
         model_dir = _ensure_ir(src)
         ct2_whisper.ensure_whisper_generation_config(src)
         ct2_whisper.ensure_whisper_generation_config(model_dir)
+        open(os.path.join(model_dir, ".genai-lang-to-id"), "w").close()
         cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_whisper")
         os.makedirs(cache, exist_ok=True)
         pipe = ov_genai.WhisperPipeline(model_dir, device, CACHE_DIR=cache)
