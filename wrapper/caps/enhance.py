@@ -79,10 +79,27 @@ def _load():
                       ("spectralmask", SpectralMaskEnhancement),
                       ("sepformer", SepformerSeparation)]
         last = None
+        load_dev = "cpu" if dev.startswith("xpu") else dev
+        if load_dev != dev:
+            probe = torch.zeros(8, device="xpu")
+            log.info("xpu probe ok device=%s", probe.device)
+            del probe
         for kind, cls in candidates:
             try:
                 savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
-                model = cls.from_hparams(source=src, savedir=savedir, run_opts={"device": dev})
+                # from_hparams(..., device=xpu) SIGSEGV'd on iGPU while mapping
+                # the ckpt. Load on CPU, then move — inference still on XPU.
+                model = cls.from_hparams(source=src, savedir=savedir,
+                                         run_opts={"device": load_dev})
+                if load_dev != dev:
+                    log.info("moving speechbrain %s cpu → %s", kind, dev)
+                    if hasattr(model, "to"):
+                        model.to(dev)
+                    mods = getattr(model, "mods", None)
+                    if mods is not None and hasattr(mods, "to"):
+                        mods.to(dev)
+                    if hasattr(model, "device"):
+                        model.device = torch.device(dev)
                 _state.update(model=model, kind=kind, device=dev, ready=True)
                 log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
                 return
