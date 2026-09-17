@@ -74,7 +74,7 @@ def _ensure_ir(src):
         shutil.rmtree(nested)
     os.makedirs(nested, exist_ok=True)
     cmd = ["optimum-cli", "export", "openvino", "--model", src,
-           "--task", "automatic-speech-recognition", nested]
+           "--task", "automatic-speech-recognition-with-past", nested]
     log.info("exporting Whisper IR: %s", " ".join(cmd))
     subprocess.check_call(cmd)
     if not ct2_whisper.is_whisper_ir(nested):

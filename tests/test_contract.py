@@ -650,6 +650,17 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(seen["kw"].get("language"), "en")
         self.assertNotIn("num_beams", seen["kw"])
 
+    def test_whisper_ir_requires_beam_idx(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, "openvino_encoder_model.xml"), "w").write("<net/>")
+            dec = os.path.join(td, "openvino_decoder_model.xml")
+            open(dec, "w").write("<net><layer name=\"input_ids\"/></net>")
+            self.assertFalse(ct2_whisper.is_whisper_ir(td))
+            open(dec, "w").write("<net><layer name=\"beam_idx\"/></net>")
+            self.assertTrue(ct2_whisper.is_whisper_ir(td))
+
     def test_whisperov_refuses_cpu(self):
         from wrapper.caps import whisper_ov as w
 
