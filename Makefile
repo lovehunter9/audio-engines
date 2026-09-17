@@ -6,7 +6,17 @@ TAG ?= dev
 EXTRA ?=
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 BUILD_DATE := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
-IMAGE := $(REGISTRY)/audio-$(BASE):$(TAG)
+# Hub repo is not always audio-$(BASE): the Qwen OpenVINO image is audio-qwen-ov.
+ifeq ($(BASE),ov)
+HUB_REPO ?= audio-qwen-ov
+else ifeq ($(BASE),whisperov)
+HUB_REPO ?= audio-whisper-ov
+else ifeq ($(BASE),enhancexpu)
+HUB_REPO ?= audio-enhance-xpu
+else
+HUB_REPO ?= audio-$(BASE)
+endif
+IMAGE := $(REGISTRY)/$(HUB_REPO):$(TAG)
 
 .PHONY: build-push build deps lint require-registry
 require-registry:
@@ -18,7 +28,7 @@ PLATFORMS ?= linux/amd64,linux/arm64
 # Publish the deps image if its recipe changed; the tag IS its hash, so this is a no-op until then.
 deps: require-registry
 	@test -f bases/$(BASE)/deps.Dockerfile || exit 0; \
-	IMG=$$(./scripts/deps-image.sh $(BASE) $(REGISTRY)/audio-$(BASE)); \
+	IMG=$$(./scripts/deps-image.sh $(BASE) $(REGISTRY)/$(HUB_REPO)); \
 	if crane manifest "$$IMG" >/dev/null 2>&1 \
 	  && crane digest --platform linux/amd64 "$$IMG" >/dev/null 2>&1 \
 	  && crane digest --platform linux/arm64 "$$IMG" >/dev/null 2>&1; then \
