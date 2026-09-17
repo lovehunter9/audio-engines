@@ -14,7 +14,6 @@ on:
       - 'scripts/deps-image.sh'
       - 'scripts/vendor-image.sh'
       - '.github/workflows/qwen-ov-ci.yml'
-      - '.github/workflows/ov-vendor-ci.yml'
       - '.github/workflows/build-image.yml'
   # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
   workflow_dispatch:
