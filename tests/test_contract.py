@@ -755,6 +755,49 @@ class OpenVINOModeTest(unittest.TestCase):
             self.assertEqual(hf["encoder_layers"], 1)
             self.assertEqual(hf["num_mel_bins"], 1)
 
+    def test_ct2_unfuses_whisper_attention(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy")
+        from wrapper import ct2_whisper
+
+        qkv = np.arange(12, dtype=np.float32).reshape(6, 2)
+        out_w = np.ones((2, 2), np.float32)
+        qkv_b = np.array([1, 2, 3, 4, 5, 6], np.float32)
+        kv = np.arange(8, dtype=np.float32).reshape(4, 2)
+        state = {
+            "encoder/conv1/weight": np.ones((2, 1, 3), np.float32),
+            "encoder/conv1/bias": np.zeros((2,), np.float32),
+            "encoder/conv2/weight": np.ones((2, 2, 3), np.float32),
+            "encoder/conv2/bias": np.zeros((2,), np.float32),
+            "encoder/layer_norm/gamma": np.ones((2,), np.float32),
+            "encoder/layer_norm/beta": np.zeros((2,), np.float32),
+            "encoder/layer_0/self_attention/linear_layers/0/weight": qkv,
+            "encoder/layer_0/self_attention/linear_layers/0/bias": qkv_b,
+            "encoder/layer_0/self_attention/linear_layers/1/weight": out_w,
+            "decoder/embeddings": np.ones((4, 2), np.float32),
+            "decoder/layer_0/attention/linear_layers/0/weight": np.eye(2, dtype=np.float32),
+            "decoder/layer_0/attention/linear_layers/1/weight": kv,
+            "decoder/layer_0/attention/linear_layers/2/weight": out_w,
+        }
+        mapped = ct2_whisper._to_hf_names(state, {"encoder_layers": 1, "decoder_layers": 1})
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.q_proj.weight"].tolist(),
+                         qkv[:2].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.k_proj.weight"].tolist(),
+                         qkv[2:4].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.v_proj.weight"].tolist(),
+                         qkv[4:].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.q_proj.bias"].tolist(),
+                         [1, 2])
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.out_proj.weight"].tolist(),
+                         out_w.tolist())
+        self.assertEqual(mapped["model.decoder.layers.0.encoder_attn.k_proj.weight"].tolist(),
+                         kv[:2].tolist())
+        self.assertEqual(mapped["model.decoder.layers.0.encoder_attn.v_proj.weight"].tolist(),
+                         kv[2:].tolist())
+        self.assertEqual(mapped["proj_out.weight"].shape, (4, 2))
+
     def test_ct2_dest_without_model_type_is_repaired(self):
         from wrapper import ct2_whisper
 

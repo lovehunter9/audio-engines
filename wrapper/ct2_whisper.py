@@ -181,8 +181,19 @@ def _dump_ct2_state_dict(src):
     return state
 
 
+def _split_rows(t, n):
+    """Inverse of CTranslate2 fuse_linear: concatenate along the output axis."""
+    if t is None:
+        return [None] * n
+    if t.shape[0] % n:
+        raise RuntimeError("cannot split %s into %d row blocks" % (t.shape, n))
+    w = t.shape[0] // n
+    return [t[i * w:(i + 1) * w] for i in range(n)]
+
+
 def _to_hf_names(ct2_state, config):
-    # Inverse of CTranslate2's WhisperConverter name map (encoder/decoder layers).
+    # Inverse of CTranslate2 WhisperLoader. Self-attn stores fused QKV in
+    # linear[0] and out in linear[1]. Cross-attn stores Q / fused KV / out.
     n_enc = int(config.get("encoder_layers") or config.get("num_hidden_layers") or 32)
     n_dec = int(config.get("decoder_layers") or config.get("num_hidden_layers") or 32)
     out = {}
@@ -195,6 +206,58 @@ def _to_hf_names(ct2_state, config):
             t = t.transpose(permute)
         out[dst] = t
 
+    def put(dst, t):
+        if t is not None:
+            out[dst] = t
+
+    def attn(prefix, dest, kind):
+        # kind: self (2 linears) or cross (3 linears). A 4-way dump is leftover
+        # from the first converter and is only kept so the tiny unit dump still maps.
+        p = "%s/%s/linear_layers" % (prefix, kind)
+        w0, w1 = ct2_state.get(p + "/0/weight"), ct2_state.get(p + "/1/weight")
+        w2, w3 = ct2_state.get(p + "/2/weight"), ct2_state.get(p + "/3/weight")
+        b0, b1 = ct2_state.get(p + "/0/bias"), ct2_state.get(p + "/1/bias")
+        b2, b3 = ct2_state.get(p + "/2/bias"), ct2_state.get(p + "/3/bias")
+        q = dest + (".self_attn" if kind == "self_attention" else ".encoder_attn")
+        if w3 is not None:
+            put(q + ".q_proj.weight", w0)
+            put(q + ".q_proj.bias", b0)
+            put(q + ".k_proj.weight", w1)
+            put(q + ".k_proj.bias", b1)
+            put(q + ".v_proj.weight", w2)
+            put(q + ".v_proj.bias", b2)
+            put(q + ".out_proj.weight", w3)
+            put(q + ".out_proj.bias", b3)
+            return
+        if kind == "self_attention" and w0 is not None and w0.shape[0] % 3 == 0:
+            qw, kw, vw = _split_rows(w0, 3)
+            qb, kb, vb = _split_rows(b0, 3)
+            put(q + ".q_proj.weight", qw)
+            put(q + ".q_proj.bias", qb)
+            put(q + ".k_proj.weight", kw)
+            put(q + ".k_proj.bias", kb)
+            put(q + ".v_proj.weight", vw)
+            put(q + ".v_proj.bias", vb)
+            put(q + ".out_proj.weight", w1)
+            put(q + ".out_proj.bias", b1)
+            return
+        if kind == "attention" and w1 is not None and w1.shape[0] % 2 == 0:
+            put(q + ".q_proj.weight", w0)
+            put(q + ".q_proj.bias", b0)
+            kw, vw = _split_rows(w1, 2)
+            kb, vb = _split_rows(b1, 2)
+            put(q + ".k_proj.weight", kw)
+            put(q + ".k_proj.bias", kb)
+            put(q + ".v_proj.weight", vw)
+            put(q + ".v_proj.bias", vb)
+            put(q + ".out_proj.weight", w2)
+            put(q + ".out_proj.bias", b2)
+            return
+        put(q + ".q_proj.weight", w0)
+        put(q + ".q_proj.bias", b0)
+        put(q + ".out_proj.weight", w1)
+        put(q + ".out_proj.bias", b1)
+
     take("encoder/conv1/weight", "model.encoder.conv1.weight")
     take("encoder/conv1/bias", "model.encoder.conv1.bias")
     take("encoder/conv2/weight", "model.encoder.conv2.weight")
@@ -205,14 +268,7 @@ def _to_hf_names(ct2_state, config):
     for i in range(n_enc):
         p = "encoder/layer_%d" % i
         q = "model.encoder.layers.%d" % i
-        take("%s/self_attention/linear_layers/0/weight" % p, "%s.self_attn.q_proj.weight" % q)
-        take("%s/self_attention/linear_layers/0/bias" % p, "%s.self_attn.q_proj.bias" % q)
-        take("%s/self_attention/linear_layers/1/weight" % p, "%s.self_attn.k_proj.weight" % q)
-        take("%s/self_attention/linear_layers/1/bias" % p, "%s.self_attn.k_proj.bias" % q)
-        take("%s/self_attention/linear_layers/2/weight" % p, "%s.self_attn.v_proj.weight" % q)
-        take("%s/self_attention/linear_layers/2/bias" % p, "%s.self_attn.v_proj.bias" % q)
-        take("%s/self_attention/linear_layers/3/weight" % p, "%s.self_attn.out_proj.weight" % q)
-        take("%s/self_attention/linear_layers/3/bias" % p, "%s.self_attn.out_proj.bias" % q)
+        attn(p, q, "self_attention")
         take("%s/ffn/linear_0/weight" % p, "%s.fc1.weight" % q)
         take("%s/ffn/linear_0/bias" % p, "%s.fc1.bias" % q)
         take("%s/ffn/linear_1/weight" % p, "%s.fc2.weight" % q)
@@ -228,22 +284,8 @@ def _to_hf_names(ct2_state, config):
     for i in range(n_dec):
         p = "decoder/layer_%d" % i
         q = "model.decoder.layers.%d" % i
-        take("%s/self_attention/linear_layers/0/weight" % p, "%s.self_attn.q_proj.weight" % q)
-        take("%s/self_attention/linear_layers/0/bias" % p, "%s.self_attn.q_proj.bias" % q)
-        take("%s/self_attention/linear_layers/1/weight" % p, "%s.self_attn.k_proj.weight" % q)
-        take("%s/self_attention/linear_layers/1/bias" % p, "%s.self_attn.k_proj.bias" % q)
-        take("%s/self_attention/linear_layers/2/weight" % p, "%s.self_attn.v_proj.weight" % q)
-        take("%s/self_attention/linear_layers/2/bias" % p, "%s.self_attn.v_proj.bias" % q)
-        take("%s/self_attention/linear_layers/3/weight" % p, "%s.self_attn.out_proj.weight" % q)
-        take("%s/self_attention/linear_layers/3/bias" % p, "%s.self_attn.out_proj.bias" % q)
-        take("%s/attention/linear_layers/0/weight" % p, "%s.encoder_attn.q_proj.weight" % q)
-        take("%s/attention/linear_layers/0/bias" % p, "%s.encoder_attn.q_proj.bias" % q)
-        take("%s/attention/linear_layers/1/weight" % p, "%s.encoder_attn.k_proj.weight" % q)
-        take("%s/attention/linear_layers/1/bias" % p, "%s.encoder_attn.k_proj.bias" % q)
-        take("%s/attention/linear_layers/2/weight" % p, "%s.encoder_attn.v_proj.weight" % q)
-        take("%s/attention/linear_layers/2/bias" % p, "%s.encoder_attn.v_proj.bias" % q)
-        take("%s/attention/linear_layers/3/weight" % p, "%s.encoder_attn.out_proj.weight" % q)
-        take("%s/attention/linear_layers/3/bias" % p, "%s.encoder_attn.out_proj.bias" % q)
+        attn(p, q, "self_attention")
+        attn(p, q, "attention")
         take("%s/ffn/linear_0/weight" % p, "%s.fc1.weight" % q)
         take("%s/ffn/linear_0/bias" % p, "%s.fc1.bias" % q)
         take("%s/ffn/linear_1/weight" % p, "%s.fc2.weight" % q)
@@ -255,6 +297,8 @@ def _to_hf_names(ct2_state, config):
         take("%s/ffn/layer_norm/gamma" % p, "%s.final_layer_norm.weight" % q)
         take("%s/ffn/layer_norm/beta" % p, "%s.final_layer_norm.bias" % q)
     take("decoder/projection/weight", "proj_out.weight")
+    if "proj_out.weight" not in out and "model.decoder.embed_tokens.weight" in out:
+        out["proj_out.weight"] = out["model.decoder.embed_tokens.weight"]
     if len(out) < 8:
         raise RuntimeError(
             "CT2 name map matched %d tensors (names like %s); converter needs a fuller dump"
@@ -456,12 +500,20 @@ def to_transformers_dir(src, dest):
     if not is_ct2(src):
         raise RuntimeError("%s is neither transformers nor CTranslate2 Whisper" % src)
     marker = os.path.join(dest, ".hf-from-ct2")
-    if is_transformers(dest):
+    stamp = os.path.join(dest, ".hf-from-ct2-v2")
+    if is_transformers(dest) and os.path.isfile(stamp) and _hf_config_ok(dest):
+        ensure_whisper_generation_config(dest)
+        return dest
+    if is_transformers(dest) and os.path.isfile(marker) and not os.path.isfile(stamp):
+        log.info("dropping fused-QKV CT2->HF dir %s", dest)
+        shutil.rmtree(dest)
+    elif is_transformers(dest):
         if not _hf_config_ok(dest):
             _repair_hf_dir(dest, src)
         if _hf_config_ok(dest):
             ensure_whisper_generation_config(dest)
             open(marker, "w").close()
+            open(stamp, "w").close()
             return dest
     cfg_path = os.path.join(src, "config.json")
     if not os.path.isfile(cfg_path):
@@ -480,5 +532,6 @@ def to_transformers_dir(src, dest):
     save_file(state, os.path.join(dest, "model.safetensors"))
     _write_whisper_hf_config(dest, raw)
     open(marker, "w").close()
+    open(stamp, "w").close()
     log.info("rebuilt transformers Whisper at %s from CT2 %s", dest, src)
     return dest
