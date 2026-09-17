@@ -30,6 +30,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 jobs:
   lint:
@@ -243,6 +244,11 @@ jobs:
           push: true
           tags: ${{ steps.deps.outputs.base_image }}
           provenance: false
+          # Wrapper-only publishes reuse Hub deps and never reach here.
+          # When deps.Dockerfile / patches actually change, pick up the
+          # previous BuildKit layers instead of compiling OpenVINO GenAI cold.
+          cache-from: type=gha,scope=deps-${{ inputs.base }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=deps-${{ inputs.base }}-${{ matrix.arch }}
 
       - name: docker build (single-arch slice)
         if: needs.meta.outputs.kind == 'docker'
