@@ -19,6 +19,9 @@ for f in "$dir"/probe_*.py "$dir"/collect_*.py \
     [ -f "$f" ] || continue
     hash_inputs="$hash_inputs $f"
 done
+if [ -f "$dir/vendor.Dockerfile" ]; then
+    hash_inputs="$hash_inputs $dir/vendor.Dockerfile"
+fi
 if [ -d "$dir/patches" ]; then
     while IFS= read -r f; do
         hash_inputs="$hash_inputs $f"
