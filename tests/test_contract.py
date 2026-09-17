@@ -702,7 +702,66 @@ class OpenVINOModeTest(unittest.TestCase):
             self.assertNotIn("huggingface_hub", src)
             with self.assertRaises((RuntimeError, ImportError)):
                 ct2_whisper.to_transformers_dir(td, os.path.join(td, "hf-from-ct2"))
+            self.assertNotIn("import ctranslate2", src)
+            self.assertIn("_read_ct2_bin", src)
 
+    def test_ct2_whisper_reads_model_bin_without_libctranslate2(self):
+        import struct
+
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy")
+        from wrapper import ct2_whisper
+
+        def write_string(fh, s):
+            b = s.encode("utf-8") + b"\0"
+            fh.write(struct.pack("<H", len(b)))
+            fh.write(b)
+
+        dtypes = {np.dtype("float32"): 0, np.dtype("int8"): 1}
+        tensors = {
+            "encoder/conv1/weight": np.ones((2, 1, 3), np.float32),
+            "encoder/conv1/bias": np.zeros((2,), np.float32),
+            "encoder/conv2/weight": np.ones((2, 2, 3), np.float32),
+            "encoder/conv2/bias": np.zeros((2,), np.float32),
+            "encoder/layer_norm/gamma": np.ones((2,), np.float32),
+            "encoder/layer_norm/beta": np.zeros((2,), np.float32),
+            "decoder/embeddings": np.ones((4, 2), np.float32),
+            "decoder/projection/weight": np.ones((4, 2), np.float32),
+            "encoder/layer_0/self_attention/linear_layers/0/weight": np.array(
+                [[10, -10], [20, 0]], np.int8),
+            "encoder/layer_0/self_attention/linear_layers/0/weight_scale": np.array(
+                [2.0, 4.0], np.float32),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            bin_path = os.path.join(td, "model.bin")
+            with open(bin_path, "wb") as fh:
+                fh.write(struct.pack("<I", 6))
+                write_string(fh, "WhisperSpec")
+                fh.write(struct.pack("<I", 1))
+                fh.write(struct.pack("<I", len(tensors)))
+                for name, arr in tensors.items():
+                    arr = np.ascontiguousarray(arr)
+                    write_string(fh, name)
+                    fh.write(struct.pack("B", arr.ndim))
+                    for dim in arr.shape:
+                        fh.write(struct.pack("<I", int(dim)))
+                    fh.write(struct.pack("B", dtypes[arr.dtype]))
+                    fh.write(struct.pack("<I", arr.nbytes))
+                    fh.write(arr.tobytes())
+                fh.write(struct.pack("<I", 0))
+            with open(os.path.join(td, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"encoder_layers": 1, "decoder_layers": 0}, fh)
+            dumped = ct2_whisper._dump_ct2_state_dict(td)
+            q = dumped["encoder/layer_0/self_attention/linear_layers/0/weight"]
+            self.assertEqual(q.dtype, np.float32)
+            self.assertTrue(np.allclose(q, np.array([[5.0, -5.0], [5.0, 0.0]], np.float32)))
+            mapped = ct2_whisper._to_hf_names(dumped, {"encoder_layers": 1, "decoder_layers": 0})
+            self.assertGreaterEqual(len(mapped), 8)
+            self.assertEqual(mapped["model.encoder.conv1.weight"].shape, (2, 1, 3))
+            self.assertTrue(np.allclose(
+                mapped["model.encoder.layers.0.self_attn.q_proj.weight"], q))
 
     def test_device_flag_overrides_mode(self):
         from wrapper.caps import stt_stream as q
