@@ -591,6 +591,29 @@ class OpenVINOModeTest(unittest.TestCase):
                                               "REQUIRED_GPU_MEMORY": "0"}, clear=False):
                 self.assertEqual(q._ov_device(), "CPU")
 
+    def test_whisperov_generate_sends_a_float_list(self):
+        import types
+
+        import torch
+
+        from wrapper.caps import whisper_ov as w
+
+        seen = {}
+
+        def fake_generate(raw, **kw):
+            seen["raw"] = raw
+            seen["kw"] = kw
+            return types.SimpleNamespace(texts=["hello"], text="hello")
+
+        w._state["pipeline"] = types.SimpleNamespace(generate=fake_generate)
+        out = w._generate(torch.tensor([0.0, 0.25, -0.5]), "transcribe", "en")
+        self.assertEqual(out, "hello")
+        self.assertIsInstance(seen["raw"], list)
+        self.assertEqual(seen["raw"], [0.0, 0.25, -0.5])
+        self.assertTrue(all(isinstance(x, float) for x in seen["raw"]))
+        self.assertEqual(seen["kw"].get("task"), "transcribe")
+        self.assertEqual(seen["kw"].get("language"), "en")
+
     def test_whisperov_refuses_cpu(self):
         from wrapper.caps import whisper_ov as w
 
