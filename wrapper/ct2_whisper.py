@@ -210,14 +210,21 @@ def _to_hf_names(ct2_state, config):
         if t is not None:
             out[dst] = t
 
+    def lin(prefix, kind, i, suffix):
+        # CT2 visit_spec writes list i as name_i (linear_0), not linear_layers/0.
+        for pat in ("%s/%s/linear_%d/%s", "%s/%s/linear_layers/%d/%s"):
+            t = ct2_state.get(pat % (prefix, kind, i, suffix))
+            if t is not None:
+                return t
+        return None
+
     def attn(prefix, dest, kind):
         # kind: self (2 linears) or cross (3 linears). A 4-way dump is leftover
         # from the first converter and is only kept so the tiny unit dump still maps.
-        p = "%s/%s/linear_layers" % (prefix, kind)
-        w0, w1 = ct2_state.get(p + "/0/weight"), ct2_state.get(p + "/1/weight")
-        w2, w3 = ct2_state.get(p + "/2/weight"), ct2_state.get(p + "/3/weight")
-        b0, b1 = ct2_state.get(p + "/0/bias"), ct2_state.get(p + "/1/bias")
-        b2, b3 = ct2_state.get(p + "/2/bias"), ct2_state.get(p + "/3/bias")
+        w0, w1 = lin(prefix, kind, 0, "weight"), lin(prefix, kind, 1, "weight")
+        w2, w3 = lin(prefix, kind, 2, "weight"), lin(prefix, kind, 3, "weight")
+        b0, b1 = lin(prefix, kind, 0, "bias"), lin(prefix, kind, 1, "bias")
+        b2, b3 = lin(prefix, kind, 2, "bias"), lin(prefix, kind, 3, "bias")
         q = dest + (".self_attn" if kind == "self_attention" else ".encoder_attn")
         if w3 is not None:
             put(q + ".q_proj.weight", w0)
@@ -263,6 +270,7 @@ def _to_hf_names(ct2_state, config):
     take("encoder/conv2/weight", "model.encoder.conv2.weight")
     take("encoder/conv2/bias", "model.encoder.conv2.bias")
     take("encoder/position_encodings", "model.encoder.embed_positions.weight")
+    take("encoder/position_encodings/encodings", "model.encoder.embed_positions.weight")
     take("encoder/layer_norm/gamma", "model.encoder.layer_norm.weight")
     take("encoder/layer_norm/beta", "model.encoder.layer_norm.bias")
     for i in range(n_enc):
@@ -279,6 +287,7 @@ def _to_hf_names(ct2_state, config):
         take("%s/ffn/layer_norm/beta" % p, "%s.final_layer_norm.bias" % q)
     take("decoder/embeddings", "model.decoder.embed_tokens.weight")
     take("decoder/position_encodings", "model.decoder.embed_positions.weight")
+    take("decoder/position_encodings/encodings", "model.decoder.embed_positions.weight")
     take("decoder/layer_norm/gamma", "model.decoder.layer_norm.weight")
     take("decoder/layer_norm/beta", "model.decoder.layer_norm.bias")
     for i in range(n_dec):
@@ -308,8 +317,11 @@ def _to_hf_names(ct2_state, config):
 
 def _count_layers(state, prefix):
     n = 0
-    key = "%s/layer_%d/self_attention/linear_layers/0/weight"
-    while key % (prefix, n) in state:
+    keys = (
+        "%s/layer_%d/self_attention/linear_0/weight",
+        "%s/layer_%d/self_attention/linear_layers/0/weight",
+    )
+    while any((k % (prefix, n)) in state for k in keys):
         n += 1
     return n
 
@@ -500,7 +512,7 @@ def to_transformers_dir(src, dest):
     if not is_ct2(src):
         raise RuntimeError("%s is neither transformers nor CTranslate2 Whisper" % src)
     marker = os.path.join(dest, ".hf-from-ct2")
-    stamp = os.path.join(dest, ".hf-from-ct2-v2")
+    stamp = os.path.join(dest, ".hf-from-ct2-v3")
     if is_transformers(dest) and os.path.isfile(stamp) and _hf_config_ok(dest):
         ensure_whisper_generation_config(dest)
         return dest
@@ -521,6 +533,7 @@ def to_transformers_dir(src, dest):
     with open(cfg_path, encoding="utf-8") as fh:
         config = json.load(fh)
     raw = _dump_ct2_state_dict(src)
+    log.info("CT2 names sample %s", list(raw)[:24])
     state = _to_hf_names(raw, {
         "encoder_layers": _count_layers(raw, "encoder") or config.get("encoder_layers") or 32,
         "decoder_layers": _count_layers(raw, "decoder") or config.get("decoder_layers") or 32,
