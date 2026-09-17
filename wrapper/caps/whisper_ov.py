@@ -125,6 +125,16 @@ def _decode(data, filename):
             pass
 
 
+def _pcm_list(audio):
+    # WhisperPipeline.generate wants Sequence[float]. decode_mono returns a
+    # torch tensor; pybind rejects that type (and numpy) rather than reading it.
+    if hasattr(audio, "detach"):
+        audio = audio.detach().cpu().float().reshape(-1)
+    elif hasattr(audio, "reshape"):
+        audio = audio.reshape(-1)
+    return [float(x) for x in audio]
+
+
 def _generate(audio, task, language):
     pipe = _state["pipeline"]
     kw = {"task": task}
@@ -133,7 +143,7 @@ def _generate(audio, task, language):
         kw["language"] = lang
     if BEAM_SIZE:
         kw["num_beams"] = BEAM_SIZE
-    result = pipe.generate(audio, **kw)
+    result = pipe.generate(_pcm_list(audio), **kw)
     texts = getattr(result, "texts", None)
     if texts:
         return (texts[0] or "").strip()
