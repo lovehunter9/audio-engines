@@ -362,6 +362,7 @@ def _whisper_generation_config():
         "no_timestamps_token_id": 50364,
         "max_length": 448,
         "begin_suppress_tokens": [220, 50257],
+        "forced_decoder_ids": [[1, None], [2, 50360]],
     }
 
 
