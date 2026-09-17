@@ -34,7 +34,6 @@ def compile_module(mod, example, xml, stamp, device):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np."""
     import numpy as np
     import openvino as ov
-    import torch
 
     os.makedirs(os.path.dirname(xml), exist_ok=True)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
