@@ -1,5 +1,6 @@
-# Warm Hub vendor/ovbase for audio-qwen-ov. Separate concurrency from
-# qwen-ov-ci so a vendor warm does not cancel an in-flight compile.
+# Warm Hub vendor/ovbase for audio-qwen-ov. Manual only — never push, never
+# tag, never PR. A v* tag must not rebuild vendor or qwen-ov-ci would have
+# to follow a new vendor/deps tag every release.
 name: ov-vendor-ci
 
 on:
