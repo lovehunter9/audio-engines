@@ -1,4 +1,4 @@
-# audio-enhance-xpu deps. SpeechBrain export + OpenVINO GPU infer. No CUDA, no torch.xpu.
+# audio-enhance-ov deps. SpeechBrain export + OpenVINO GPU infer.
 # Intel GPU is amd64 only; CI passes a single-arch slice.
 FROM ubuntu:24.04
 
@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
-# CPU torch is only for the one-time IR export. Inference is OpenVINO GPU.
+# torch is only for the one-time IR export. Inference is OpenVINO GPU.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
@@ -59,5 +59,5 @@ print('torch', torch.__version__); \
 print('openvino', openvino.__version__); \
 print('speechbrain', getattr(speechbrain, '__version__', 'ok'))"
 
-LABEL org.opencontainers.image.title="audio-enhance-xpu-deps" \
+LABEL org.opencontainers.image.title="audio-enhance-ov-deps" \
       audio.compute_runtime="26.22.38646.4"
