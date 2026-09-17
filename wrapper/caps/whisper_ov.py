@@ -156,8 +156,13 @@ def _generate(audio, task, language):
         kw["language"] = lang
     if BEAM_SIZE:
         kw["num_beams"] = BEAM_SIZE
-    result = pipe.generate(_pcm_list(audio), **kw)
+    pcm = _pcm_list(audio)
+    log.info("whisper generate n=%d min=%.4f max=%.4f kw=%s",
+             len(pcm), min(pcm) if pcm else 0.0, max(pcm) if pcm else 0.0, kw)
+    result = pipe.generate(pcm, **kw)
     texts = getattr(result, "texts", None)
+    log.info("whisper generate result=%r texts=%r text=%r",
+             result, texts, getattr(result, "text", None))
     if texts:
         return (texts[0] or "").strip()
     t = getattr(result, "text", None)
