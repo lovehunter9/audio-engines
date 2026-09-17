@@ -208,6 +208,26 @@ def _load():
         log.exception("enhance load failed: %s", e)
 
 
+def _align_mask(mask, spec):
+    # SpeechBrain STFT is [B, time, freq, 2]. Official mask is [B, time, freq, 1].
+    # OpenVINO may return [B, freq, time] or drop a singleton.
+    if spec.ndim != 4 or spec.shape[-1] != 2:
+        raise RuntimeError("unexpected STFT spec %s" % (tuple(spec.shape),))
+    _, t, f, _ = spec.shape
+    if mask.ndim == 4 and mask.shape[-1] == 1:
+        mask = mask.squeeze(-1)
+    if mask.ndim == 2:
+        if tuple(mask.shape) == (t, f):
+            mask = mask.unsqueeze(0)
+        elif tuple(mask.shape) == (f, t):
+            mask = mask.transpose(0, 1).unsqueeze(0)
+    if mask.ndim == 3 and mask.shape[1] == f and mask.shape[2] == t:
+        mask = mask.transpose(1, 2)
+    if mask.ndim != 3 or mask.shape[1] != t or mask.shape[2] != f:
+        raise RuntimeError("mask %s vs spec %s" % (tuple(mask.shape), tuple(spec.shape)))
+    return mask.unsqueeze(-1)
+
+
 def _run_ov(noisy):
     import numpy as np
     import torch
@@ -220,10 +240,9 @@ def _run_ov(noisy):
         log_mag = inner.extract_feats(spec)
     mask = np.asarray(_state["compiled"](log_mag.numpy())[0])
     mask = torch.from_numpy(np.ascontiguousarray(mask)).clamp(0, 1)
-    while mask.ndim < spec.ndim:
-        mask = mask.unsqueeze(-1)
-    if mask.shape[-1] != spec.shape[-1] and spec.shape[-1] == 2:
-        mask = mask.unsqueeze(-1)
+    log.info("enhance mask %s spec %s log_mag %s", tuple(mask.shape),
+             tuple(spec.shape), tuple(log_mag.shape))
+    mask = _align_mask(mask, spec)
     w = float(getattr(inner, "mask_weight", 0.99))
     with torch.no_grad():
         out = inner.istft(w * mask * spec + (1.0 - w) * spec)

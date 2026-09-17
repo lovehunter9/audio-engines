@@ -286,6 +286,7 @@ def _to_hf_names(ct2_state, config):
         take("%s/ffn/layer_norm/gamma" % p, "%s.final_layer_norm.weight" % q)
         take("%s/ffn/layer_norm/beta" % p, "%s.final_layer_norm.bias" % q)
     take("decoder/embeddings", "model.decoder.embed_tokens.weight")
+    take("decoder/embeddings/weight", "model.decoder.embed_tokens.weight")
     take("decoder/position_encodings", "model.decoder.embed_positions.weight")
     take("decoder/position_encodings/encodings", "model.decoder.embed_positions.weight")
     take("decoder/layer_norm/gamma", "model.decoder.layer_norm.weight")
@@ -328,7 +329,7 @@ def _count_layers(state, prefix):
 
 def _whisper_hf_config(state):
     # Systran config.json is CT2 (alignment_heads / suppress_ids), not transformers.
-    embed = state.get("decoder/embeddings")
+    embed = state.get("decoder/embeddings/weight") or state.get("decoder/embeddings")
     enc_pos = state.get("encoder/position_encodings")
     dec_pos = state.get("decoder/position_encodings")
     conv1 = state.get("encoder/conv1/weight")

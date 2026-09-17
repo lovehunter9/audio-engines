@@ -691,6 +691,19 @@ class OpenVINOModeTest(unittest.TestCase):
 
             self.assertEqual(enhance._speechbrain_device(CpuOnly), "cpu")
 
+    def test_enhance_mask_follows_stft_time_freq(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper.caps import enhance
+
+        spec = torch.zeros(1, 11, 257, 2)
+        aligned = enhance._align_mask(torch.rand(1, 257, 11), spec)
+        self.assertEqual(tuple(aligned.shape), (1, 11, 257, 1))
+        aligned = enhance._align_mask(torch.rand(1, 11, 257), spec)
+        self.assertEqual(tuple(aligned.shape), (1, 11, 257, 1))
+
     def test_ct2_whisper_never_fetches_a_second_repo(self):
         import inspect
         import tempfile
