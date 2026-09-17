@@ -90,19 +90,14 @@ def _load():
                 model = cls.from_hparams(source=src, savedir=savedir,
                                          run_opts={"device": "cpu"})
                 log.info("speechbrain %s cpu load done", kind)
-                dev = "cpu"
+                # intel2/intel5: model.to("xpu:0") SIGSEGV after cpu load
+                # (exit 139, not catchable). Stay on CPU. The enhancexpu
+                # image still has XPU torch; using it kills the process.
                 if want_xpu:
-                    log.info("speechbrain %s probing xpu after cpu load", kind)
-                    dev = _speechbrain_device(torch)
-                    log.info("moving speechbrain %s cpu → %s", kind, dev)
-                    if hasattr(model, "to"):
-                        model.to(dev)
-                    log.info("speechbrain %s move done", kind)
-                    mods = getattr(model, "mods", None)
-                    if mods is not None and hasattr(mods, "to"):
-                        mods.to(dev)
-                    if hasattr(model, "device"):
-                        model.device = torch.device(dev)
+                    log.warning(
+                        "enhancexpu: not calling model.to(xpu); "
+                        "to('xpu:0') SIGSEGV'd on this GPU after cpu load")
+                dev = "cpu"
                 _state.update(model=model, kind=kind, device=dev, ready=True)
                 log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
                 return
