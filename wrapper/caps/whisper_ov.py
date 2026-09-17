@@ -161,8 +161,9 @@ def _generate(audio, task, language):
              len(pcm), min(pcm) if pcm else 0.0, max(pcm) if pcm else 0.0, kw)
     result = pipe.generate(pcm, **kw)
     texts = getattr(result, "texts", None)
-    log.info("whisper generate result=%r texts=%r text=%r",
-             result, texts, getattr(result, "text", None))
+    log.info("whisper generate result=%r texts=%r text=%r tokens=%r scores=%r",
+             result, texts, getattr(result, "text", None),
+             getattr(result, "tokens", None), getattr(result, "scores", None))
     if texts:
         return (texts[0] or "").strip()
     t = getattr(result, "text", None)
