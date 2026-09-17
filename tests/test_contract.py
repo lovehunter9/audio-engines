@@ -630,6 +630,7 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertTrue(all(isinstance(x, float) for x in seen["raw"]))
         self.assertEqual(seen["kw"].get("task"), "transcribe")
         self.assertEqual(seen["kw"].get("language"), "en")
+        self.assertNotIn("num_beams", seen["kw"])
 
     def test_whisperov_refuses_cpu(self):
         from wrapper.caps import whisper_ov as w
