@@ -318,6 +318,53 @@ def _whisper_hf_config(state):
     }
 
 
+# openai/whisper-large-v3. GenAI WhisperPipeline::generate reads this map
+# and 500s multilingual models when it is missing.
+_WHISPER_LANG_TO_ID = {
+    "<|af|>": 50327, "<|am|>": 50334, "<|ar|>": 50272, "<|as|>": 50350,
+    "<|az|>": 50304, "<|ba|>": 50355, "<|be|>": 50330, "<|bg|>": 50292,
+    "<|bn|>": 50302, "<|bo|>": 50347, "<|br|>": 50309, "<|bs|>": 50315,
+    "<|ca|>": 50270, "<|cs|>": 50283, "<|cy|>": 50297, "<|da|>": 50285,
+    "<|de|>": 50261, "<|el|>": 50281, "<|en|>": 50259, "<|es|>": 50262,
+    "<|et|>": 50307, "<|eu|>": 50310, "<|fa|>": 50300, "<|fi|>": 50277,
+    "<|fo|>": 50338, "<|fr|>": 50265, "<|gl|>": 50319, "<|gu|>": 50333,
+    "<|haw|>": 50352, "<|ha|>": 50354, "<|he|>": 50279, "<|hi|>": 50276,
+    "<|hr|>": 50291, "<|ht|>": 50339, "<|hu|>": 50286, "<|hy|>": 50312,
+    "<|id|>": 50275, "<|is|>": 50311, "<|it|>": 50274, "<|ja|>": 50266,
+    "<|jw|>": 50356, "<|ka|>": 50329, "<|kk|>": 50316, "<|km|>": 50323,
+    "<|kn|>": 50306, "<|ko|>": 50264, "<|la|>": 50294, "<|lb|>": 50345,
+    "<|ln|>": 50353, "<|lo|>": 50336, "<|lt|>": 50293, "<|lv|>": 50301,
+    "<|mg|>": 50349, "<|mi|>": 50295, "<|mk|>": 50308, "<|ml|>": 50296,
+    "<|mn|>": 50314, "<|mr|>": 50320, "<|ms|>": 50282, "<|mt|>": 50343,
+    "<|my|>": 50346, "<|ne|>": 50313, "<|nl|>": 50271, "<|nn|>": 50342,
+    "<|no|>": 50288, "<|oc|>": 50328, "<|pa|>": 50321, "<|pl|>": 50269,
+    "<|ps|>": 50340, "<|pt|>": 50267, "<|ro|>": 50284, "<|ru|>": 50263,
+    "<|sa|>": 50344, "<|sd|>": 50332, "<|si|>": 50322, "<|sk|>": 50298,
+    "<|sl|>": 50305, "<|sn|>": 50324, "<|so|>": 50326, "<|sq|>": 50317,
+    "<|sr|>": 50303, "<|su|>": 50357, "<|sv|>": 50273, "<|sw|>": 50318,
+    "<|ta|>": 50287, "<|te|>": 50299, "<|tg|>": 50331, "<|th|>": 50289,
+    "<|tk|>": 50341, "<|tl|>": 50348, "<|tr|>": 50268, "<|tt|>": 50351,
+    "<|uk|>": 50280, "<|ur|>": 50290, "<|uz|>": 50337, "<|vi|>": 50278,
+    "<|yi|>": 50335, "<|yo|>": 50325, "<|yue|>": 50358, "<|zh|>": 50260,
+}
+_WHISPER_TASK_TO_ID = {"transcribe": 50360, "translate": 50359}
+
+
+def _whisper_generation_config():
+    return {
+        "bos_token_id": 50257,
+        "decoder_start_token_id": 50258,
+        "eos_token_id": 50257,
+        "pad_token_id": 50257,
+        "is_multilingual": True,
+        "lang_to_id": _WHISPER_LANG_TO_ID,
+        "task_to_id": _WHISPER_TASK_TO_ID,
+        "no_timestamps_token_id": 50364,
+        "max_length": 448,
+        "begin_suppress_tokens": [220, 50257],
+    }
+
+
 def _hf_config_ok(path):
     cfg = os.path.join(path, "config.json")
     try:
@@ -325,7 +372,36 @@ def _hf_config_ok(path):
             data = json.load(fh)
     except Exception:
         return False
-    return data.get("model_type") == "whisper"
+    if data.get("model_type") != "whisper":
+        return False
+    return _generation_config_ok(path)
+
+
+def _generation_config_ok(path):
+    gen = os.path.join(path, "generation_config.json")
+    try:
+        with open(gen, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        return False
+    return bool(data.get("lang_to_id")) and bool(data.get("task_to_id"))
+
+
+def ensure_whisper_generation_config(dest):
+    """Write lang_to_id into dest and dest/openvino (PVC reuse keeps the IR)."""
+    if not dest or not os.path.isdir(dest):
+        return
+    data = _whisper_generation_config()
+    targets = [dest]
+    nested = os.path.join(dest, "openvino")
+    if os.path.isdir(nested):
+        targets.append(nested)
+    for path in targets:
+        if _generation_config_ok(path):
+            continue
+        with open(os.path.join(path, "generation_config.json"), "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
 
 
 def _write_whisper_hf_config(dest, state):
@@ -352,6 +428,7 @@ def _write_whisper_hf_config(dest, state):
                 "sampling_rate": 16000,
             }, fh, indent=2)
             fh.write("\n")
+    ensure_whisper_generation_config(dest)
 
 
 def _repair_hf_dir(dest, src):
@@ -370,6 +447,7 @@ def to_transformers_dir(src, dest):
         if not _hf_config_ok(dest):
             _repair_hf_dir(dest, src)
         if _hf_config_ok(dest):
+            ensure_whisper_generation_config(dest)
             open(marker, "w").close()
             return dest
     cfg_path = os.path.join(src, "config.json")

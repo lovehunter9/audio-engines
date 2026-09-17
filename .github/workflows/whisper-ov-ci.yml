@@ -24,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: whisper-ov-ci-${{ github.ref }}
