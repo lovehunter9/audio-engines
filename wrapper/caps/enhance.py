@@ -48,7 +48,10 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = _runtime.state
-_OV_STAMP = ".ov-enhance-v1"
+_OV_STAMP = ".ov-enhance-v2"
+# SpeechBrain's STFT bakes n_fft against the traced length. 1s IR 500s on 11s JFK
+# (in_fft_dim). Export a 30s window (same as CHUNK_S when no CUDA quota) and pad.
+_OV_WINDOW = 30 * SR
 
 
 def _is_ov_enhance():
@@ -129,9 +132,11 @@ def _ensure_ir(src, model):
     if inner is None:
         raise RuntimeError("SpeechBrain model has no mods.enhance_model; cannot export OpenVINO")
     os.makedirs(ir_dir, exist_ok=True)
-    example = torch.zeros(1, SR, dtype=torch.float32)
-    log.info("exporting SpeechBrain enhance_model to OpenVINO IR")
-    ov_model = ov.convert_model(_ov_forward(inner), example_input=example, input=[-1, -1])
+    example = torch.zeros(1, _OV_WINDOW, dtype=torch.float32)
+    log.info("exporting SpeechBrain enhance_model to OpenVINO IR (window=%d)", _OV_WINDOW)
+    # Static T. Dynamic [-1,-1] compiled, then ISTFT rejected 11s JFK
+    # (in_fft_dim vs frame_size/2+1). Pad at infer instead.
+    ov_model = ov.convert_model(_ov_forward(inner), example_input=example)
     ov.save_model(ov_model, xml)
     open(stamp, "w").close()
     log.info("wrote enhance IR %s", xml)
@@ -211,9 +216,14 @@ def _run_ov(noisy):
     import numpy as np
 
     pcm = _pcm_numpy(noisy)
+    n = pcm.shape[-1]
+    if n < _OV_WINDOW:
+        pcm = np.pad(pcm, ((0, 0), (0, _OV_WINDOW - n)))
+    elif n > _OV_WINDOW:
+        pcm = pcm[:, :_OV_WINDOW]
     result = _state["compiled"](pcm)
-    out = result[0]
-    return np.asarray(out).reshape(-1).astype("float32")
+    out = np.asarray(result[0]).reshape(-1).astype("float32")
+    return out[:n]
 
 
 def _run(noisy):
