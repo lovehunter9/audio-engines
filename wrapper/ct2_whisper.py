@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import struct
 
 log = logging.getLogger("audio-ct2-whisper")
 
@@ -12,6 +13,16 @@ _TOKEN_FILES = (
     "added_tokens.json", "normalizer.json", "vocab.json", "merges.txt",
     "preprocessor_config.json", "generation_config.json", "config.json",
 )
+
+# CTranslate2 DataType order (include/ctranslate2/types.h).
+_CT2_DTYPES = {
+    0: "float32",
+    1: "int8",
+    2: "int16",
+    3: "int32",
+    4: "float16",
+    5: "bfloat16",
+}
 
 
 def is_ct2(path):
@@ -49,50 +60,123 @@ def _copy_sidecar(src, dest):
             shutil.copy2(a, b)
 
 
-def _dump_ct2_state_dict(src):
-    # ctranslate2 is a weight reader here, not the inference device.
-    import ctranslate2
+def _read_ct2_string(fh):
+    raw = fh.read(2)
+    if len(raw) != 2:
+        raise RuntimeError("truncated CT2 string length")
+    n = struct.unpack("<H", raw)[0]
+    buf = fh.read(n)
+    if len(buf) != n:
+        raise RuntimeError("truncated CT2 string")
+    return buf.split(b"\0", 1)[0].decode("utf-8")
 
-    model = ctranslate2.models.Whisper(src, device="cpu", compute_type="float32")
-    raw = getattr(model, "model", None) or getattr(model, "_model", None)
-    getter = None
-    if raw is not None:
-        getter = getattr(raw, "get_variable", None) or getattr(raw, "get_variable_if_exists", None)
-    if getter is None:
-        getter = getattr(model, "get_variable", None)
-    if getter is None:
-        raise RuntimeError(
-            "this ctranslate2 build cannot dump Whisper weights from model.bin; "
-            "refusing to fetch another HuggingFace repo")
 
-    names = getattr(raw, "variable_names", None) or getattr(model, "variable_names", None)
-    if callable(names):
-        names = names()
-    if not names:
-        raise RuntimeError(
-            "ctranslate2 Whisper has no variable_names; cannot rebuild transformers weights")
-
+def _bf16_to_f32(u16):
     import numpy as np
 
-    state = {}
-    for name in names:
-        try:
-            val = getter(name)
-        except Exception:
+    bits = u16.astype(np.uint32) << 16
+    return bits.view(np.float32)
+
+
+def _dequant_int8(state):
+    import numpy as np
+
+    out = {}
+    for name, arr in state.items():
+        if name.endswith("_scale") or name.endswith("_zero"):
             continue
-        if val is None:
-            continue
-        arr = val if hasattr(val, "shape") else None
-        try:
-            arr = val.numpy() if hasattr(val, "numpy") else (val.to_numpy()
-                                                             if hasattr(val, "to_numpy") else arr)
-        except Exception:
-            arr = None
-        if arr is None:
-            continue
-        state[name] = np.ascontiguousarray(arr)
+        scale = state.get(name + "_scale")
+        if arr.dtype == np.int8 and scale is not None:
+            w = arr.astype(np.float32)
+            s = scale.astype(np.float32)
+            if s.shape == () or s.size == 1:
+                w = w / s.reshape(())
+            elif s.shape[0] == w.shape[0]:
+                w = w / s.reshape([s.shape[0]] + [1] * (w.ndim - 1))
+            else:
+                w = w / s
+            out[name] = np.ascontiguousarray(w)
+        else:
+            out[name] = arr
+    return out
+
+
+def _read_ct2_bin(path):
+    """Read model.bin the way model_spec.py writes it. No libctranslate2."""
+    import numpy as np
+
+    with open(path, "rb") as fh:
+        head = fh.read(4)
+        if len(head) != 4:
+            raise RuntimeError("%s is not a CTranslate2 model.bin" % path)
+        version = struct.unpack("<I", head)[0]
+        if version < 4 or version > 6:
+            raise RuntimeError("%s binary version %d is not a readable CT2 dump" % (path, version))
+        spec = _read_ct2_string(fh)
+        rev_raw = fh.read(4)
+        nvar_raw = fh.read(4)
+        if len(rev_raw) != 4 or len(nvar_raw) != 4:
+            raise RuntimeError("%s header is truncated" % path)
+        revision = struct.unpack("<I", rev_raw)[0]
+        nvar = struct.unpack("<I", nvar_raw)[0]
+        state = {}
+        for _ in range(nvar):
+            name = _read_ct2_string(fh)
+            rank_b = fh.read(1)
+            if len(rank_b) != 1:
+                raise RuntimeError("truncated CT2 rank in %s" % path)
+            rank = rank_b[0]
+            dim_raw = fh.read(4 * rank) if rank else b""
+            if rank and len(dim_raw) != 4 * rank:
+                raise RuntimeError("truncated CT2 shape for %s" % name)
+            dims = struct.unpack("<%dI" % rank, dim_raw) if rank else ()
+            tid_b = fh.read(1)
+            nb_raw = fh.read(4)
+            if len(tid_b) != 1 or len(nb_raw) != 4:
+                raise RuntimeError("truncated CT2 dtype for %s" % name)
+            type_id = tid_b[0]
+            nbytes = struct.unpack("<I", nb_raw)[0]
+            raw = fh.read(nbytes)
+            if len(raw) != nbytes:
+                raise RuntimeError("truncated CT2 tensor %s in %s" % (name, path))
+            dt = _CT2_DTYPES.get(type_id)
+            if dt is None:
+                raise RuntimeError("CT2 tensor %s has unknown type_id %d" % (name, type_id))
+            if dt == "bfloat16":
+                arr = np.frombuffer(raw, dtype=np.uint16).reshape(dims)
+                arr = np.ascontiguousarray(_bf16_to_f32(arr))
+            elif dt == "int8":
+                arr = np.array(np.frombuffer(raw, dtype=np.int8).reshape(dims), copy=True)
+            else:
+                arr = np.ascontiguousarray(
+                    np.frombuffer(raw, dtype=np.dtype(dt)).reshape(dims).astype(np.float32, copy=False))
+            state[name] = arr
+        alias_head = fh.read(4)
+        if len(alias_head) == 4:
+            nalias = struct.unpack("<I", alias_head)[0]
+            for _ in range(nalias):
+                alias = _read_ct2_string(fh)
+                src = _read_ct2_string(fh)
+                if src in state and alias not in state:
+                    state[alias] = state[src]
+                for suf in ("_scale", "_zero"):
+                    a2, s2 = alias + suf, src + suf
+                    if s2 in state and a2 not in state:
+                        state[a2] = state[s2]
     if not state:
-        raise RuntimeError("dumped no tensors from %s/model.bin" % src)
+        raise RuntimeError("dumped no tensors from %s" % path)
+    log.info("read %d CT2 tensors from %s (spec=%s rev=%s v=%s)",
+             len(state), path, spec, revision, version)
+    return _dequant_int8(state)
+
+
+def _dump_ct2_state_dict(src):
+    # Parse model.bin in Python. The Intel CT2 wheel SIGSEGVs inside
+    # ctranslate2.models.Whisper(...) even with device="cpu".
+    path = os.path.join(src, "model.bin")
+    if not os.path.isfile(path):
+        raise RuntimeError("%s has no model.bin" % src)
+    state = _read_ct2_bin(path)
     log.info("dumped %d CT2 tensors from %s", len(state), src)
     return state
 
