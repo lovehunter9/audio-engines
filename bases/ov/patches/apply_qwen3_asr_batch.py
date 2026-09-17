@@ -14,9 +14,12 @@ GatherElements(axis=1) picks indices 0..T-1 — clip 0 — for every row.
 ov20 rewired that Unsqueeze to feed [B,T,H] through. Long meeting spans then
 transcribed distinctly, but Intel GPU crashed on short T
 (ocl_stream: allocated input memory is necessary to set kernel arguments),
-including serial N=1 slices of JFK. The flatten layout is what the GPU plugin
-already compiles; ov21 keeps it and adds batch*T to the GatherElements
-indices so row i reads [i*T, i*T+T). Encoder stays per-clip.
+including serial N=1 slices of JFK. ov21 kept the flatten and shifted
+GatherElements by batch*T so iGPU short T lived; Arc B>1 speech then died
+CL_OUT_OF_RESOURCES (the flatten is broadcast to [B,B*T,H]). ov22 goes back
+to [B,T,H] and pads clips shorter than 16s with silence so encoder T matches
+a length the plugin already compiles (11s JFK N=1 lived; 1.4s slices died).
+Encoder stays per-clip.
 """
 from __future__ import annotations
 
@@ -49,6 +52,14 @@ GENERATE_UNWRAP_NEW = """    std::vector<std::vector<float>> audios;
                    },
                },
                audio_inputs);
+
+    const size_t min_intel_gpu_audio_samples = static_cast<size_t>(
+        16.0 * static_cast<double>(m_feature_extractor.sampling_rate) + 0.5);
+    for (auto& a : audios) {
+        if (a.size() < min_intel_gpu_audio_samples) {
+            a.resize(min_intel_gpu_audio_samples, 0.f);
+        }
+    }
 
     const std::vector<AudioChunk> chunks =
         split_audio_into_chunks(audios, m_feature_extractor.sampling_rate, MAX_ASR_INPUT_SECONDS);"""
@@ -89,43 +100,25 @@ DECODER_COMPILE_OLD = (
 )
 
 KEEP_ENCODER_BATCH_HELPER = r'''
-bool traces_to_encoder(const std::shared_ptr<ov::Node>& node,
-                       const std::shared_ptr<ov::Node>& enc,
-                       int depth) {
-    if (!node || depth < 0) {
-        return false;
-    }
-    if (node == enc) {
-        return true;
-    }
-    for (size_t i = 0; i < node->get_input_size(); ++i) {
-        if (traces_to_encoder(node->get_input_node_shared_ptr(i), enc, depth - 1)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-size_t fix_encoder_gather_batch(const std::shared_ptr<ov::Model>& model) {
-    // Keep the exported [1,B*T,H] flatten: Intel GPU already compiles that
-    // layout (ov19, any T). Clip 0 is the GatherElements indices, all 0..T-1.
-    // Add batch*T so row i reads [i*T, i*T+T).
-    std::shared_ptr<ov::Node> enc;
+size_t keep_encoder_hidden_batch(const std::shared_ptr<ov::Model>& model) {
+    // Exported decoder flattens encoder [B,T,H] to [-1,H], Unsqueeze to
+    // [1,B*T,H], then broadcasts that one row across the batch. GatherElements
+    // along time then reads clip 0 for every span. Feed [B,T,H] through instead.
+    // Flatten+index-shift (ov21) compiled on iGPU and died CL_OUT_OF_RESOURCES
+    // on Arc as soon as B>1 was real speech.
     size_t hidden = 0;
-    for (const auto& param : model->get_parameters()) {
-        const auto names = param->output(0).get_names();
-        if (!names.count("encoder_hidden_states")) {
+    for (const auto& input : model->inputs()) {
+        if (input.get_any_name() != "encoder_hidden_states") {
             continue;
         }
-        enc = param;
-        const auto shape = param->get_partial_shape();
+        const auto shape = input.get_partial_shape();
         if (shape.size() == 3 && shape[2].is_static()) {
             hidden = static_cast<size_t>(shape[2].get_length());
         }
     }
-    OPENVINO_ASSERT(enc && hidden > 0, "encoder_hidden_states is not [B,T,H]");
+    OPENVINO_ASSERT(hidden > 0, "encoder_hidden_states is not [B,T,H]");
 
-    std::vector<std::shared_ptr<ov::Node>> flattens;
+    size_t rewired = 0;
     for (const auto& op : model->get_ops()) {
         if (std::string(op->get_type_name()) != "Unsqueeze") {
             continue;
@@ -144,75 +137,33 @@ size_t fix_encoder_gather_batch(const std::shared_ptr<ov::Model>& model) {
         if (!reshape || std::string(reshape->get_type_name()) != "Reshape") {
             continue;
         }
-        if (!traces_to_encoder(reshape, enc, 6)) {
+        const auto src = reshape->get_input_node_shared_ptr(0);
+        if (!src) {
             continue;
         }
-        flattens.push_back(op);
-    }
-    OPENVINO_ASSERT(!flattens.empty(),
-                    "Qwen3-ASR decoder IR is missing the encoder flatten Unsqueeze");
-
-    auto enc_shape = std::make_shared<ov::op::v3::ShapeOf>(enc->output(0), ov::element::i64);
-    auto axis0 = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
-    auto c0 = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {0});
-    auto c1 = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{}, {1});
-    auto B = std::make_shared<ov::op::v0::Squeeze>(
-        std::make_shared<ov::op::v8::Gather>(enc_shape, c0, axis0));
-    auto T = std::make_shared<ov::op::v0::Squeeze>(
-        std::make_shared<ov::op::v8::Gather>(enc_shape, c1, axis0));
-    auto range = std::make_shared<ov::op::v4::Range>(c0, B, c1, ov::element::i64);
-    auto offsets = std::make_shared<ov::op::v1::Multiply>(range, T);
-
-    std::vector<std::shared_ptr<ov::Node>> gathers;
-    std::function<void(const ov::Output<ov::Node>&)> walk;
-    walk = [&](const ov::Output<ov::Node>& out) {
-        for (const auto& in : out.get_target_inputs()) {
-            auto node = in.get_node()->shared_from_this();
-            const auto type = std::string(node->get_type_name());
-            if (type == "GatherElements") {
-                const auto dshape = node->get_input_partial_shape(0);
-                if (dshape.rank().is_static() && dshape.size() >= 2) {
-                    gathers.push_back(node);
-                }
-            } else if (type == "Broadcast" || type == "Reshape" || type == "Unsqueeze" ||
-                       type == "Squeeze" || type == "Transpose" || type == "Convert") {
-                walk(node->output(0));
-            }
-        }
-    };
-    for (const auto& flat : flattens) {
-        walk(flat->output(0));
-    }
-
-    size_t fixed = 0;
-    for (const auto& gather : gathers) {
-        const auto indices = gather->input_value(1);
-        const auto rank = indices.get_partial_shape().rank();
-        if (rank.is_dynamic() || rank.get_length() < 1) {
+        const auto src_shape = src->get_output_partial_shape(0);
+        if (src_shape.rank().is_dynamic() || src_shape.size() != 3) {
             continue;
         }
-        std::shared_ptr<ov::Node> offs = offsets;
-        for (int64_t i = 1; i < rank.get_length(); ++i) {
-            auto ax = ov::op::v0::Constant::create(ov::element::i64, ov::Shape{1}, {i});
-            offs = std::make_shared<ov::op::v0::Unsqueeze>(offs, ax);
+        if (!src_shape[2].is_static() || static_cast<size_t>(src_shape[2].get_length()) != hidden) {
+            continue;
         }
-        if (offs->get_element_type() != indices.get_element_type()) {
-            offs = std::make_shared<ov::op::v0::Convert>(offs, indices.get_element_type());
+        const auto consumers = op->output(0).get_target_inputs();
+        for (auto& in : consumers) {
+            in.replace_source_output(src->output(0));
         }
-        auto shifted = std::make_shared<ov::op::v1::Add>(indices, offs);
-        gather->input(1).replace_source_output(shifted->output(0));
-        ++fixed;
+        ++rewired;
     }
     model->validate_nodes_and_infer_types();
-    return fixed;
+    return rewired;
 }
 
 '''
 
 DECODER_COMPILE_NEW = r'''    auto model = core.read_model(models_path / "openvino_decoder_model.xml");
     // Input names are already dynamic on current exports. The clip-0 bug is
-    // GatherElements indices 0..T-1 on the flattened encoder. Keep that
-    // layout (Intel GPU compiles it) and shift indices by batch*T.
+    // the flatten+Unsqueeze inside the graph; keep_encoder_hidden_batch
+    // rewires that. Still dynamize the three names for older static IRs.
     std::map<std::string, ov::PartialShape> shapes;
     for (const auto& input : model->inputs()) {
         auto shape = input.get_partial_shape();
@@ -224,9 +175,9 @@ DECODER_COMPILE_NEW = r'''    auto model = core.read_model(models_path / "openvi
         shapes[name] = shape;
     }
     model->reshape(shapes);
-    OPENVINO_ASSERT(fix_encoder_gather_batch(model) > 0,
-                    "Qwen3-ASR decoder IR has the encoder flatten but no GatherElements "
-                    "to retarget; refusing a compile that would copy clip 0");
+    OPENVINO_ASSERT(keep_encoder_hidden_batch(model) > 0,
+                    "Qwen3-ASR decoder IR is missing the encoder flatten Unsqueeze; "
+                    "refusing a compile that would copy clip 0");
     ov::CompiledModel compiled_model = core.compile_model(model, device, properties);'''
 
 
@@ -262,13 +213,34 @@ def patch_audio_inputs(root: pathlib.Path) -> None:
     _write(path, text[:i] + AUDIO_INPUTS_NEW + text[j + 1 :])
 
 
+AUDIO_PAD_SNIPPET = """    const size_t min_intel_gpu_audio_samples = static_cast<size_t>(
+        16.0 * static_cast<double>(m_feature_extractor.sampling_rate) + 0.5);
+    for (auto& a : audios) {
+        if (a.size() < min_intel_gpu_audio_samples) {
+            a.resize(min_intel_gpu_audio_samples, 0.f);
+        }
+    }
+
+    const std::vector<AudioChunk> chunks =
+        split_audio_into_chunks(audios,"""
+
+
+def _ensure_audio_pad(src: str) -> str:
+    if "min_intel_gpu_audio_samples" in src:
+        return src
+    needle = "    const std::vector<AudioChunk> chunks =\n        split_audio_into_chunks(audios,"
+    if needle not in src:
+        raise SystemExit("split_audio_into_chunks(audios, not found for 16s pad")
+    return src.replace(needle, AUDIO_PAD_SNIPPET, 1)
+
+
 def patch_generate_unwrap(src: str, path: str) -> str:
     if GENERATE_UNWRAP_OLD in src:
         return src.replace(GENERATE_UNWRAP_OLD, GENERATE_UNWRAP_NEW, 1)
     if "split_audio_into_chunks({audio}," not in src:
         if "split_audio_into_chunks(audios," in src:
             print("generate unwrap already patched", path)
-            return src
+            return _ensure_audio_pad(src)
         raise SystemExit("split_audio_into_chunks({audio} not found in %s" % path)
     src = src.replace(
         "const std::vector<float>& audio = std::visit(",
@@ -283,7 +255,7 @@ def patch_generate_unwrap(src: str, path: str) -> str:
             "                   [&](const std::vector<std::vector<float>>& input) { audios = input; },",
             1,
         )
-    return src
+    return _ensure_audio_pad(src)
 
 
 def patch_infer(src: str, path: str) -> str:
@@ -392,44 +364,29 @@ def patch_decoder_batch_dim(root: pathlib.Path) -> None:
         raise SystemExit("qwen3-asr/decoder.cpp not found")
     path = hits[0]
     src = _read(path)
-    if "fix_encoder_gather_batch" in src:
-        print("decoder encoder gather-batch rewrite already patched", path)
+    if "keep_encoder_hidden_batch" in src:
+        print("decoder encoder-batch rewrite already patched", path)
         return
     if "namespace ov::genai {" in src:
         src = src.replace("namespace ov::genai {", "namespace ov::genai {" + KEEP_ENCODER_BATCH_HELPER, 1)
     elif '#include "decoder.hpp"' in src:
         src = src.replace('#include "decoder.hpp"', '#include "decoder.hpp"\n' + KEEP_ENCODER_BATCH_HELPER, 1)
     else:
-        raise SystemExit("no insertion point for fix_encoder_gather_batch in %s" % path)
+        raise SystemExit("no insertion point for keep_encoder_hidden_batch in %s" % path)
     if DECODER_COMPILE_OLD in src:
         src = src.replace(DECODER_COMPILE_OLD, DECODER_COMPILE_NEW, 1)
     elif "model->reshape(shapes);" in src:
         src = src.replace(
             "model->reshape(shapes);",
             "model->reshape(shapes);\n"
-            "    OPENVINO_ASSERT(fix_encoder_gather_batch(model) > 0,\n"
-            "                    \"Qwen3-ASR decoder IR has the encoder flatten but no GatherElements "
-            "to retarget; refusing a compile that would copy clip 0\");",
+            "    OPENVINO_ASSERT(keep_encoder_hidden_batch(model) > 0,\n"
+            "                    \"Qwen3-ASR decoder IR is missing the encoder flatten Unsqueeze; "
+            "refusing a compile that would copy clip 0\");",
             1,
         )
     else:
         raise SystemExit("decoder compile_model / reshape marker not found in %s" % path)
-    for inc in (
-        '#include <functional>',
-        '#include <map>',
-        '#include <memory>',
-        '#include <string>',
-        '#include <vector>',
-        '#include "openvino/op/add.hpp"',
-        '#include "openvino/op/constant.hpp"',
-        '#include "openvino/op/convert.hpp"',
-        '#include "openvino/op/gather.hpp"',
-        '#include "openvino/op/multiply.hpp"',
-        '#include "openvino/op/range.hpp"',
-        '#include "openvino/op/shape_of.hpp"',
-        '#include "openvino/op/squeeze.hpp"',
-        '#include "openvino/op/unsqueeze.hpp"',
-    ):
+    for inc in ('#include <map>', '#include <string>'):
         if inc not in src:
             src = src.replace('#include "decoder.hpp"', '#include "decoder.hpp"\n' + inc, 1)
     _write(path, src)

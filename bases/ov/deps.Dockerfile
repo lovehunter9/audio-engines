@@ -18,7 +18,6 @@ ARG IGC_DEB=2.36.3+21719
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        git \
         python3 \
         python3-pip \
         python3-venv \
@@ -55,7 +54,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY bases/ov/patches/apply_qwen3_asr_batch.py /tmp/apply_qwen3_asr_batch.py
 
 # cmake defaults to Unix Makefiles (needs `make`). ninja is faster once CMAKE_GENERATOR=Ninja.
+# These compilers and git stay only for this RUN: after the GenAI rebuild they are purged
+# so the published layer does not keep a C++ toolchain. Keep transformers / optimum /
+# qwen-asr / IGC — first-start IR export and later adapters still need them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
         cmake \
         make \
         ninja-build \
@@ -98,6 +101,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         /tmp/genai/src \
     && cd / \
     && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
+    && python3 -m pip uninstall -y ninja py-build-cmake pybind11-stubgen \
+    && apt-get purge -y git cmake make ninja-build g++ python3-dev pkg-config \
+    && apt-get autoremove -y --purge \
+    && rm -rf /var/lib/apt/lists/* /root/.cache \
     && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
 print('openvino', openvino.__version__); \

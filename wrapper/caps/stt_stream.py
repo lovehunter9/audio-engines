@@ -313,9 +313,10 @@ def _load_ov():
     src = _resolve_hf_dir(MODEL_REPO)
     model_dir = _ensure_ov_ir(src)
     device = _ov_device()
-    # ov20 blobs rewired Unsqueeze to [B,T,H] and Intel GPU dies on short T.
-    # ov21 keeps the flatten layout and retargets GatherElements indices.
-    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_ov21")
+    # ov20 blobs rewired Unsqueeze to [B,T,H]; short T died on Intel GPU.
+    # ov21 flatten+index-shift compiled on iGPU and died CL_OUT on Arc B>1 speech.
+    # ov22 is [B,T,H] again plus 16s silence pad. Bust the ov21 compile cache.
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_ov22")
     os.makedirs(cache, exist_ok=True)
     _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
     pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
@@ -377,11 +378,13 @@ def _ov_assert_batch_generate(pipe):
     Silence-only probes used to pass TypeError and still ship the clip-0
     flatten. Two short tones that both come back empty are inconclusive;
     two nonempty identical strings are the ov17/ov19 bug and abort load.
-    The decoder constructor asserts GatherElements indices were shifted.
+    The decoder constructor rewires the flatten Unsqueeze to [B,T,H].
+    CL_OUT_OF_RESOURCES must abort load: ov21's sine probe swallowed it and
+    the engine came up READY, then the first real-speech batch poisoned Arc.
     """
     if MAX_BATCH_SPANS <= 1:
         return
-    def _tone(freq, n=3200):
+    def _tone(freq, n=16000):
         return [math.sin(2.0 * math.pi * freq * i / 16000.0) for i in range(n)]
 
     try:
@@ -393,6 +396,13 @@ def _ov_assert_batch_generate(pipe):
             % (MAX_BATCH_SPANS, e)
         ) from e
     except Exception as e:
+        msg = str(e)
+        if "CL_OUT_OF_RESOURCES" in msg or "clFinish" in msg or "ocl_stream" in msg:
+            raise RuntimeError(
+                "openvino batch generate died on GPU (%s). "
+                "This build cannot run a list of waveforms on this device."
+                % e
+            ) from e
         _p("batch generate probe accepted a list (%s); continuing" % e)
         return
     texts = [(t or "").strip() for t in (getattr(result, "texts", None) or [])]
@@ -407,7 +417,9 @@ def _ov_generate_many(clips, language=None):
     """One OpenVINO generate() for the group. The patched binding takes a list
     of waveforms; infer() encodes per clip then one decoder.generate() on the
     stacked hidden states. Flatten [1,B*T,H] plus unshifted GatherElements
-    copies clip 0 (intel-ov17/ov19); ov20's [B,T,H] rewire dies on short T.
+    copies clip 0 (intel-ov17/ov19); ov20's [B,T,H] rewire dies on short T;
+    ov21's flatten+index-shift dies CL_OUT on Arc speech. ov22 keeps [B,T,H]
+    and pads clips shorter than 16s.
     A TypeError is the unpatched wheel, which cannot take a list at all.
     """
     if len(clips) == 1:
