@@ -13,6 +13,10 @@ BASES = {
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
     ],
+    # Intel Whisper: OpenVINO WhisperPipeline only. Not the Qwen ov image.
+    "whisperov": [
+        (("stt",), "whisper_ov"),
+    ],
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],
@@ -20,6 +24,10 @@ BASES = {
         (("vad",), "vad"),
         (("diar",), "diar"),
         (("speaker_embed",), "embed"),
+        (("enhance",), "enhance"),
+    ],
+    # Intel Enhance: SpeechBrain on XPU. Same enhance module, no CUDA fallback.
+    "enhancexpu": [
         (("enhance",), "enhance"),
     ],
     "nemo": [
@@ -75,6 +83,7 @@ FAMILIES = {
     "stt_stream": "qwen3-asr",
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
+    "whisper_ov": "whisper",
     "vad": "silero-vad",
     "diar": "pyannote",
     "diar_speakrs": "speakrs",
@@ -99,6 +108,12 @@ _MOUNTS = {
         ("WS", "/v1/audio/stream", "Streaming ASR (WebSocket)", False),
     ],
     ("whisper", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Offline transcription (single / batch segments)", True),
+        ("POST", "/v1/audio/translations",
+         "Speech -> English (Whisper translate task)", True),
+    ],
+    ("whisper_ov", "stt"): [
         ("POST", "/v1/audio/transcriptions",
          "Offline transcription (single / batch segments)", True),
         ("POST", "/v1/audio/translations",

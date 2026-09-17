@@ -392,7 +392,7 @@ def _ov_assert_batch_generate(pipe):
     except TypeError as e:
         raise RuntimeError(
             "ENGINE_ARGS --batch-max-spans is %d but this OpenVINO build "
-            "rejects a list of waveforms (%s). Use the patched audio-ov image."
+            "rejects a list of waveforms (%s). Use the patched audio-qwen-ov image."
             % (MAX_BATCH_SPANS, e)
         ) from e
     except Exception as e:
