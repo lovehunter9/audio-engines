@@ -49,53 +49,13 @@ _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 _state = _runtime.state
 
 
-def _xpu_name(torch, i):
-    for attr in ("get_device_name", "get_device_properties"):
-        fn = getattr(torch.xpu, attr, None)
-        if fn is None:
-            continue
-        try:
-            got = fn(i)
-        except Exception:
-            continue
-        name = getattr(got, "name", got)
-        if name:
-            return str(name)
-    return ""
-
-
-def _xpu_is_integrated(name):
-    n = (name or "").lower()
-    if "arc" in n or "b70" in n or "b50" in n:
-        return False
-    return any(s in n for s in ("uhd", "iris", "graphics", "i915"))
-
-
-def _pick_xpu(torch):
-    n = int(getattr(torch.xpu, "device_count", lambda: 1)())
-    names = []
-    for i in range(max(n, 1)):
-        name = _xpu_name(torch, i)
-        names.append((i, name))
-        log.info("xpu:%d %s", i, name or "?")
-    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
-    if mode == "intel-gpu":
-        discrete = [i for i, name in names if name and not _xpu_is_integrated(name)]
-        if discrete:
-            return "xpu:%d" % discrete[0]
-        skip = [i for i, name in names if not _xpu_is_integrated(name)]
-        if skip:
-            return "xpu:%d" % skip[0]
-    return "xpu:%d" % names[0][0]
-
-
 def _speechbrain_device(torch):
     # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
     base = (os.environ.get("AUDIO_BASE") or "").strip()
     if base == "enhancexpu":
         if not hasattr(torch, "xpu") or not torch.xpu.is_available():
             raise RuntimeError("enhancexpu requires an Intel XPU; refusing CPU")
-        return _pick_xpu(torch)
+        return "xpu:0"
     return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
@@ -106,7 +66,6 @@ def _load():
 
         src = snapshot_download(MODEL_REPO, local_files_only=True,
                                 cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
-        dev = _speechbrain_device(torch)
         # Repos need different inference classes; try each in turn (1.x moved the module path).
         try:
             from speechbrain.inference.enhancement import (
@@ -119,20 +78,22 @@ def _load():
                       ("spectralmask", SpectralMaskEnhancement),
                       ("sepformer", SepformerSeparation)]
         last = None
-        # from_hparams(..., device=xpu) SIGSEGV'd on i915 while mapping the
-        # ckpt. A torch.zeros(..., device="xpu") probe did the same. Load on
-        # CPU, then .to(xpu). Arc can take the move; i915 still cannot.
-        load_dev = "cpu" if dev.startswith("xpu") else dev
+        # from_hparams(..., device=xpu) and torch.xpu.get_device_name both
+        # SIGSEGV'd (intel2 ~30s, intel4 ~1.5s). Load on CPU first; only then
+        # ask XPU anything. Arc still may die on .to — the log line before
+        # the move tells us which side.
+        want_xpu = (os.environ.get("AUDIO_BASE") or "").strip() == "enhancexpu"
         for kind, cls in candidates:
             try:
                 savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
-                # from_hparams(..., device=xpu) SIGSEGV'd on iGPU while mapping
-                # the ckpt. Load on CPU, then move — inference still on XPU.
-                log.info("speechbrain %s from_hparams on %s", kind, load_dev)
+                log.info("speechbrain %s from_hparams on cpu", kind)
                 model = cls.from_hparams(source=src, savedir=savedir,
-                                         run_opts={"device": load_dev})
+                                         run_opts={"device": "cpu"})
                 log.info("speechbrain %s cpu load done", kind)
-                if load_dev != dev:
+                dev = "cpu"
+                if want_xpu:
+                    log.info("speechbrain %s probing xpu after cpu load", kind)
+                    dev = _speechbrain_device(torch)
                     log.info("moving speechbrain %s cpu → %s", kind, dev)
                     if hasattr(model, "to"):
                         model.to(dev)
