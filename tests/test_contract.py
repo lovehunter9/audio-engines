@@ -2102,6 +2102,26 @@ class QwenOvDepsCacheTest(unittest.TestCase):
         self.assertNotIn("name: build ovbase", build)
 
 
+class FireRedOvDeviceLieTest(unittest.TestCase):
+    def test_force_cpu_torch_device_stays_a_type(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+
+        from wrapper import tts_ov
+
+        restore = tts_ov.force_cpu_torch_device()
+        try:
+            self.assertTrue(isinstance(torch.device, type))
+            self.assertFalse(isinstance(None, torch.device))
+            self.assertEqual(str(torch.device("cuda")), "cpu")
+            self.assertTrue(isinstance(torch.device("cpu"), torch.device))
+        finally:
+            restore()
+        self.assertEqual(str(torch.device("cuda")), "cuda")
+
+
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
