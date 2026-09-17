@@ -1,5 +1,11 @@
 # audio-qwen-ov deps (hash-tagged rebuilds). Intel GPU only exists on amd64; CI passes a single-arch slice.
-FROM ubuntu:24.04
+#
+# Multi-stage so a C++ patch change does not redo NEO + pip + genai clone.
+# vendor (pip + unpatched checkout) stays in the GHA layer cache; only the
+# builder stage recompiles. The published image is FROM base + /usr/local
+# from builder, so the toolchain never lands in the Hub tag.
+
+FROM ubuntu:24.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -51,12 +57,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Do not `pip install --upgrade pip`: Ubuntu's pip has no RECORD file and the upgrade aborts the build.
 # ASR: openvino_genai.ASRPipeline + optimum export (qwen3_asr in transformers 5.13).
 # Align: OVModelForQwen3ASRForcedAligner from openvino-dev-samples/optimum-intel until upstream merges.
-COPY bases/ov/patches/apply_qwen3_asr_batch.py /tmp/apply_qwen3_asr_batch.py
-
-# cmake defaults to Unix Makefiles (needs `make`). ninja is faster once CMAKE_GENERATOR=Ninja.
-# These compilers and git stay only for this RUN: after the GenAI rebuild they are purged
-# so the published layer does not keep a C++ toolchain. Keep transformers / optimum /
-# qwen-asr / IGC — first-start IR export and later adapters still need them.
+FROM base AS vendor
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         cmake \
@@ -79,6 +80,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         numpy \
         "safetensors>=0.8.0" \
         "transformers>=5.13,<5.14" \
+        setuptools wheel ninja pybind11 \
+        "py-build-cmake==0.5.0" \
+        "pybind11-stubgen==2.5.5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
@@ -86,26 +90,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && GENAI_VER="$(python3 -c 'import openvino_genai as g; print(getattr(g, "__version__", "") or "")')" \
     && GENAI_TAG="${GENAI_VER%%-*}" \
     && echo "pip openvino-genai ${GENAI_VER} -> tag ${GENAI_TAG}" \
-    && mkdir -p /tmp/genai && cd /tmp/genai \
     && git clone --depth 1 --recurse-submodules --shallow-submodules --branch "${GENAI_TAG}" \
-        https://github.com/openvinotoolkit/openvino.genai.git src \
-    && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai/src \
+        https://github.com/openvinotoolkit/openvino.genai.git /opt/genai-src
+
+FROM vendor AS builder
+COPY bases/ov/patches/apply_qwen3_asr_batch.py /tmp/apply_qwen3_asr_batch.py
+# cmake defaults to Unix Makefiles (needs `make`). ninja is faster once CMAKE_GENERATOR=Ninja.
+RUN cp -a /opt/genai-src /tmp/genai \
+    && python3 /tmp/apply_qwen3_asr_batch.py /tmp/genai \
     && export CMAKE_GENERATOR=Ninja \
     && unset CFLAGS CXXFLAGS \
     && export CMAKE_ARGS="-DENABLE_SAMPLES=OFF -DENABLE_JS=OFF -DENABLE_GGUF_SUPPORT=OFF" \
-    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        setuptools wheel ninja pybind11 \
-        "py-build-cmake==0.5.0" \
-        "pybind11-stubgen==2.5.5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall --no-deps --no-build-isolation \
-        /tmp/genai/src \
-    && cd / \
-    && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py \
-    && python3 -m pip uninstall -y ninja py-build-cmake pybind11-stubgen \
-    && apt-get purge -y git cmake make ninja-build g++ python3-dev pkg-config \
-    && apt-get autoremove -y --purge \
-    && rm -rf /var/lib/apt/lists/* /root/.cache \
-    && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+        /tmp/genai \
+    && rm -rf /tmp/genai /tmp/apply_qwen3_asr_batch.py /root/.cache
+
+FROM base
+COPY --from=builder /usr/local /usr/local
+RUN python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
 print('openvino', openvino.__version__); \
 print('openvino_genai', getattr(openvino_genai, '__version__', 'ok')); \

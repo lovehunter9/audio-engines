@@ -2029,6 +2029,22 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         self.assertNotIn("pip uninstall", text)
 
 
+class QwenOvDepsCacheTest(unittest.TestCase):
+    def test_patch_copy_is_after_the_cached_genai_clone(self):
+        path = os.path.join(os.path.dirname(__file__), "../bases/ov/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn("FROM ubuntu:24.04 AS base", text)
+        self.assertIn("FROM base AS vendor", text)
+        self.assertIn("FROM vendor AS builder", text)
+        clone = text.find("git clone")
+        copy = text.find("COPY bases/ov/patches/apply_qwen3_asr_batch.py")
+        self.assertGreater(clone, -1)
+        self.assertGreater(copy, clone)
+        self.assertIn("COPY --from=builder /usr/local /usr/local", text)
+        self.assertNotIn("nvidia/cuda", text)
+
+
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
