@@ -1017,6 +1017,29 @@ class OpenVINOModeTest(unittest.TestCase):
             "namespace ov::genai {\n"
             "    ov::CompiledModel compiled_model =\n"
             "        core.compile_model(models_path / \"openvino_decoder_model.xml\", device, properties);\n"
+            "    m_request.reset_state();\n"
+            "    auto free_finished_requests = [&active_sequence_groups]() {\n"
+            "        auto removed_it =\n"
+            "            std::remove_if(active_sequence_groups.begin(),\n"
+            "                           active_sequence_groups.end(),\n"
+            "                           [](const SequenceGroup::Ptr& sg) {\n"
+            "                               return sg->has_finished() || sg->handle_stopped() || sg->handle_cancelled();\n"
+            "                           });\n"
+            "        active_sequence_groups.erase(removed_it, active_sequence_groups.end());\n"
+            "    };\n"
+            "    while (!active_sequence_groups.empty()) {\n"
+            "        ov::Tensor new_input_ids(ov::element::i64, {total_num_tokens, 1});\n"
+            "        m_request.set_tensor(\"input_ids\", new_input_ids);\n"
+            "        m_request.set_tensor(\"beam_idx\", ov::Tensor{ov::element::i32, {total_num_tokens}, next_beams.data()});\n"
+            "    }\n"
+            "}\n"
+        )
+        encoder = (
+            "ov::Tensor Qwen3ASREncoder::encode(const WhisperFeatures& features) {\n"
+            "    ov::Tensor input_tensor = chunk_mel_features(features);\n"
+            "    m_request.set_tensor(\"input_features\", input_tensor);\n"
+            "    m_request.set_tensor(\"input_features\", ov::Tensor(ov::element::f32, {0, 0, 0}));\n"
+            "    return output;\n"
             "}\n"
         )
         other = (
@@ -1032,6 +1055,7 @@ class OpenVINOModeTest(unittest.TestCase):
             open(os.path.join(asr, "pipeline.hpp"), "w").write(hpp)
             open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp"), "w").write(cpp)
             open(os.path.join(asr, "models", "qwen3-asr", "decoder.cpp"), "w").write(decoder)
+            open(os.path.join(asr, "models", "qwen3-asr", "encoder.cpp"), "w").write(encoder)
             whisper = os.path.join(asr, "models", "whisper", "pipeline.cpp")
             open(whisper, "w").write(other)
             old = sys.argv
@@ -1043,6 +1067,7 @@ class OpenVINOModeTest(unittest.TestCase):
             got_hpp = open(os.path.join(asr, "pipeline.hpp")).read()
             got_cpp = open(os.path.join(asr, "models", "qwen3-asr", "pipeline.cpp")).read()
             got_dec = open(os.path.join(asr, "models", "qwen3-asr", "decoder.cpp")).read()
+            got_enc = open(os.path.join(asr, "models", "qwen3-asr", "encoder.cpp")).read()
             got_wh = open(whisper).read()
         self.assertIn("std::vector<std::vector<float>>", got_hpp)
         self.assertIn("split_audio_into_chunks(audios,", got_cpp)
@@ -1056,6 +1081,10 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertIn("min_intel_gpu_encoder_frames", got_cpp)
         self.assertIn("stacked_t", got_cpp)
         self.assertIn("audio_token_counts", got_cpp)
+        self.assertIn("create_infer_request()", got_enc)
+        self.assertNotIn("{0, 0, 0}", got_enc)
+        self.assertIn("cannot realloc", got_dec)
+        self.assertIn("{batch_size, 1}", got_dec)
         self.assertNotIn("fix_encoder_gather_batch", got_dec)
         self.assertNotIn("batch*T", got_dec)
         self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)

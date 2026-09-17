@@ -22,6 +22,13 @@ a length the plugin already compiles (11s JFK N=1 lived; 1.4s slices died).
 The feature extractor drops trailing silence, so speech B>1 still arrived
 short. intel1 also pads stacked encoder T to 400 frames (16s at 25 Hz).
 Encoder stays per-clip.
+
+intel3 matched prompt audio tokens to that padded T and Arc B>1 speech
+still died in ocl_stream. The GPU plugin cannot realloc InferRequest
+inputs: the official encoder binds {0,0,0} after every encode, and the
+official decoder shrinks {B,1} to {B-1,1} when one beam finishes. Both
+poison the request so later N=1 also 500s. Fresh encoder requests and a
+fixed decoder batch size keep the allocations.
 """
 from __future__ import annotations
 
@@ -370,6 +377,105 @@ def patch_qwen3_pipeline(root: pathlib.Path) -> None:
     _write(path, src)
 
 
+ENCODER_ENCODE_BIND = """    ov::Tensor input_tensor = chunk_mel_features(features);
+    m_request.set_tensor("input_features", input_tensor);"""
+
+ENCODER_ENCODE_FRESH = """    ov::Tensor input_tensor = chunk_mel_features(features);
+    m_request = m_request.get_compiled_model().create_infer_request();
+    m_request.set_tensor("input_features", input_tensor);"""
+
+ENCODER_CLEAR_EMPTY = (
+    '    m_request.set_tensor("input_features", ov::Tensor(ov::element::f32, {0, 0, 0}));\n'
+)
+
+DECODER_RESET_OLD = "    m_request.reset_state();"
+DECODER_RESET_NEW = (
+    "    m_request = m_request.get_compiled_model().create_infer_request();"
+)
+
+DECODER_FREE_OLD = """    auto free_finished_requests = [&active_sequence_groups]() {
+        auto removed_it =
+            std::remove_if(active_sequence_groups.begin(),
+                           active_sequence_groups.end(),
+                           [](const SequenceGroup::Ptr& sg) {
+                               return sg->has_finished() || sg->handle_stopped() || sg->handle_cancelled();
+                           });
+        active_sequence_groups.erase(removed_it, active_sequence_groups.end());
+    };"""
+
+DECODER_FREE_NEW = """    auto free_finished_requests = [&active_sequence_groups]() {
+        // Keep every beam in the InferRequest. Arc cannot realloc
+        // input_ids / beam_idx when the batch shrinks (ocl_stream).
+        (void)active_sequence_groups;
+    };"""
+
+DECODER_WHILE_OLD = "    while (!active_sequence_groups.empty()) {"
+DECODER_WHILE_NEW = """    while (std::any_of(active_sequence_groups.begin(), active_sequence_groups.end(),
+                       [](const SequenceGroup::Ptr& sg) {
+                           return !sg->has_finished() && !sg->handle_stopped() && !sg->handle_cancelled();
+                       })) {"""
+
+DECODER_NEW_IDS_OLD = "        ov::Tensor new_input_ids(ov::element::i64, {total_num_tokens, 1});"
+DECODER_NEW_IDS_NEW = """        ov::Tensor new_input_ids(ov::element::i64, {batch_size, 1});
+        std::fill_n(new_input_ids.data<int64_t>(), batch_size, 0);
+        total_num_tokens = batch_size;"""
+
+DECODER_SET_IDS_OLD = """        m_request.set_tensor("input_ids", new_input_ids);
+        m_request.set_tensor("beam_idx", ov::Tensor{ov::element::i32, {total_num_tokens}, next_beams.data()});"""
+
+DECODER_SET_IDS_NEW = """        while (next_beams.size() < batch_size) {
+            next_beams.push_back(0);
+        }
+        m_request.set_tensor("input_ids", new_input_ids);
+        m_request.set_tensor("beam_idx", ov::Tensor{ov::element::i32, {total_num_tokens}, next_beams.data()});"""
+
+
+def patch_encoder_fresh_request(root: pathlib.Path) -> None:
+    hits = list(root.rglob("qwen3-asr/encoder.cpp"))
+    if not hits:
+        raise SystemExit("qwen3-asr/encoder.cpp not found")
+    path = hits[0]
+    src = _read(path)
+    if ENCODER_ENCODE_FRESH in src:
+        print("encoder fresh InferRequest already patched", path)
+        return
+    if ENCODER_ENCODE_BIND not in src:
+        raise SystemExit("encoder encode bind not found in %s" % path)
+    src = src.replace(ENCODER_ENCODE_BIND, ENCODER_ENCODE_FRESH, 1)
+    if ENCODER_CLEAR_EMPTY in src:
+        src = src.replace(ENCODER_CLEAR_EMPTY, "", 1)
+    _write(path, src)
+
+
+def patch_decoder_stable_batch(root: pathlib.Path) -> None:
+    hits = list(root.rglob("qwen3-asr/decoder.cpp"))
+    if not hits:
+        raise SystemExit("qwen3-asr/decoder.cpp not found")
+    path = hits[0]
+    src = _read(path)
+    if "cannot realloc" in src:
+        print("decoder stable batch already patched", path)
+        return
+    if DECODER_RESET_OLD not in src:
+        raise SystemExit("decoder reset_state not found in %s" % path)
+    src = src.replace(DECODER_RESET_OLD, DECODER_RESET_NEW, 1)
+    if DECODER_FREE_OLD not in src:
+        raise SystemExit("decoder free_finished_requests not found in %s" % path)
+    src = src.replace(DECODER_FREE_OLD, DECODER_FREE_NEW, 1)
+    if DECODER_WHILE_OLD not in src:
+        raise SystemExit("decoder generate while-loop not found in %s" % path)
+    src = src.replace(DECODER_WHILE_OLD, DECODER_WHILE_NEW, 1)
+    if DECODER_NEW_IDS_OLD not in src:
+        raise SystemExit("decoder new_input_ids shape not found in %s" % path)
+    src = src.replace(DECODER_NEW_IDS_OLD, DECODER_NEW_IDS_NEW, 1)
+    if DECODER_SET_IDS_OLD not in src:
+        raise SystemExit("decoder set_tensor input_ids not found in %s" % path)
+    src = src.replace(DECODER_SET_IDS_OLD, DECODER_SET_IDS_NEW, 1)
+    if "#include <algorithm>" not in src:
+        src = src.replace('#include "decoder.hpp"', '#include "decoder.hpp"\n#include <algorithm>', 1)
+    _write(path, src)
+
+
 def patch_decoder_batch_dim(root: pathlib.Path) -> None:
     hits = list(root.rglob("qwen3-asr/decoder.cpp"))
     if not hits:
@@ -413,6 +519,8 @@ def main() -> None:
     patch_audio_inputs(root)
     patch_qwen3_pipeline(root)
     patch_decoder_batch_dim(root)
+    patch_encoder_fresh_request(root)
+    patch_decoder_stable_batch(root)
     patch_other_backends(root)
     print("qwen3-asr multi-audio patch applied")
 
