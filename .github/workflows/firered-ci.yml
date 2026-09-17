@@ -9,6 +9,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/firered/**'
+      - 'bases/runtime/**'
       - '.github/workflows/firered-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:

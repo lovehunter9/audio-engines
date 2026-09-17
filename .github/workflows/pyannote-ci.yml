@@ -2,7 +2,7 @@
 name: pyannote-ci
 
 on:
-  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
+  # Publishes are deliberate: a v* tag publishes this listing base, or dispatch.
   push:
     tags: ['v*']
   # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
@@ -11,6 +11,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/pyannote/**'
+      - 'bases/runtime/**'
       - '.github/workflows/pyannote-ci.yml'
       - '.github/workflows/build-image.yml'
   # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.

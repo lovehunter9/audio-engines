@@ -11,9 +11,10 @@ dir="$root/bases/$BASE"
 file="$dir/deps.Dockerfile"
 [ -f "$file" ] || { echo "no $file" >&2; exit 1; }
 
-# Hash deps.Dockerfile plus any sibling inputs it COPY's (e.g. probe_*.py). Sorted concat so the tag moves when a probe script changes, not only the Dockerfile.
+# Hash deps.Dockerfile plus anything it COPY's so the tag moves when a copied file changes.
 hash_inputs="$file"
-for f in "$dir"/probe_*.py; do
+for f in "$dir"/probe_*.py "$dir"/collect_*.py \
+         "$root/bases/runtime/strip_unused_cuda.sh"; do
     [ -f "$f" ] || continue
     hash_inputs="$hash_inputs $f"
 done
