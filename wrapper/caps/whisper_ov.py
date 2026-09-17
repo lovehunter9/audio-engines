@@ -91,11 +91,14 @@ def _load():
         ct2_whisper.ensure_whisper_generation_config(src)
         nested = os.path.join(src, "openvino")
         stamp = os.path.join(nested, ".genai-lang-to-id")
-        # intel3 reused the intel2 IR and then 200'd empty text. Rebuild once
-        # after lang_to_id lands so GenAI compiles against the new sidecar.
+        # Missing stamp used to rmtree a working IR and force a multi-minute
+        # optimum export. Write the stamp after a successful load instead.
         if os.path.isdir(nested) and not os.path.isfile(stamp):
-            log.info("dropping stale Whisper IR at %s", nested)
-            shutil.rmtree(nested)
+            if ct2_whisper.is_whisper_ir(nested):
+                log.info("keeping Whisper IR without stamp at %s", nested)
+            else:
+                log.info("dropping incomplete Whisper IR at %s", nested)
+                shutil.rmtree(nested)
         model_dir = _ensure_ir(src)
         ct2_whisper.ensure_whisper_generation_config(src)
         ct2_whisper.ensure_whisper_generation_config(model_dir)

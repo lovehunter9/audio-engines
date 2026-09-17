@@ -539,12 +539,15 @@ def to_transformers_dir(src, dest):
         "encoder_layers": _count_layers(raw, "encoder") or config.get("encoder_layers") or 32,
         "decoder_layers": _count_layers(raw, "decoder") or config.get("decoder_layers") or 32,
     })
+    log.info("mapped %d HF tensors; dropping CT2 dict before save_file", len(state))
     os.makedirs(dest, exist_ok=True)
     _copy_sidecar(src, dest)
+    _write_whisper_hf_config(dest, raw)
+    del raw
     from safetensors.numpy import save_file
 
     save_file(state, os.path.join(dest, "model.safetensors"))
-    _write_whisper_hf_config(dest, raw)
+    del state
     open(marker, "w").close()
     open(stamp, "w").close()
     log.info("rebuilt transformers Whisper at %s from CT2 %s", dest, src)
