@@ -49,6 +49,16 @@ _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 _state = _runtime.state
 
 
+def _speechbrain_device(torch):
+    # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
+    base = (os.environ.get("AUDIO_BASE") or "").strip()
+    if base == "enhancexpu":
+        if not hasattr(torch, "xpu") or not torch.xpu.is_available():
+            raise RuntimeError("enhancexpu requires an Intel XPU; refusing CPU")
+        return "xpu:0"
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 def _load():
     try:
         import torch
@@ -56,8 +66,7 @@ def _load():
 
         src = snapshot_download(MODEL_REPO, local_files_only=True,
                                 cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
-        # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
-        dev = "cuda:0" if torch.cuda.is_available() else "cpu"
+        dev = _speechbrain_device(torch)
         # Repos need different inference classes; try each in turn (1.x moved the module path).
         try:
             from speechbrain.inference.enhancement import (
@@ -92,8 +101,9 @@ def _run(noisy):
 
     model = _state["model"]
     # SpeechBrain's enhance_batch has no no-grad of its own, and that dead graph dominates VRAM.
-    amp = AMP and _state["device"].startswith("cuda")
-    with torch.no_grad(), (torch.autocast("cuda", dtype=torch.float16) if amp
+    kind = _state["device"].split(":", 1)[0]
+    amp = AMP and kind in ("cuda", "xpu")
+    with torch.no_grad(), (torch.autocast(kind, dtype=torch.float16) if amp
                            else contextlib.nullcontext()):
         if _state["kind"] == "sepformer":
             est = model.separate_batch(noisy)    # (batch, time, n_src)
@@ -103,7 +113,10 @@ def _run(noisy):
             enhanced = model.enhance_batch(noisy, lengths=lengths)
         arr = enhanced.float().detach().cpu().numpy().reshape(-1)
     try:
-        torch.cuda.empty_cache()
+        if _state["device"].startswith("xpu"):
+            torch.xpu.empty_cache()
+        else:
+            torch.cuda.empty_cache()
     except Exception:
         pass
     return arr

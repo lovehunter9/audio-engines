@@ -70,6 +70,12 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("whisper", "stt", "POST", "/v1/audio/translations"): {
         "async_supported": True,
     },
+    ("whisper_ov", "stt", "POST", "/v1/audio/transcriptions"): {
+        "async_supported": True,
+    },
+    ("whisper_ov", "stt", "POST", "/v1/audio/translations"): {
+        "async_supported": True,
+    },
 }
 
 _EL_TTS_ROUTES = (
@@ -474,6 +480,17 @@ class RuntimeHelperTest(unittest.TestCase):
                     "compute": None,
                 },
             },
+            "whisper_ov": {
+                "supports": ["stt"],
+                "watchdog": "whisper-ov",
+                "state": {
+                    "ready": False,
+                    "error": None,
+                    "model": None,
+                    "pipeline": None,
+                    "device": None,
+                },
+            },
         }
 
         for name, expected in cases.items():
@@ -577,6 +594,63 @@ class OpenVINOModeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia",
                                               "REQUIRED_GPU_MEMORY": "0"}, clear=False):
                 self.assertEqual(q._ov_device(), "CPU")
+
+    def test_whisperov_refuses_cpu(self):
+        from wrapper.caps import whisper_ov as w
+
+        with mock.patch("wrapper.ovutil.device", return_value="CPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "must use GPU"):
+                    w._require_gpu()
+        with mock.patch("wrapper.ovutil.device", return_value="GPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+                self.assertEqual(w._require_gpu(), "GPU")
+
+    def test_enhancexpu_refuses_cpu(self):
+        from wrapper.caps import enhance
+
+        class CpuOnly:
+            class cuda:
+                @staticmethod
+                def is_available():
+                    return False
+
+        class Xpu:
+            class xpu:
+                @staticmethod
+                def is_available():
+                    return True
+
+            class cuda:
+                @staticmethod
+                def is_available():
+                    return False
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "enhancexpu"}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "refusing CPU"):
+                enhance._speechbrain_device(CpuOnly)
+            self.assertEqual(enhance._speechbrain_device(Xpu), "xpu:0")
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "pyannote"}, clear=False):
+            self.assertEqual(enhance._speechbrain_device(CpuOnly), "cpu")
+
+    def test_ct2_whisper_never_fetches_a_second_repo(self):
+        import inspect
+        import tempfile
+
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, "model.bin"), "wb").close()
+            with open(os.path.join(td, "config.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            self.assertTrue(ct2_whisper.is_ct2(td))
+            self.assertFalse(ct2_whisper.is_transformers(td))
+            src = inspect.getsource(ct2_whisper)
+            self.assertNotIn("snapshot_download", src)
+            self.assertNotIn("huggingface_hub", src)
+            with self.assertRaises((RuntimeError, ImportError)):
+                ct2_whisper.to_transformers_dir(td, os.path.join(td, "hf-from-ct2"))
+
 
     def test_device_flag_overrides_mode(self):
         from wrapper.caps import stt_stream as q
@@ -755,6 +829,14 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream", "align"])
         self.assertEqual(catalog.module_of("ov", "align"), "align")
         self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
+
+    def test_whisperov_and_enhancexpu_are_their_own_bases(self):
+        self.assertEqual(catalog.implements("whisperov"), ["stt"])
+        self.assertEqual(catalog.module_of("whisperov", "stt"), "whisper_ov")
+        self.assertIsNone(catalog.module_of("whisperov", "stt_stream"))
+        self.assertEqual(catalog.implements("enhancexpu"), ["enhance"])
+        self.assertEqual(catalog.module_of("enhancexpu", "enhance"), "enhance")
+        self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
 
     def test_ov_engine_spec_is_v2_like_main(self):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",

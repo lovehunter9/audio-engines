@@ -2755,6 +2755,29 @@ def t_whisper():
               (rr.status_code, rr.headers.get("content-type"), rr.content[:40]))
 
 
+def t_whisper_ov():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import whisper_ov as w
+
+    w._decode = lambda data, fn: np.zeros(SR * 2, dtype="float32")
+    w._generate = lambda audio, task, language: "hello world"
+    w._state.update(ready=True, pipeline=object(), device="GPU", error=None)
+    with TestClient(w.build_app(["stt"])) as c:
+        advertises_tasks(c, "whisper_ov")
+        both_ways(c, "/v1/audio/transcriptions", WAV, {}, "whisper_ov stt", meters=("input",))
+        both_ways(c, "/v1/audio/translations", WAV, {}, "whisper_ov translations",
+                  meters=("input",))
+        both_ways(
+            c, "/v1/audio/transcriptions", WAV,
+            {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "whisper_ov batch",
+            meters=("input",))
+        r = c.post("/v1/audio/transcriptions", files=WAV,
+                   data={"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'})
+        check("whisper_ov batch returns one result per span",
+              r.status_code == 200 and len((r.json() or {}).get("results") or []) == 2,
+              r.text[:200])
+
+
 def t_qwen():
     from fastapi.testclient import TestClient
     from wrapper.caps import stt_stream as q
@@ -5429,6 +5452,7 @@ def main():
                            ("embed", t_embed, "pyannote"), ("enhance", t_enhance, "pyannote"),
                            ("align", t_align, "qwen"),
                            ("whisper (fasterwhisper)", t_whisper, "fasterwhisper"),
+                           ("whisper_ov", t_whisper_ov, "whisperov"),
                            ("qwen", t_qwen, "qwen"),
                            ("ov", t_ov, "ov"),
                            ("tts", t_tts, "qwen3tts"),

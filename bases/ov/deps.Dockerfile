@@ -1,4 +1,4 @@
-# audio-ov deps (hash-tagged rebuilds). Intel GPU only exists on amd64; CI passes a single-arch slice.
+# audio-qwen-ov deps (hash-tagged rebuilds). Intel GPU only exists on amd64; CI passes a single-arch slice.
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -113,5 +113,5 @@ print('transformers', transformers.__version__); \
 print('qwen_asr', 'ok'); \
 print('forced_aligner', OVModelForQwen3ASRForcedAligner.__name__)"
 
-LABEL org.opencontainers.image.title="audio-ov-deps" \
+LABEL org.opencontainers.image.title="audio-qwen-ov-deps" \
       audio.compute_runtime="26.22.38646.4"
