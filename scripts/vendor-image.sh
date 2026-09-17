@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# Print a base's vendor ref: <runtime repo>:vendor-<hash of vendor.Dockerfile>.
-# The C++ patch is NOT in this hash — patch-only deps rebuilds pull this tag.
+# Print the pinned Hub vendor ref. One shot: bump VENDOR_VERSION only when
+# the user nods a new vendor. The C++ patch is not here.
 set -euo pipefail
 
-BASE="${1:?usage: vendor-image.sh <base> <runtime-repo> [ovbase]}"
-REPO="${2:?usage: vendor-image.sh <base> <runtime-repo> [ovbase]}"
-REPO="${REPO%%:*}"
+BASE="${1:?usage: vendor-image.sh <base> <runtime-repo> [vendor|ovbase]}"
+# runtime-repo is ignored: vendor lives on lovehunter9, not the qwen-ov tag.
+: "${2:?usage: vendor-image.sh <base> <runtime-repo> [vendor|ovbase]}"
 KIND="${3:-vendor}"
+
+VENDOR_REPO=lovehunter9/ov-vendor
+VENDOR_VERSION=v0.0.1
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 file="$root/bases/$BASE/vendor.Dockerfile"
 [ -f "$file" ] || { echo "no $file" >&2; exit 1; }
 
-if command -v sha256sum >/dev/null; then
-    h=$(sha256sum "$file" | cut -c1-12)
-else
-    h=$(shasum -a 256 "$file" | cut -c1-12)
-fi
 case "$KIND" in
-    vendor) echo "${REPO}:vendor-${h}" ;;
-    ovbase) echo "${REPO}:ovbase-${h}" ;;
+    vendor) echo "${VENDOR_REPO}:${VENDOR_VERSION}" ;;
+    ovbase) echo "${VENDOR_REPO}:${VENDOR_VERSION}-base" ;;
     *) echo "usage: vendor-image.sh <base> <runtime-repo> [vendor|ovbase]" >&2; exit 1 ;;
 esac

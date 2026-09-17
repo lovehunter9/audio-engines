@@ -1,10 +1,8 @@
 # audio-qwen-ov deps. Intel GPU is amd64 only.
 #
-# Vendor (NEO + pip + unpatched genai checkout) is a Hub image whose tag
-# does not move when the C++ patch changes. This file only compiles the
-# patch onto that vendor and copies /usr/local onto ovbase, so a patch-only
-# rebuild is compile + crane-append, not another half hour of pip/clone.
-# CI must pass VENDOR and BASE (scripts/vendor-image.sh).
+# Vendor is lovehunter9/ov-vendor:v0.0.1 (and :v0.0.1-base). This file
+# only compiles the C++ patch onto that pin, so a patch-only rebuild is
+# compile + crane-append. CI must pass VENDOR and BASE (vendor-image.sh).
 
 ARG VENDOR
 ARG BASE
