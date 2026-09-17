@@ -1,5 +1,5 @@
 # SpeechBrain Intel XPU CI (image audio-enhance-xpu). Triggers only; build is build-image.yml.
-name: enhancexpu-ci
+name: enhance-xpu-ci
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/enhancexpu/**'
-      - '.github/workflows/enhancexpu-ci.yml'
+      - '.github/workflows/enhance-xpu-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: enhancexpu-ci-${{ github.ref }}
+  group: enhance-xpu-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
