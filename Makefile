@@ -11,8 +11,8 @@ ifeq ($(BASE),ov)
 HUB_REPO ?= audio-qwen-ov
 else ifeq ($(BASE),whisperov)
 HUB_REPO ?= audio-whisper-ov
-else ifeq ($(BASE),enhancexpu)
-HUB_REPO ?= audio-enhance-xpu
+else ifeq ($(BASE),enhanceov)
+HUB_REPO ?= audio-enhance-ov
 else
 HUB_REPO ?= audio-$(BASE)
 endif

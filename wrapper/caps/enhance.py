@@ -1,5 +1,5 @@
 # Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
-# Intel (AUDIO_BASE=enhancexpu): OpenVINO GPU. torch.xpu SIGSEGV'd; do not use it.
+# Intel (AUDIO_BASE=enhanceov): OpenVINO GPU.
 import contextlib
 import io
 import os
@@ -52,7 +52,7 @@ _OV_STAMP = ".ov-enhance-v1"
 
 
 def _is_ov_enhance():
-    return (os.environ.get("AUDIO_BASE") or "").strip() == "enhancexpu"
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "enhanceov"
 
 
 def _require_ov_gpu():
@@ -61,9 +61,9 @@ def _require_ov_gpu():
     device = ovutil.device()
     mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
     if mode.startswith("intel") and device.upper() != "GPU":
-        raise RuntimeError("enhancexpu on %s must use GPU, got %s" % (mode, device))
+        raise RuntimeError("enhanceov on %s must use GPU, got %s" % (mode, device))
     if device.upper() != "GPU":
-        raise RuntimeError("enhancexpu requires OpenVINO GPU; refusing CPU")
+        raise RuntimeError("enhanceov requires OpenVINO GPU, got %s" % device)
     return device
 
 
