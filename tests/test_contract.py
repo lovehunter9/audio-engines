@@ -687,6 +687,14 @@ class OpenVINOModeTest(unittest.TestCase):
                 def is_available():
                     return True
 
+                @staticmethod
+                def device_count():
+                    return 2
+
+                @staticmethod
+                def get_device_name(i):
+                    return ("Intel Graphics", "Intel Arc Pro B70")[i]
+
             class cuda:
                 @staticmethod
                 def is_available():
@@ -695,7 +703,10 @@ class OpenVINOModeTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "enhancexpu"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "refusing CPU"):
                 enhance._speechbrain_device(CpuOnly)
-            self.assertEqual(enhance._speechbrain_device(Xpu), "xpu:0")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                self.assertEqual(enhance._speechbrain_device(Xpu), "xpu:0")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+                self.assertEqual(enhance._speechbrain_device(Xpu), "xpu:1")
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "pyannote"}, clear=False):
             self.assertEqual(enhance._speechbrain_device(CpuOnly), "cpu")
 
