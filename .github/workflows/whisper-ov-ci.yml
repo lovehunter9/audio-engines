@@ -1,5 +1,5 @@
 # Whisper OpenVINO CI (image audio-whisper-ov). Triggers only; build is build-image.yml.
-name: whisperov-ci
+name: whisper-ov-ci
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/whisperov/**'
-      - '.github/workflows/whisperov-ci.yml'
+      - '.github/workflows/whisper-ov-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: whisperov-ci-${{ github.ref }}
+  group: whisper-ov-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
