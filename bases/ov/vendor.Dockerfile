@@ -1,7 +1,7 @@
 # audio-qwen-ov vendor: NEO + pip + unpatched openvino.genai checkout.
-# Pushed to Hub as <repo>:vendor-<hash> / ovbase-<hash>. Hash does NOT
-# include the C++ patch, so a patch-only deps rebuild just pulls this.
-# Intel GPU is amd64 only.
+# Hub pin is lovehunter9/ov-vendor:v0.0.1 (+ :v0.0.1-base). Bump that
+# version only when this file changes and the user nods. The C++ patch
+# is not in this image. Intel GPU is amd64 only.
 
 FROM ubuntu:24.04 AS base
 
