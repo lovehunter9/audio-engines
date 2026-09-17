@@ -785,6 +785,38 @@ class OpenVINOModeTest(unittest.TestCase):
                 cfg = json.load(fh)
             self.assertEqual(cfg["architectures"], ["WhisperForConditionalGeneration"])
             self.assertTrue(os.path.isfile(os.path.join(dest, "preprocessor_config.json")))
+            with open(os.path.join(dest, "generation_config.json"), encoding="utf-8") as fh:
+                gen = json.load(fh)
+            self.assertEqual(gen["lang_to_id"]["<|en|>"], 50259)
+            self.assertEqual(gen["task_to_id"]["transcribe"], 50360)
+
+    def test_ct2_dest_missing_lang_to_id_is_repaired_into_openvino(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dest = os.path.join(td, "dest")
+            nested = os.path.join(dest, "openvino")
+            os.makedirs(src)
+            os.makedirs(nested)
+            open(os.path.join(src, "model.bin"), "wb").close()
+            with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            open(os.path.join(dest, "model.safetensors"), "wb").close()
+            with open(os.path.join(dest, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({
+                    "model_type": "whisper",
+                    "architectures": ["WhisperForConditionalGeneration"],
+                }, fh)
+            open(os.path.join(nested, "openvino_encoder_model.xml"), "wb").close()
+            open(os.path.join(nested, "openvino_decoder_model.xml"), "wb").close()
+            self.assertFalse(ct2_whisper._hf_config_ok(dest))
+            out = ct2_whisper.to_transformers_dir(src, dest)
+            self.assertEqual(out, dest)
+            self.assertTrue(ct2_whisper._hf_config_ok(dest))
+            with open(os.path.join(nested, "generation_config.json"), encoding="utf-8") as fh:
+                gen = json.load(fh)
+            self.assertIn("<|zh|>", gen["lang_to_id"])
 
     def test_device_flag_overrides_mode(self):
         from wrapper.caps import stt_stream as q

@@ -89,6 +89,8 @@ def _load():
         device = _require_gpu()
         src = _prepare_hf(_locate())
         model_dir = _ensure_ir(src)
+        ct2_whisper.ensure_whisper_generation_config(src)
+        ct2_whisper.ensure_whisper_generation_config(model_dir)
         cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_whisper")
         os.makedirs(cache, exist_ok=True)
         pipe = ov_genai.WhisperPipeline(model_dir, device, CACHE_DIR=cache)
