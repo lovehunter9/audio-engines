@@ -430,8 +430,21 @@ def _ov_generate_many(clips, language=None):
     lang = _ov_language(language)
     if lang:
         kw["language"] = lang
-    result = asr.generate(raws, **kw)
-    return _ov_result_texts(result, len(clips))
+    try:
+        result = asr.generate(raws, **kw)
+        return _ov_result_texts(result, len(clips))
+    except Exception as e:
+        msg = str(e)
+        if "ocl_stream" not in msg and "CL_OUT_OF_RESOURCES" not in msg:
+            raise
+        # Arc B>1 speech has poisoned the compiled decoder; serial still works
+        # after a reload. True batch is the C++ token-count == padded-T fix.
+        _p("ov batch generate died (%s); reloading and retrying serial" % e)
+        log.exception("ov batch generate died; reload + serial")
+        _state["ready"] = False
+        _state["asr"] = None
+        _load_ov()
+        return [_ov_result_text(_ov_generate(c, language=language)) for c in clips]
 
 
 def _load_blocking():
