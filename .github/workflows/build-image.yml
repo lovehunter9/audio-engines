@@ -297,39 +297,15 @@ jobs:
             echo "BASE=${OVBASE_ARCH}"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
-          need=false
-          crane manifest "$VENDOR_ARCH" >/dev/null 2>&1 || need=true
-          crane manifest "$OVBASE_ARCH" >/dev/null 2>&1 || need=true
-          echo "needed=${need}" >> "$GITHUB_OUTPUT"
-          echo "vendor ${VENDOR_ARCH} ovbase ${OVBASE_ARCH} needed=${need}"
-
-      - name: build ovbase
-        if: steps.vendor.outputs.needed == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bases/${{ inputs.base }}/vendor.Dockerfile
-          target: base
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ steps.vendor.outputs.ovbase }}
-          provenance: false
-          cache-from: type=gha,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
-
-      - name: build vendor
-        if: steps.vendor.outputs.needed == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: bases/${{ inputs.base }}/vendor.Dockerfile
-          target: vendor
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ steps.vendor.outputs.vendor }}
-          provenance: false
-          cache-from: type=gha,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
+          missing=""
+          crane manifest "$VENDOR_ARCH" >/dev/null 2>&1 || missing="$missing $VENDOR_ARCH"
+          crane manifest "$OVBASE_ARCH" >/dev/null 2>&1 || missing="$missing $OVBASE_ARCH"
+          if [ -n "$missing" ]; then
+            echo "::error::vendor not on Hub:$missing — run ov-vendor-ci by hand (workflow_dispatch only). qwen-ov-ci must not build vendor on a tag."
+            exit 1
+          fi
+          echo "needed=false" >> "$GITHUB_OUTPUT"
+          echo "vendor ${VENDOR_ARCH} ovbase ${OVBASE_ARCH} (Hub, not built here)"
 
       - name: build the deps image for this arch
         if: steps.deps.outputs.needed == 'true'
