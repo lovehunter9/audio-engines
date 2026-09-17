@@ -24,11 +24,21 @@ def is_transformers(path):
 
 
 def is_whisper_ir(path):
+    # WhisperPipeline compiles the decoder and sets beam_idx. A stateless
+    # `--task automatic-speech-recognition` export 500s with
+    # "Port for tensor name beam_idx was not found."
     if not path or not os.path.isdir(path):
         return False
     enc = os.path.join(path, "openvino_encoder_model.xml")
     dec = os.path.join(path, "openvino_decoder_model.xml")
-    return os.path.isfile(enc) and os.path.isfile(dec)
+    if not (os.path.isfile(enc) and os.path.isfile(dec)):
+        return False
+    try:
+        with open(dec, "rb") as f:
+            head = f.read(1048576)
+    except OSError:
+        return False
+    return b"beam_idx" in head
 
 
 def _copy_sidecar(src, dest):
