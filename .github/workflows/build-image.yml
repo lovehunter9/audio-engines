@@ -234,6 +234,69 @@ jobs:
       - uses: docker/setup-buildx-action@v3
         if: needs.meta.outputs.kind == 'docker' || steps.deps.outputs.needed == 'true'
 
+      # Hub vendor (pip + genai clone) is the real cache. GHA layer cache
+      # alone is not: a patch COPY in the same RUN as pip still rebuilds cold.
+      - name: resolve vendor image
+        id: vendor
+        if: steps.deps.outputs.needed == 'true'
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace }}
+          DH_REPO: ${{ inputs.repo }}
+          WANT_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "bases/${{ inputs.base }}/vendor.Dockerfile" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "build_args=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          RUNTIME_REPO="${DH_NAMESPACE}/${DH_REPO}"
+          VENDOR=$(./scripts/vendor-image.sh "${{ inputs.base }}" "$RUNTIME_REPO" vendor)
+          OVBASE=$(./scripts/vendor-image.sh "${{ inputs.base }}" "$RUNTIME_REPO" ovbase)
+          VENDOR_ARCH="${VENDOR}-${WANT_ARCH}"
+          OVBASE_ARCH="${OVBASE}-${WANT_ARCH}"
+          echo "vendor=${VENDOR_ARCH}" >> "$GITHUB_OUTPUT"
+          echo "ovbase=${OVBASE_ARCH}" >> "$GITHUB_OUTPUT"
+          {
+            echo "build_args<<EOF"
+            echo "VENDOR=${VENDOR_ARCH}"
+            echo "BASE=${OVBASE_ARCH}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          need=false
+          crane manifest "$VENDOR_ARCH" >/dev/null 2>&1 || need=true
+          crane manifest "$OVBASE_ARCH" >/dev/null 2>&1 || need=true
+          echo "needed=${need}" >> "$GITHUB_OUTPUT"
+          echo "vendor ${VENDOR_ARCH} ovbase ${OVBASE_ARCH} needed=${need}"
+
+      - name: build ovbase
+        if: steps.vendor.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/vendor.Dockerfile
+          target: base
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.vendor.outputs.ovbase }}
+          provenance: false
+          cache-from: type=gha,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
+
+      - name: build vendor
+        if: steps.vendor.outputs.needed == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: bases/${{ inputs.base }}/vendor.Dockerfile
+          target: vendor
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.vendor.outputs.vendor }}
+          provenance: false
+          cache-from: type=gha,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=vendor-${{ inputs.base }}-${{ matrix.arch }}
+
       - name: build the deps image for this arch
         if: steps.deps.outputs.needed == 'true'
         uses: docker/build-push-action@v6
@@ -244,9 +307,7 @@ jobs:
           push: true
           tags: ${{ steps.deps.outputs.base_image }}
           provenance: false
-          # Wrapper-only publishes reuse Hub deps and never reach here.
-          # When deps.Dockerfile / patches actually change, pick up the
-          # previous BuildKit layers instead of compiling OpenVINO GenAI cold.
+          build-args: ${{ steps.vendor.outputs.build_args }}
           cache-from: type=gha,scope=deps-${{ inputs.base }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=deps-${{ inputs.base }}-${{ matrix.arch }}
 

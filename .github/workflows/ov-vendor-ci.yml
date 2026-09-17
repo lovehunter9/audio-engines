@@ -1,0 +1,62 @@
+# Warm Hub vendor/ovbase for audio-qwen-ov. Separate concurrency from
+# qwen-ov-ci so a vendor warm does not cancel an in-flight compile.
+name: ov-vendor-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: ov-vendor-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+      - uses: docker/setup-buildx-action@v3
+      - name: install crane
+        env:
+          CRANE_VERSION: v0.20.3
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin crane
+      - name: build vendor and ovbase if missing
+        env:
+          DH_NAMESPACE: ${{ inputs.namespace || 'beclab' }}
+        run: |
+          set -euo pipefail
+          [ -n "${DH_NAMESPACE}" ] || { echo "empty namespace"; exit 1; }
+          REPO="${DH_NAMESPACE}/audio-qwen-ov"
+          VENDOR=$(./scripts/vendor-image.sh ov "$REPO" vendor)-amd64
+          OVBASE=$(./scripts/vendor-image.sh ov "$REPO" ovbase)-amd64
+          echo "vendor=$VENDOR"
+          echo "ovbase=$OVBASE"
+          if crane manifest "$VENDOR" >/dev/null 2>&1 && crane manifest "$OVBASE" >/dev/null 2>&1; then
+            echo "both already on Hub"
+            exit 0
+          fi
+          docker buildx build --platform linux/amd64 --target base \
+            -f bases/ov/vendor.Dockerfile \
+            -t "$OVBASE" --provenance=false --push \
+            --cache-from type=gha,scope=vendor-ov-amd64 \
+            --cache-to type=gha,mode=max,scope=vendor-ov-amd64 .
+          docker buildx build --platform linux/amd64 --target vendor \
+            -f bases/ov/vendor.Dockerfile \
+            -t "$VENDOR" --provenance=false --push \
+            --cache-from type=gha,scope=vendor-ov-amd64 \
+            --cache-to type=gha,mode=max,scope=vendor-ov-amd64 .

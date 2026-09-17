@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1995,19 +1996,39 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
 
 
 class QwenOvDepsCacheTest(unittest.TestCase):
-    def test_patch_copy_is_after_the_cached_genai_clone(self):
-        path = os.path.join(os.path.dirname(__file__), "../bases/ov/deps.Dockerfile")
-        with open(path) as fh:
-            text = fh.read()
-        self.assertIn("FROM ubuntu:24.04 AS base", text)
-        self.assertIn("FROM base AS vendor", text)
-        self.assertIn("FROM vendor AS builder", text)
-        clone = text.find("git clone")
-        copy = text.find("COPY bases/ov/patches/apply_qwen3_asr_batch.py")
-        self.assertGreater(clone, -1)
-        self.assertGreater(copy, clone)
-        self.assertIn("COPY --from=builder /usr/local /usr/local", text)
-        self.assertNotIn("nvidia/cuda", text)
+    def test_patch_lives_only_in_deps_not_vendor(self):
+        root = os.path.join(os.path.dirname(__file__), "../bases/ov")
+        vendor = open(os.path.join(root, "vendor.Dockerfile")).read()
+        deps = open(os.path.join(root, "deps.Dockerfile")).read()
+        self.assertIn("FROM ubuntu:24.04 AS base", vendor)
+        self.assertIn("FROM base AS vendor", vendor)
+        self.assertIn("/opt/genai-src", vendor)
+        self.assertNotIn("apply_qwen3_asr_batch.py", vendor)
+        self.assertNotIn("nvidia/cuda", vendor)
+        self.assertIn("ARG VENDOR", deps)
+        self.assertIn("ARG BASE", deps)
+        self.assertIn("FROM ${VENDOR} AS builder", deps)
+        self.assertIn("FROM ${BASE}", deps)
+        self.assertIn("COPY bases/ov/patches/apply_qwen3_asr_batch.py", deps)
+        self.assertIn("COPY --from=builder /usr/local /usr/local", deps)
+
+    def test_vendor_tag_script_ignores_patches(self):
+        root = os.path.join(os.path.dirname(__file__), "..")
+        script = os.path.join(root, "scripts/vendor-image.sh")
+        deps_script = os.path.join(root, "scripts/deps-image.sh")
+        vendor_sh = open(script).read()
+        deps_sh = open(deps_script).read()
+        self.assertNotIn("patches", vendor_sh)
+        self.assertIn("vendor.Dockerfile", vendor_sh)
+        self.assertIn("vendor.Dockerfile", deps_sh)
+        self.assertIn("patches", deps_sh)
+        vendor = subprocess.check_output(
+            ["bash", script, "ov", "lovehunter9/audio-qwen-ov", "vendor"], text=True).strip()
+        deps = subprocess.check_output(
+            ["bash", deps_script, "ov", "lovehunter9/audio-qwen-ov"], text=True).strip()
+        self.assertTrue(vendor.startswith("lovehunter9/audio-qwen-ov:vendor-"), vendor)
+        self.assertTrue(deps.startswith("lovehunter9/audio-qwen-ov:deps-"), deps)
+        self.assertNotEqual(vendor.split(":")[-1], deps.split(":")[-1])
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):
