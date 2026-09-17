@@ -79,11 +79,10 @@ def _load():
                       ("spectralmask", SpectralMaskEnhancement),
                       ("sepformer", SepformerSeparation)]
         last = None
+        # from_hparams(..., device=xpu) SIGSEGV'd on i915 while mapping the
+        # ckpt. A torch.zeros(..., device="xpu") probe did the same. Load on
+        # CPU, then .to(xpu). Arc can take the move; i915 still cannot.
         load_dev = "cpu" if dev.startswith("xpu") else dev
-        if load_dev != dev:
-            probe = torch.zeros(8, device="xpu")
-            log.info("xpu probe ok device=%s", probe.device)
-            del probe
         for kind, cls in candidates:
             try:
                 savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
