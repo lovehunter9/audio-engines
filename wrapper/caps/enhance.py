@@ -61,7 +61,6 @@ def _speechbrain_device(torch):
 
 def _load():
     try:
-        import torch
         from huggingface_hub import snapshot_download
 
         src = snapshot_download(MODEL_REPO, local_files_only=True,
