@@ -1,5 +1,5 @@
-# SpeechBrain Intel XPU CI (image audio-enhance-xpu). Triggers only; build is build-image.yml.
-name: enhance-xpu-ci
+# SpeechBrain Intel OpenVINO CI (image audio-enhance-ov). Triggers only; build is build-image.yml.
+name: enhance-ov-ci
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
     paths:
       - 'wrapper/**'
       - 'tests/**'
-      - 'bases/enhancexpu/**'
-      - '.github/workflows/enhance-xpu-ci.yml'
+      - 'bases/enhanceov/**'
+      - '.github/workflows/enhance-ov-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
@@ -24,17 +24,18 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
-  group: enhance-xpu-ci-${{ github.ref }}
+  group: enhance-ov-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     uses: ./.github/workflows/build-image.yml
     with:
-      base: enhancexpu
-      repo: audio-enhance-xpu
+      base: enhanceov
+      repo: audio-enhance-ov
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || 'beclab' }}
       image_tag: ${{ inputs.image_tag || '' }}
