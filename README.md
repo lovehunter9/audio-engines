@@ -217,7 +217,7 @@ passes. For the same reason the build's final import check must go **through**
 | `qwen` | `beclab/audio-qwen` | `stt`, `stt_stream`, `align` | qwen-asr transformers; one package, two loads | in progress |
 | `ov` | `beclab/audio-qwen-ov` | `stt`, `stt_stream`, `align` | OpenVINO GenAI Qwen3-ASR + ForcedAligner (Intel iGPU / Arc, amd64) | in progress |
 | `whisperov` | `beclab/audio-whisper-ov` | `stt` (+ `/v1/audio/translations`) | OpenVINO GenAI WhisperPipeline (Intel GPU, amd64) | in progress |
-| `enhancexpu` | `beclab/audio-enhance-xpu` | `enhance` | SpeechBrain → OpenVINO GPU (amd64) | in progress |
+| `enhanceov` | `beclab/audio-enhance-ov` | `enhance` | SpeechBrain → OpenVINO GPU (amd64) | in progress |
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
@@ -328,10 +328,9 @@ is missing. One `MODEL_SOURCE` snapshot: transformers weights export to IR, or
 Systran `model.bin` is rebuilt in-process to transformers then exported — never
 a second Hub download. amd64 only.
 
-**`enhancexpu`.** Separate image (`audio-enhance-xpu`). SpeechBrain
+**`enhanceov`.** Separate image (`audio-enhance-ov`). SpeechBrain
 `enhance_model` is exported once to OpenVINO IR and compiled on `GPU`.
-Same enhance HTTP as the CUDA pyannote image; CPU is a startup failure.
-`torch.xpu` is not used. amd64 only.
+Same enhance HTTP as the CUDA pyannote image. amd64 only.
 
 **`fasterwhisper`.** Arch-selected deps (`base-amd64` / `base-arm64`):
 

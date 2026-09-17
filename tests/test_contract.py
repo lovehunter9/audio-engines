@@ -658,7 +658,7 @@ class OpenVINOModeTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
                 self.assertEqual(w._require_gpu(), "GPU")
 
-    def test_enhancexpu_refuses_cpu(self):
+    def test_enhanceov_requires_gpu(self):
         from wrapper.caps import enhance
 
         with mock.patch("wrapper.ovutil.device", return_value="CPU"):
@@ -995,12 +995,12 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.module_of("ov", "align"), "align")
         self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
 
-    def test_whisperov_and_enhancexpu_are_their_own_bases(self):
+    def test_whisperov_and_enhanceov_are_their_own_bases(self):
         self.assertEqual(catalog.implements("whisperov"), ["stt"])
         self.assertEqual(catalog.module_of("whisperov", "stt"), "whisper_ov")
         self.assertIsNone(catalog.module_of("whisperov", "stt_stream"))
-        self.assertEqual(catalog.implements("enhancexpu"), ["enhance"])
-        self.assertEqual(catalog.module_of("enhancexpu", "enhance"), "enhance")
+        self.assertEqual(catalog.implements("enhanceov"), ["enhance"])
+        self.assertEqual(catalog.module_of("enhanceov", "enhance"), "enhance")
         self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
 
     def test_ov_engine_spec_is_v2_like_main(self):

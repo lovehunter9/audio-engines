@@ -26,8 +26,8 @@ BASES = {
         (("speaker_embed",), "embed"),
         (("enhance",), "enhance"),
     ],
-    # Intel Enhance: SpeechBrain → OpenVINO GPU. Same enhance module, no CUDA, no torch.xpu.
-    "enhancexpu": [
+    # Intel Enhance: SpeechBrain → OpenVINO GPU. Same enhance module.
+    "enhanceov": [
         (("enhance",), "enhance"),
     ],
     "nemo": [
