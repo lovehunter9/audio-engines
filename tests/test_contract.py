@@ -758,6 +758,33 @@ class OpenVINOModeTest(unittest.TestCase):
             self.assertEqual(mapped["model.encoder.conv1.weight"].shape, (2, 1, 3))
             self.assertTrue(np.allclose(
                 mapped["model.encoder.layers.0.self_attn.q_proj.weight"], q))
+            hf = ct2_whisper._whisper_hf_config(dumped)
+            self.assertEqual(hf["model_type"], "whisper")
+            self.assertEqual(hf["encoder_layers"], 1)
+            self.assertEqual(hf["num_mel_bins"], 1)
+
+    def test_ct2_dest_without_model_type_is_repaired(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dest = os.path.join(td, "dest")
+            os.makedirs(src)
+            os.makedirs(dest)
+            open(os.path.join(src, "model.bin"), "wb").close()
+            with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            open(os.path.join(dest, "model.safetensors"), "wb").close()
+            with open(os.path.join(dest, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            self.assertFalse(ct2_whisper._hf_config_ok(dest))
+            out = ct2_whisper.to_transformers_dir(src, dest)
+            self.assertEqual(out, dest)
+            self.assertTrue(ct2_whisper._hf_config_ok(dest))
+            with open(os.path.join(dest, "config.json"), encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            self.assertEqual(cfg["architectures"], ["WhisperForConditionalGeneration"])
+            self.assertTrue(os.path.isfile(os.path.join(dest, "preprocessor_config.json")))
 
     def test_device_flag_overrides_mode(self):
         from wrapper.caps import stt_stream as q
