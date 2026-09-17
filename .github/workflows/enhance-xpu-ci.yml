@@ -1,4 +1,4 @@
-# SpeechBrain Intel XPU CI (image audio-enhance-xpu). Triggers only; build is build-image.yml.
+# SpeechBrain Intel OpenVINO CI (image audio-enhance-xpu). Triggers only; build is build-image.yml.
 name: enhance-xpu-ci
 
 on:

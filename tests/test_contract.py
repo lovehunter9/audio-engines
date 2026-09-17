@@ -661,28 +661,20 @@ class OpenVINOModeTest(unittest.TestCase):
     def test_enhancexpu_refuses_cpu(self):
         from wrapper.caps import enhance
 
-        class CpuOnly:
-            class cuda:
-                @staticmethod
-                def is_available():
-                    return False
-
-        class Xpu:
-            class xpu:
-                @staticmethod
-                def is_available():
-                    return True
-
-            class cuda:
-                @staticmethod
-                def is_available():
-                    return False
-
-        with mock.patch.dict(os.environ, {"AUDIO_BASE": "enhancexpu"}, clear=False):
-            with self.assertRaisesRegex(RuntimeError, "refusing CPU"):
-                enhance._speechbrain_device(CpuOnly)
-            self.assertEqual(enhance._speechbrain_device(Xpu), "xpu:0")
+        with mock.patch("wrapper.ovutil.device", return_value="CPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "must use GPU"):
+                    enhance._require_ov_gpu()
+        with mock.patch("wrapper.ovutil.device", return_value="GPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+                self.assertEqual(enhance._require_ov_gpu(), "GPU")
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "pyannote"}, clear=False):
+            class CpuOnly:
+                class cuda:
+                    @staticmethod
+                    def is_available():
+                        return False
+
             self.assertEqual(enhance._speechbrain_device(CpuOnly), "cpu")
 
     def test_ct2_whisper_never_fetches_a_second_repo(self):
