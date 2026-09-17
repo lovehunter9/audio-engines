@@ -25,7 +25,9 @@ MODEL_REPO = _runtime.model_repo
 _args = EngineArgs()
 # Claimed so a leftover --device is not a silent typo. Intel images refuse CPU.
 _ = _args.text("--device", "")
-BEAM_SIZE = _args.count("--beam-size", 5)
+# Default 0 = omit num_beams. The optimum Whisper IR has no beam_idx port;
+# passing num_beams=5 makes generate() ask for a tensor the IR does not have.
+BEAM_SIZE = _args.count("--beam-size", 0)
 _args.warn_unclaimed(log)
 HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
