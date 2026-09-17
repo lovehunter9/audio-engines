@@ -1058,6 +1058,10 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.implements("enhanceov"), ["enhance"])
         self.assertEqual(catalog.module_of("enhanceov", "enhance"), "enhance")
         self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
+        self.assertEqual(catalog.implements("breezeov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("breezeov", "tts"), "breeze")
+        self.assertEqual(catalog.implements("fireredov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("fireredov", "tts"), "firered")
 
     def test_ov_engine_spec_is_v2_like_main(self):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
@@ -1994,6 +1998,18 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         self.assertGreater(pin, torch)
         self.assertGreater(four, pin)
         self.assertNotIn("pip uninstall", text)
+
+
+class SlimTtsOvRecipeTest(unittest.TestCase):
+    def test_intel_tts_bases_have_openvino_and_no_cuda(self):
+        root = os.path.join(os.path.dirname(__file__), "../bases")
+        for name in ("breezeov", "fireredov"):
+            path = os.path.join(root, name, "deps.Dockerfile")
+            with open(path) as fh:
+                text = fh.read()
+            self.assertNotIn("nvidia/cuda", text, path)
+            self.assertIn("openvino", text, path)
+            self.assertIn("download.pytorch.org/whl/cpu", text, path)
 
 
 class SlimBreezeRecipeTest(unittest.TestCase):

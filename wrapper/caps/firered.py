@@ -453,18 +453,93 @@ class FireRedBackend:
         return None
 
 
+def _is_ov():
+    from .. import tts_ov
+
+    return tts_ov.is_firered_ov()
+
+
 def _load():
     from fireredtts3.core import FireRedTTS3Instruct
 
     patch_backend_tts_triplet()
     tts_el.rewrite_flash_attn(tts_el.ATTN or "eager")
     path = tts_el.model_path()
-    log.info("loading FireRedTTS3-Instruct from %s", path)
-    instruct = FireRedTTS3Instruct(
-        path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
-    )
+    if _is_ov():
+        from .. import tts_ov
+
+        device = tts_ov.require_gpu()
+        restore = tts_ov.force_cpu_torch_device()
+        try:
+            log.info("loading FireRedTTS3-Instruct OpenVINO from %s (ov=%s)", path, device)
+            instruct = FireRedTTS3Instruct(
+                path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
+            )
+        finally:
+            restore()
+        _install_firered_ov(instruct, path, device)
+    else:
+        log.info("loading FireRedTTS3-Instruct from %s", path)
+        instruct = FireRedTTS3Instruct(
+            path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
+        )
     tts_long.vram(log, "loaded")
     return FireRedBackend(instruct)
+
+
+def _install_firered_ov(instruct, path, device):
+    """Official generate() loop stays. DiT one flow step and patch_encoder go to GPU IR."""
+    import torch
+
+    from .. import tts_ov
+
+    core = getattr(instruct, "tts_core", None)
+    if core is None:
+        raise RuntimeError("FireRedTTS3Instruct has no tts_core")
+    dit = core.dit
+    patch = core.patch_encoder
+    hist = int(core.history_length)
+    psize = int(core.patch_size)
+    redae = int(core.redae_dim)
+    hidden = int(core.config.dit_hidden_size)
+    t_len = hist + psize
+    x = torch.zeros(2, t_len, redae + hidden, dtype=torch.float32)
+    t = torch.zeros(2, 1, 1, dtype=torch.float32)
+    _, dit_xml, dit_stamp = tts_ov.ir_paths(path, "firered_dit", ".ov-firered-v1")
+    compiled_dit = tts_ov.compile_module(dit, (x, t), dit_xml, dit_stamp, device)
+    orig_dit = dit.forward
+
+    def dit_forward(x_in=None, t_in=None, **kwargs):
+        import numpy as np
+
+        if x_in is None:
+            x_in = kwargs.get("x")
+        if t_in is None:
+            t_in = kwargs.get("t")
+        if x_in is None or t_in is None:
+            return orig_dit(x=x_in, t=t_in, **kwargs)
+        xa = np.ascontiguousarray(x_in.detach().float().cpu().numpy())
+        ta = np.ascontiguousarray(t_in.detach().float().cpu().numpy())
+        out = compiled_dit(xa, ta)[0]
+        return torch.from_numpy(np.ascontiguousarray(out)).to(x_in.device)
+
+    dit.forward = dit_forward
+    lat = torch.zeros(1, psize, redae, dtype=torch.float32)
+    _, pe_xml, pe_stamp = tts_ov.ir_paths(path, "firered_patch", ".ov-firered-v1")
+    compiled_pe = tts_ov.compile_module(patch, lat, pe_xml, pe_stamp, device)
+    orig_pe = patch.forward
+
+    def pe_forward(latents, *args, **kwargs):
+        import numpy as np
+
+        if not hasattr(latents, "detach"):
+            return orig_pe(latents, *args, **kwargs)
+        arr = np.ascontiguousarray(latents.detach().float().cpu().numpy())
+        out = compiled_pe(arr)[0]
+        return torch.from_numpy(np.ascontiguousarray(out)).to(latents.device)
+
+    patch.forward = pe_forward
+    log.info("firered DiT + patch_encoder on OpenVINO %s", device)
 
 
 def build_app(supports):

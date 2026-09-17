@@ -106,7 +106,7 @@ def gpu_metrics_text(nvml_fallback=False):
         # NVIDIA card. /dev/dri means the chart mounted the Intel device; used/total
         # stay 0 — unified memory is not a CUDA slice.
         if (os.environ.get("AUDIO_BASE") or "").strip() in (
-                "ov", "whisperov", "enhanceov"):
+                "ov", "whisperov", "enhanceov", "breezeov", "fireredov"):
             present = 1 if os.path.exists("/dev/dri") else 0
         elif nvml_fallback:
             # torch is absent or saw no device; ask NVML before reporting zeros.

@@ -323,6 +323,12 @@ class BreezeBackend:
         return audio, sr, {}
 
 
+def _is_ov():
+    from .. import tts_ov
+
+    return tts_ov.is_breeze_ov()
+
+
 def _load():
     attn = tts_el.ATTN or "eager"
     _rewrite_flash_attn(attn)
@@ -330,10 +336,21 @@ def _load():
     from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
 
     path = Path(tts_el.model_path())
-    log.info("loading Breeze TTS 2 from %s (attn=%s)", path, attn)
-    tokenizer, model, audio_tokenizer = load_runtime(
-        path, device=resolve_device(), attn_implementation=attn,
-    )
+    if _is_ov():
+        from .. import tts_ov
+
+        device = tts_ov.require_gpu()
+        tts_ov.allow_breeze_fast_on_cpu()
+        log.info("loading Breeze TTS 2 OpenVINO from %s (attn=%s, ov=%s)", path, attn, device)
+        tokenizer, model, audio_tokenizer = load_runtime(
+            path, device="cpu", attn_implementation=attn,
+        )
+        _install_breeze_ov(model, path, device)
+    else:
+        log.info("loading Breeze TTS 2 from %s (attn=%s)", path, attn)
+        tokenizer, model, audio_tokenizer = load_runtime(
+            path, device=resolve_device(), attn_implementation=attn,
+        )
     update_generation_config_for_breeze(model)
     config = FastStreamingConfig(
         max_new_tokens=int(tts_el.MAX_NEW_TOKENS),
@@ -344,6 +361,40 @@ def _load():
     runtime = FastBreezeStreamingRuntime(model, audio_tokenizer, config, tokenizer=tokenizer)
     tts_long.vram(log, "loaded")
     return BreezeBackend(runtime, tokenizer, audio_tokenizer, model)
+
+
+def _install_breeze_ov(model, path, device):
+    """DiT-less: export the depth decoder one-step. Backbone loop stays official eager."""
+    import torch
+
+    from .. import tts_ov
+
+    ir_dir, xml, stamp = tts_ov.ir_paths(str(path), "breeze_depth", ".ov-breeze-v1")
+    decoder = getattr(model, "depth_decoder", None)
+    if decoder is None:
+        raise RuntimeError("Breeze model has no depth_decoder to export")
+    hidden = int(getattr(model.config, "hidden_size", 2048) or 2048)
+    # One dummy last-token hidden; official depth graph consumes this every frame.
+    example = torch.zeros(1, hidden, dtype=torch.float32)
+    try:
+        compiled = tts_ov.compile_module(decoder, example, xml, stamp, device)
+    except Exception:
+        log.exception("breeze depth IR export failed; leaving official eager on CPU")
+        return
+    orig = decoder.forward
+
+    def forward(*args, **kwargs):
+        if args and hasattr(args[0], "detach"):
+            import numpy as np
+
+            arr = np.ascontiguousarray(args[0].detach().float().cpu().numpy())
+            out = compiled(arr)
+            first = out[0]
+            return torch.from_numpy(np.ascontiguousarray(first))
+        return orig(*args, **kwargs)
+
+    decoder.forward = forward
+    log.info("breeze depth decoder on OpenVINO %s", device)
 
 
 def build_app(supports):
