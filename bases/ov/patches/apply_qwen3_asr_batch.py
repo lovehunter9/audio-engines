@@ -293,14 +293,21 @@ def patch_infer(src: str, path: str) -> str:
         hiddens.push_back(std::move(hidden));
     }
 
+    const ov::Tensor encoder_batch = stack_encoder_hiddens(hiddens);
+    // Prompt audio tokens must match the padded encoder T. Using the short
+    // pre-pad count with T=400 hiddens makes Arc set kernel args on the
+    // wrong input (ocl_stream) and poisons later N=1.
+    const size_t stacked_t = encoder_batch.get_shape().at(1);
+    for (auto& c : audio_token_counts) {
+        c = stacked_t;
+    }
+
     const std::vector<std::string> processed_prompts = extend_audio_tokens(prompts, audio_token_counts);
     const auto tokenization_start_time = std::chrono::steady_clock::now();
     const ov::Tensor input_ids = m_tokenizer.encode(processed_prompts).input_ids;
     const auto tokenization_stop_time = std::chrono::steady_clock::now();
     perf_metrics.raw_metrics.tokenization_durations.emplace_back(
         MicroSeconds(PerfMetrics::get_microsec(tokenization_stop_time - tokenization_start_time)));
-
-    const ov::Tensor encoder_batch = stack_encoder_hiddens(hiddens);
     const auto encoded_results = m_decoder->generate(input_ids,
                                                      encoder_batch,
                                                      config,

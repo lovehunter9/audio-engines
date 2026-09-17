@@ -956,6 +956,8 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertIn("encoder flatten Unsqueeze", got_dec)
         self.assertIn("min_intel_gpu_audio_samples", got_cpp)
         self.assertIn("min_intel_gpu_encoder_frames", got_cpp)
+        self.assertIn("stacked_t", got_cpp)
+        self.assertIn("audio_token_counts", got_cpp)
         self.assertNotIn("fix_encoder_gather_batch", got_dec)
         self.assertNotIn("batch*T", got_dec)
         self.assertIn("batched audio is only implemented for Qwen3-ASR", got_wh)
