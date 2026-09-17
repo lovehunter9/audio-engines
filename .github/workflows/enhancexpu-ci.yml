@@ -1,0 +1,41 @@
+# SpeechBrain Intel XPU CI (image audio-enhance-xpu). Triggers only; build is build-image.yml.
+name: enhancexpu-ci
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/enhancexpu/**'
+      - '.github/workflows/enhancexpu-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enhancexpu-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: enhancexpu
+      repo: audio-enhance-xpu
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || 'beclab' }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
