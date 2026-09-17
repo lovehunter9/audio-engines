@@ -2030,6 +2030,20 @@ class QwenOvDepsCacheTest(unittest.TestCase):
         self.assertTrue(deps.startswith("lovehunter9/audio-qwen-ov:deps-"), deps)
         self.assertNotEqual(vendor.split(":")[-1], deps.split(":")[-1])
 
+    def test_ov_vendor_ci_is_workflow_dispatch_only(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../.github/workflows/ov-vendor-ci.yml")
+        text = open(path).read()
+        self.assertRegex(text, r"(?m)^on:\n  workflow_dispatch:")
+        self.assertNotIn("\npull_request:", text)
+        self.assertNotIn("tags:", text)
+        self.assertNotIn("push:\n", text)
+        build = open(os.path.join(os.path.dirname(__file__),
+                                  "../.github/workflows/build-image.yml")).read()
+        self.assertIn("run ov-vendor-ci by hand", build)
+        self.assertNotIn("name: build vendor", build)
+        self.assertNotIn("name: build ovbase", build)
+
 
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
