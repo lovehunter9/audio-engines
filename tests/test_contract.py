@@ -612,9 +612,26 @@ class OpenVINOModeTest(unittest.TestCase):
     def test_whisperov_generate_sends_a_float_list(self):
         import types
 
-        import torch
-
         from wrapper.caps import whisper_ov as w
+
+        class _Tensor:
+            def __init__(self, xs):
+                self._xs = list(xs)
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def float(self):
+                return self
+
+            def reshape(self, *_):
+                return self
+
+            def __iter__(self):
+                return iter(self._xs)
 
         seen = {}
 
@@ -624,7 +641,7 @@ class OpenVINOModeTest(unittest.TestCase):
             return types.SimpleNamespace(texts=["hello"], text="hello")
 
         w._state["pipeline"] = types.SimpleNamespace(generate=fake_generate)
-        out = w._generate(torch.tensor([0.0, 0.25, -0.5]), "transcribe", "en")
+        out = w._generate(_Tensor([0.0, 0.25, -0.5]), "transcribe", "en")
         self.assertEqual(out, "hello")
         self.assertIsInstance(seen["raw"], list)
         self.assertEqual(seen["raw"], [0.0, 0.25, -0.5])
