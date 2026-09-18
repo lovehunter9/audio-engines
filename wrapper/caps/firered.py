@@ -547,6 +547,48 @@ def _install_firered_ov(instruct, path, device):
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
     _install_firered_backbone(core, path, device)
+    _install_firered_redae_cache(instruct, times)
+
+
+def _install_firered_redae_cache(instruct, times):
+    """Same reference wav must not pay RedAE encode again on the warm speak."""
+    import hashlib
+    import time
+
+    import numpy as np
+
+    orig_tok = getattr(instruct, "_tokenize_audio", None)
+    if orig_tok is None:
+        raise RuntimeError("FireRedTTS3Instruct has no _tokenize_audio to cache")
+    cache = {}
+    times["redae"] = 0.0
+    times["redae_hits"] = 0
+
+    def _tokenize_audio(audio, audio_sr):
+        t0 = time.perf_counter()
+        if hasattr(audio, "detach"):
+            arr = np.ascontiguousarray(audio.detach().cpu().float().numpy())
+        else:
+            arr = np.ascontiguousarray(np.asarray(audio, dtype="float32"))
+        key = (int(audio_sr), tuple(int(x) for x in arr.shape),
+               hashlib.sha1(arr.tobytes()).hexdigest())
+        hit = key in cache
+        if hit:
+            latents = cache[key].clone()
+            times["redae_hits"] += 1
+        else:
+            latents = orig_tok(audio, audio_sr)
+            cache[key] = latents.detach()
+        dt = time.perf_counter() - t0
+        times["redae"] += dt
+        log.info(
+            "firered redae %s t=%.3fs total=%.3fs hits=%d",
+            "hit" if hit else "miss", dt, times["redae"], times["redae_hits"],
+        )
+        return latents
+
+    instruct._tokenize_audio = _tokenize_audio
+    log.info("firered prompt RedAE encode cached on %s", type(instruct).__name__)
 
 
 def _install_firered_backbone(core, path, device):
@@ -606,9 +648,10 @@ def _install_firered_backbone(core, path, device):
             std = float(hidden.float().std())
         log.info(
             "firered ov step=%d q=%d prefix=%d stop=%.4f hidden_std=%.4f "
-            "prefill=%.3fs ar=%.3fs dit=%.3fs",
+            "prefill=%.3fs ar=%.3fs dit=%.3fs redae=%.3fs redae_hits=%s",
             n_step["i"], int(embeds.shape[1]), prefix, score, std,
             times["prefill"], times["ar"], times["dit"],
+            times.get("redae", 0.0), times.get("redae_hits", 0),
         )
 
     def _backbone_one_step(input_embeds, cache=None):
