@@ -100,10 +100,19 @@ def _openvino_models_dir(models_dir):
     """
     if not EXECUTION_MODE.startswith("openvino"):
         return models_dir
-    if OPENVINO_BATCHING.lower() == "off":
-        log.info("--openvino-batching off: segmentation will run one window at a time")
+    # 🔴 The same spellings switch() decides by, not the two literal words. `off` is not the
+    # only way this flag is turned off: every other boolean in this wrapper answers to
+    # 0/false/no/off -- --exclusive, a few lines below where this one is read, is one of them.
+    # Reading only the word "off" sends `--openvino-batching false` into the branch below,
+    # which keeps deriving, and the flag exists to be turned off for measurement: the number
+    # that comes back says "batching off" while batching was on.
+    # An unrecognised value still derives, deliberately -- see the note in tests/caps_smoke.py.
+    _batching = OPENVINO_BATCHING.strip().lower()
+    if _batching in EngineArgs.OFF_WORDS:
+        log.info("--openvino-batching %s: segmentation will run one window at a time",
+                 _batching)
         return models_dir
-    if OPENVINO_BATCHING.lower() != "on":
+    if _batching not in EngineArgs.ON_WORDS:
         log.warning("--openvino-batching %r is neither on nor off; treating it as on",
                     OPENVINO_BATCHING)
     # 🔴 Found by pattern, and the derived name follows the one found, rather than both being

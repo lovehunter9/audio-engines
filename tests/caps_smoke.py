@@ -353,6 +353,7 @@ def t_diar_speakrs_openvino_models_dir():
     import shutil
     import tempfile
     from wrapper.caps import diar_speakrs as ds
+    from wrapper.contract import EngineArgs
 
     root = tempfile.mkdtemp(prefix="ovmodels-")
     farm = ds._farm_for(root)
@@ -435,6 +436,22 @@ def t_diar_speakrs_openvino_models_dir():
               ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
         ds.OPENVINO_BATCHING = "OFF"
         check("and the value is not case-sensitive", ds._openvino_models_dir(root) == root)
+        # 🔴 The whole vocabulary, walked rather than spelled out here. Every other boolean in
+        # this wrapper answers to 0/false/no/off -- --exclusive is read four lines from where
+        # this flag is -- so a person turning batching off for a measurement has four ways to
+        # write what reads to them as one word, and any spelling that falls through to the
+        # unrecognised branch derives: the measurement then reports "batching off" for a run
+        # with batching on. Walking EngineArgs' own tuples is the point rather than a tidiness
+        # -- a list copied into this file goes green on the day a fifth spelling is added to
+        # them, which is the same second copy that put the defect here in the first place.
+        for word in EngineArgs.OFF_WORDS:
+            ds.OPENVINO_BATCHING = word
+            check("--openvino-batching %s hands over the cache directory" % word,
+                  ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        for word in EngineArgs.ON_WORDS:
+            ds.OPENVINO_BATCHING = word
+            check("--openvino-batching %s derives" % word,
+                  ds._openvino_models_dir(root) == farm, ds._openvino_models_dir(root))
         ds.OPENVINO_BATCHING = "maybe"
         check("an unrecognised value still derives", ds._openvino_models_dir(root) == farm)
         ds.OPENVINO_BATCHING = batching
