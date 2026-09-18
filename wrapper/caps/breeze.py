@@ -496,6 +496,11 @@ def _install_breeze_text_ov(model, path, device):
     _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v1")
     compiled = tts_ov.compile_module(_Text(), (ids, mask, pos), xml, stamp, device)
     orig = model._batched_text_encoder_forward
+    proj = getattr(model, "text_encoder_proj", None)
+    if proj is not None and hasattr(proj, "parameters"):
+        wdtype = next(proj.parameters()).dtype
+    else:
+        wdtype = next(enc.parameters()).dtype
 
     def _batched_text_encoder_forward(self, segments, output_hidden_states=False):
         if output_hidden_states or not segments:
@@ -522,7 +527,7 @@ def _install_breeze_text_ov(model, path, device):
                 np.ascontiguousarray(pos_ids.numpy()),
             )[0]
             hidden.append(
-                torch.from_numpy(np.ascontiguousarray(out[0, :length])).to(dtype=seg.dtype)
+                torch.from_numpy(np.ascontiguousarray(out[0, :length])).to(dtype=wdtype)
             )
         return hidden, []
 
