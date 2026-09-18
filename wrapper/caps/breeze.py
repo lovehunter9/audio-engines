@@ -364,12 +364,10 @@ def _load():
 
 
 def _install_breeze_ov(model, path, device):
-    """Compile the 3B backbone as one full-seq GPU IR.
+    """Compile prefill + decode with tensor K/V. Official Cache/mask do not trace.
 
-    Official FastBreeze prefill calls backbone_model then BackboneGraph.prefill_kv
-    (copies DynamicCache into StaticCache). Decode is BackboneGraph._decode_step.
-    Official forward's create_causal_mask dies on tracing (intel3/intel5).
-    Export the layer stack only. Export failure is fatal.
+    intel7 full-seq compiled on GPU but RTF stayed ~50 (zh-m 88): every token
+    reran the whole prefix. Decode must append K/V, not recompute.
     """
     import torch
 
@@ -381,17 +379,29 @@ def _install_breeze_ov(model, path, device):
     if backbone is None:
         raise RuntimeError("Breeze model has no backbone_model to export")
     cfg = getattr(backbone, "config", None) or model.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
     src = str(path)
     example_t = 16
-    embeds = torch.zeros(1, example_t, hidden, dtype=torch.float32)
-    mask = torch.ones(1, example_t, dtype=torch.long)
-    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_full", ".ov-breeze-v3")
-    compiled = tts_ov.compile_causal(
-        tts_ov.causal_full_module(backbone),
-        (embeds, mask), xml, stamp, device,
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v4")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v4")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(backbone, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
     )
-    runner = tts_ov.FullSeqRunner(compiled)
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(backbone, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+    runner = tts_ov.KvRunner(prefill, decode, n_layers)
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):
@@ -417,9 +427,9 @@ def _install_breeze_ov(model, path, device):
     backbone.forward = bb_forward
 
     def prefill_kv(self, past_key_values):
-        if runner.prefix is None:
-            raise RuntimeError("breeze ov prefill_kv before a full-seq prefill")
-        seq_len = int(runner.prefix.shape[1])
+        seq_len = runner.prefix_len
+        if seq_len <= 0:
+            raise RuntimeError("breeze ov prefill_kv before a kv prefill")
         if seq_len > self.max_seq_len:
             raise RuntimeError(
                 "Input too long: prefill has %d tokens but max_seq_len=%d."
@@ -452,8 +462,8 @@ def _install_breeze_ov(model, path, device):
     BackboneGraph.prefill_kv = prefill_kv
     BackboneGraph._decode_step = decode_step
     log.info(
-        "breeze backbone full-seq on OpenVINO %s (depth loop stays official)",
-        device,
+        "breeze backbone prefill+decode kv on OpenVINO %s layers=%d",
+        device, n_layers,
     )
 
 
