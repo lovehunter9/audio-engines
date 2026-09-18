@@ -264,6 +264,37 @@ jobs:
           tags: ${{ steps.deps.outputs.base_image }}
           provenance: false
 
+      # 🔴 Here, not in `make deps`, because this workflow never runs make. It computes the
+      # deps tag with scripts/deps-image.sh and builds with build-push-action, so a check
+      # hanging off the Makefile target runs only when a person types it -- and the drift it
+      # guards against happens on a CI rebuild, which is the one path that skipped it.
+      #
+      # The hazard is specific: deps.Dockerfile installs `qwen-asr` with no version, so the
+      # package resolves afresh whenever the recipe's hash changes, while align.py carries a
+      # hand-copied word splitter from it. A copy that has drifted raises nothing; it starts
+      # segmenting differently.
+      #
+      # ⚠️ Runs on whichever slice this runner is, so the matrix checks both architectures --
+      # one more than `make check-units` on a developer's machine ever did.
+      - name: the copied word splitter still matches the library in the deps image
+        if: needs.meta.outputs.kind == 'append' && inputs.base == 'qwen'
+        env:
+          DEPS_IMAGE: ${{ steps.deps.outputs.base_image }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPS_IMAGE}" || { echo "::error::no deps image to check against"; exit 1; }
+          # 🔴 Room first, and this step has to ask for it itself. The cleanup above runs
+          # only for `kind == docker` or when the deps image had to be BUILT -- and the
+          # normal append path is neither: the image is already published, which is why
+          # crane appends onto it instead. crane never pulls it into the daemon, so this
+          # `docker run` is the first thing on the runner to fetch several gigabytes of
+          # CUDA torch, on a disk sized for a job that was not going to.
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm || true
+          docker run --rm -v "$PWD:/src:ro" -w /src "${DEPS_IMAGE}" \
+            python3 scripts/check-units-against-upstream.py
       - name: docker build (single-arch slice)
         if: needs.meta.outputs.kind == 'docker'
         env:
