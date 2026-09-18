@@ -2186,6 +2186,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertNotIn("leaving official eager on CPU", src)
         self.assertIn("breeze_backbone_decode", src)
         self.assertIn("compile_causal", src)
+        self.assertIn("DeviceKvRunner", src)
         kv = inspect.getsource(tts_ov.causal_kv_module)
         self.assertNotIn("create_causal_mask", kv)
         self.assertIn("self_attn", inspect.getsource(tts_ov._layer_kv))
