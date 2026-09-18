@@ -194,6 +194,9 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4), s
             ov_model = patch_stateful_kv(ov_model)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
+        del ov_model
+    import gc
+    gc.collect()
     core = ov.Core()
     compiled = core.compile_model(
         xml,

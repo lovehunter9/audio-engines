@@ -2187,7 +2187,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         from wrapper.caps import firered
         ov_src = inspect.getsource(firered._install_firered_ov)
         self.assertIn("_install_firered_backbone(", ov_src)
-        self.assertIn("device-KV", ov_src)
+        self.assertIn("stateful decode", ov_src)
         bb = inspect.getsource(firered._install_firered_backbone)
         self.assertIn("StatefulKvRunner", bb)
         self.assertIn("stateful=True", bb)

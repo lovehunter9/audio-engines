@@ -397,6 +397,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         tts_ov.causal_kv_module(backbone, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
     )
+    import gc
+    gc.collect()
     decode = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, True),
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
