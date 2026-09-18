@@ -113,13 +113,16 @@ def compile_causal(mod, example, xml, stamp, device):
     """Like compile_module, but dynamize the time axis before save."""
     import numpy as np
     import openvino as ov
+    import torch
 
     os.makedirs(os.path.dirname(xml), exist_ok=True)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
         if not isinstance(example, (tuple, list)):
             example = (example,)
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
-        ov_model = _dynamize_time(ov.convert_model(mod, example_input=example))
+        mod.eval()
+        with torch.inference_mode():
+            ov_model = _dynamize_time(ov.convert_model(mod, example_input=example))
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
@@ -136,8 +139,53 @@ def compile_causal(mod, example, xml, stamp, device):
     return run
 
 
+def causal_full_module(inner):
+    """Whole-sequence hidden only. Tracing use_cache=True builds DynamicCache and
+    dies with ``unordered_map::at`` (intel3, 270ms)."""
+    import torch.nn as nn
+
+    class _Full(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask):
+            out = self.inner(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                use_cache=False,
+            )
+            return out.last_hidden_state
+
+    return _Full()
+
+
+class FullSeqRunner:
+    """Python keeps the prefix; every decode re-runs the growing sequence on GPU."""
+
+    def __init__(self, compiled):
+        self.compiled = compiled
+        self.prefix = None
+
+    def reset(self):
+        self.prefix = None
+
+    def step(self, embeds):
+        import numpy as np
+        import torch
+
+        q = int(embeds.shape[1])
+        piece = embeds.detach().float().contiguous()
+        self.prefix = piece if self.prefix is None else torch.cat([self.prefix, piece], dim=1)
+        arr = np.ascontiguousarray(self.prefix.cpu().numpy())
+        hidden = torch.from_numpy(
+            np.ascontiguousarray(self.compiled(arr, mask_np(None, arr.shape[1], 0))[0])
+        )
+        return hidden[:, -q:, :]
+
+
 def causal_step_module(inner, n_layers, with_past):
-    """HF inner model → (hidden, k0, v0, ...) so convert_model sees tensors only."""
+    """Kept for tests. Do not export this: DynamicCache does not trace."""
     import torch.nn as nn
 
     class _Step(nn.Module):

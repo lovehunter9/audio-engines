@@ -2157,14 +2157,37 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertEqual(int(keep[0, 0]), 0)
         self.assertEqual(int(keep[0, 2]), 1)
 
+    def test_full_seq_runner_keeps_prefix(self):
+        try:
+            import numpy as np
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        def compiled(arr, mask):
+            return [np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32)]
+
+        runner = tts_ov.FullSeqRunner(compiled)
+        first = runner.step(torch.zeros(1, 2, 4))
+        self.assertEqual(tuple(first.shape), (1, 2, 4))
+        nxt = runner.step(torch.zeros(1, 1, 4))
+        self.assertEqual(tuple(nxt.shape), (1, 1, 4))
+        self.assertEqual(int(runner.prefix.shape[1]), 3)
+        runner.reset()
+        self.assertIsNone(runner.prefix)
+
     def test_breeze_install_does_not_swallow_export_failure(self):
         import inspect
+        from wrapper import tts_ov
         from wrapper.caps import breeze
 
         src = inspect.getsource(breeze._install_breeze_ov)
         self.assertNotIn("leaving official eager on CPU", src)
-        self.assertIn("breeze_backbone_decode", src)
+        self.assertIn("breeze_backbone_full", src)
         self.assertIn("compile_causal", src)
+        self.assertIn("use_cache=False", inspect.getsource(tts_ov.causal_full_module))
+        self.assertIn("unordered_map", inspect.getsource(tts_ov.causal_full_module))
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):
