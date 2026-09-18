@@ -368,7 +368,8 @@ def _install_breeze_ov(model, path, device):
 
     Official FastBreeze prefill calls backbone_model then BackboneGraph.prefill_kv
     (copies DynamicCache into StaticCache). Decode is BackboneGraph._decode_step.
-    Tracing use_cache=True died on DynamicCache (intel3). Export failure is fatal.
+    Official forward's create_causal_mask dies on tracing (intel3/intel5).
+    Export the layer stack only. Export failure is fatal.
     """
     import torch
 

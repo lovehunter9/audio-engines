@@ -140,24 +140,51 @@ def compile_causal(mod, example, xml, stamp, device):
 
 
 def causal_full_module(inner):
-    """Whole-sequence hidden only. Tracing use_cache=True builds DynamicCache and
-    dies with ``unordered_map::at`` (intel3, 270ms)."""
+    """Layer stack only. Official backbone.forward calls create_causal_mask; that
+    traces into functorch vmap and dies with unordered_map::at (intel3/intel5)."""
+    import torch
     import torch.nn as nn
 
-    class _Full(nn.Module):
+    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
+        raise RuntimeError("backbone missing layers/norm/rotary_emb for stack export")
+    cfg = getattr(inner, "config", None)
+    if cfg is not None:
+        cfg._attn_implementation = "eager"
+    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
+
+    class _Stack(nn.Module):
         def __init__(self):
             super().__init__()
             self.inner = inner
 
         def forward(self, inputs_embeds, attention_mask):
-            out = self.inner(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                use_cache=False,
+            t = inputs_embeds.shape[1]
+            pos = torch.arange(t, device=inputs_embeds.device).unsqueeze(0)
+            cache_pos = pos.reshape(-1)
+            causal = torch.triu(
+                torch.ones(t, t, dtype=torch.bool, device=inputs_embeds.device), 1
             )
-            return out.last_hidden_state
+            min_v = torch.finfo(inputs_embeds.dtype).min
+            attn = inputs_embeds.new_zeros(1, 1, t, t)
+            attn = attn.masked_fill(causal, min_v)
+            keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, t)
+            attn = attn.masked_fill(~keep, min_v)
+            hidden = inputs_embeds
+            rope = self.inner.rotary_emb(hidden, pos)
+            for layer in self.inner.layers[:n_layers]:
+                hidden = layer(
+                    hidden,
+                    attention_mask=attn,
+                    position_ids=pos,
+                    past_key_values=None,
+                    cache_position=cache_pos,
+                    position_embeddings=rope,
+                )
+                if isinstance(hidden, (tuple, list)):
+                    hidden = hidden[0]
+            return self.inner.norm(hidden)
 
-    return _Full()
+    return _Stack()
 
 
 class FullSeqRunner:
