@@ -567,8 +567,8 @@ def _install_firered_backbone(core, path, device):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
     src = str(path)
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v5")
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v5")
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v6")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v6")
     prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(inner, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
