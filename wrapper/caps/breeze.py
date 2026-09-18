@@ -657,8 +657,26 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             self.pre_transformer = decoder.pre_transformer
 
         def forward(self, h):
+            import torch
+
             h = self.pre_conv(h).transpose(1, 2)
-            return self.pre_transformer(inputs_embeds=h, use_cache=False).last_hidden_state
+            pt = self.pre_transformer
+            h = pt.input_proj(h)
+            t_len = int(h.shape[1])
+            pos = torch.arange(t_len, device=h.device).unsqueeze(0)
+            rope = pt.rotary_emb(h, pos)
+            attn = tts_ov.causal_attn_bias(h, t_len, 0)
+            for layer in pt.layers:
+                h = layer(
+                    h,
+                    attention_mask=attn,
+                    position_ids=pos,
+                    past_key_values=None,
+                    use_cache=False,
+                    cache_position=pos.squeeze(0),
+                    position_embeddings=rope,
+                )
+            return pt.output_proj(pt.norm(h))
 
     class _Tail(nn.Module):
         def __init__(self, decoder):
@@ -682,9 +700,9 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
         ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
     src = str(path)
-    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v4")
-    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v4")
-    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v4")
+    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v5")
+    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v5")
+    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v5")
     compiled_q = tts_ov.compile_module(_Quant(dec), example, q_xml, q_stamp, device)
     compiled_pre = tts_ov.compile_module(_Pre(dec), ex_q, p_xml, p_stamp, device)
     compiled_tail = tts_ov.compile_module(_Tail(dec), ex_h, t_xml, t_stamp, device)
