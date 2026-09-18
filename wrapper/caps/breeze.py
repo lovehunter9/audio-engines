@@ -634,23 +634,39 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     dec.eval()
     for p in dec.parameters():
         p.requires_grad_(False)
+    pt = dec.pre_transformer
+    if hasattr(pt, "config"):
+        pt.config.use_cache = False
+        pt.config._attn_implementation = "eager"
     n_q = int(getattr(dec.config, "num_quantizers", 16))
     ctx_frames = 25
     example_t = 32
 
-    class _Codec(nn.Module):
+    class _Quant(nn.Module):
         def __init__(self, decoder):
             super().__init__()
             self.quantizer = decoder.quantizer
+
+        def forward(self, codes):
+            return self.quantizer.decode(codes)
+
+    class _Pre(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
             self.pre_conv = decoder.pre_conv
             self.pre_transformer = decoder.pre_transformer
+
+        def forward(self, h):
+            h = self.pre_conv(h).transpose(1, 2)
+            return self.pre_transformer(inputs_embeds=h, use_cache=False).last_hidden_state
+
+    class _Tail(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
             self.upsample = decoder.upsample
             self.tail = decoder.decoder
 
-        def forward(self, codes):
-            h = self.quantizer.decode(codes)
-            h = self.pre_conv(h).transpose(1, 2)
-            h = self.pre_transformer(inputs_embeds=h).last_hidden_state
+        def forward(self, h):
             h = h.permute(0, 2, 1).contiguous()
             for blocks in self.upsample:
                 for block in blocks:
@@ -661,8 +677,17 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             return wav.clamp(min=-1, max=1)
 
     example = torch.zeros(1, n_q, example_t, dtype=torch.long)
-    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_codec", ".ov-breeze-codec-v3")
-    compiled = tts_ov.compile_module(_Codec(dec), example, xml, stamp, device)
+    with torch.inference_mode():
+        ex_q = dec.quantizer.decode(example)
+        ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
+        ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
+    src = str(path)
+    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v4")
+    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v4")
+    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v4")
+    compiled_q = tts_ov.compile_module(_Quant(dec), example, q_xml, q_stamp, device)
+    compiled_pre = tts_ov.compile_module(_Pre(dec), ex_q, p_xml, p_stamp, device)
+    compiled_tail = tts_ov.compile_module(_Tail(dec), ex_h, t_xml, t_stamp, device)
     upsample = int(getattr(dec, "total_upsample", 1) or 1)
 
     def run_step(self, codes_chunk, step_idx):
@@ -682,10 +707,11 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             padded = F.pad(buf, (example_t - t, 0))
         else:
             padded = buf[..., -example_t:]
+        codes_np = np.ascontiguousarray(padded.detach().cpu().numpy())
+        h = compiled_q(codes_np)[0]
+        h = compiled_pre(np.ascontiguousarray(h))[0]
         wav = torch.from_numpy(
-            np.ascontiguousarray(
-                compiled(np.ascontiguousarray(padded.detach().cpu().numpy()))[0]
-            )
+            np.ascontiguousarray(compiled_tail(np.ascontiguousarray(h))[0])
         )
         keep = int(codes.shape[-1]) * upsample
         return wav[..., -keep:].to(dtype=torch.float32)
