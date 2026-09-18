@@ -1486,4 +1486,20 @@ def build_app(supports):
 
 def run(supports):
     ov = ovutil.is_ov()
-    _runtime.serve(supports, (_load_ov if ov else _load), build_app, "Qwen3-ForcedAligner")
+
+    def load():
+        try:
+            (_load_ov if ov else _load)()
+        except Exception as e:
+            _state["error"] = hfgate.explain(MODEL_REPO, e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("forced-aligner load failed: %s", e)
+
+    _runtime.serve(
+        supports,
+        load,
+        build_app,
+        "openvino-genai forced aligner" if ov else "Qwen3-ForcedAligner",
+        load_on_main=ov,
+        **({"timeout_s": 5400} if ov else {}),
+    )

@@ -462,7 +462,7 @@ def _install_breeze_ov(model, path, device):
     BackboneGraph.prefill_kv = prefill_kv
     BackboneGraph._decode_step = decode_step
     log.info(
-        "breeze backbone prefill+decode kv on OpenVINO %s layers=%d",
+        "breeze backbone prefill+decode device-KV on OpenVINO %s layers=%d",
         device, n_layers,
     )
 
