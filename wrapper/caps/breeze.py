@@ -345,7 +345,7 @@ def _load():
         tokenizer, model, audio_tokenizer = load_runtime(
             path, device="cpu", attn_implementation=attn,
         )
-        _install_breeze_ov(model, path, device)
+        _install_breeze_ov(model, path, device, audio_tokenizer)
     else:
         log.info("loading Breeze TTS 2 from %s (attn=%s)", path, attn)
         tokenizer, model, audio_tokenizer = load_runtime(
@@ -363,11 +363,11 @@ def _load():
     return BreezeBackend(runtime, tokenizer, audio_tokenizer, model)
 
 
-def _install_breeze_ov(model, path, device):
-    """Compile prefill + decode with tensor K/V. Official Cache/mask do not trace.
+def _install_breeze_ov(model, path, device, audio_tokenizer=None):
+    """Official five stages: we already had backbone. Depth + codec were still CPU.
 
-    intel7 full-seq compiled on GPU but RTF stayed ~50 (zh-m 88): every token
-    reran the whole prefix. Decode must append K/V, not recompute.
+    Breeze README accelerates text / prefill / decode / depth / codec. intel8/9
+    only moved backbone, so RTF stayed 40-90 with codec on CPU.
     """
     import torch
 
@@ -465,6 +465,157 @@ def _install_breeze_ov(model, path, device):
         "breeze backbone prefill+decode device-KV on OpenVINO %s layers=%d",
         device, n_layers,
     )
+    _install_breeze_depth_ov(model, path, device)
+    _install_breeze_codec_ov(audio_tokenizer, path, device)
+
+
+def _install_breeze_depth_ov(model, path, device):
+    """Official DepthDecoderGraph loop stays; layer stack runs on GPU like backbone."""
+    import torch
+
+    from models.cudagraph.depth_decoder_graph import DepthDecoderGraph
+
+    from .. import tts_ov
+
+    depth = getattr(model, "depth_decoder", None)
+    inner = getattr(depth, "model", None) if depth is not None else None
+    if inner is None:
+        raise RuntimeError("Breeze model has no depth_decoder.model")
+    cfg = getattr(model.config, "depth_decoder_config", None) or inner.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    src = str(path)
+    embeds_pre = torch.zeros(1, 2, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, 2, dtype=torch.long)
+    mask_dec = torch.ones(1, 3, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_depth_prefill", ".ov-breeze-depth-v1")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_depth_decode", ".ov-breeze-depth-v1")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    )
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+    runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
+
+    def _full_loop(self):
+        if int(getattr(self, "batch_size", 1)) != 1:
+            raise RuntimeError(
+                "breeze ov depth is compiled for batch=1; got %s" % self.batch_size
+            )
+        self.prefill_input_ids[:, 0] = 0
+        self.prefill_input_ids[:, 1] = self.first_cb_token_buf
+        prefill_embeds = self.embed_tokens(self.prefill_input_ids)
+        backbone_h = self.backbone_hidden_buf
+        if self.backbone_hidden_state_projector is not None:
+            backbone_h = self.backbone_hidden_state_projector(backbone_h)
+        prefill_embeds[:, 0] = backbone_h
+        prefill_embeds = self.inputs_embeds_projector(prefill_embeds)
+        runner.reset()
+        hidden_states = runner.step(prefill_embeds)
+        first_logits = self.codebooks_head(
+            hidden_states[:, 1:, :].float(),
+            cache_position=self.head_prefill_pos,
+        )
+        if self.debug_logits is not None:
+            self.debug_logits[0].copy_(first_logits[:, 0, :])
+        self._cfg_sample(first_logits)
+        self._tok_buf.clamp_(0, self.vocab_size - 1)
+        self.output_tokens[:, 0] = self._tok_buf
+        for cb_idx in range(1, self.num_decode_codebooks):
+            offset_tok = self._tok_buf + self.codebook_offsets[cb_idx]
+            emb = self.embed_tokens(
+                offset_tok.unsqueeze(1).clamp_(
+                    0, self.num_codebooks * self.vocab_size - 1
+                )
+            )
+            emb = self.inputs_embeds_projector(emb)
+            hidden_states = runner.step(emb)
+            cache_pos = self.decode_cache_positions[cb_idx - 1]
+            logits = self.codebooks_head(hidden_states.float(), cache_position=cache_pos)
+            if self.debug_logits is not None:
+                self.debug_logits[cb_idx].copy_(logits[:, 0, :])
+            self._cfg_sample(logits)
+            self._tok_buf.clamp_(0, self.vocab_size - 1)
+            self.output_tokens[:, cb_idx] = self._tok_buf
+
+    DepthDecoderGraph._full_loop = _full_loop
+    log.info("breeze depth prefill+decode device-KV on OpenVINO %s layers=%d", device, n_layers)
+
+
+def _install_breeze_codec_ov(audio_tokenizer, path, device):
+    """Official decoder.forward is codes→wav. Streaming lane kept; tail convs on GPU.
+
+    Intel's FireRedTTS2 notebook leaves codec on CPU. Breeze's tail is conv/upsample,
+    not the HF mask that dies in convert_model, so it can go on GPU.
+    """
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from models.stream_runtime.stream.lane import ExecutionLane
+
+    from .. import tts_ov
+
+    if audio_tokenizer is None or getattr(audio_tokenizer, "model", None) is None:
+        raise RuntimeError("Breeze audio_tokenizer.model is required for codec OV")
+    dec = audio_tokenizer.model.decoder
+    hidden = int(dec.config.latent_dim)
+    example_t = 2
+
+    class _Tail(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.upsample = dec.upsample
+            self.decoder = dec.decoder
+
+        def forward(self, hidden_nct):
+            h = hidden_nct
+            for blocks in self.upsample:
+                for block in blocks:
+                    h = block(h)
+            wav = h
+            for block in self.decoder:
+                wav = block(wav)
+            return wav.clamp(min=-1, max=1)
+
+    example = torch.zeros(1, hidden, example_t, dtype=torch.float32)
+    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_codec_tail", ".ov-breeze-codec-v1")
+    compiled = tts_ov.compile_dyn_last(_Tail(), example, xml, stamp, device)
+    upsample = int(getattr(dec, "total_upsample", 1) or 1)
+    ctx_frames = 25
+
+    def run_step(self, codes_chunk, step_idx):
+        codes = codes_chunk.detach()
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)
+        buf = getattr(self, "_ov_codes", None)
+        if buf is None or int(step_idx) == 0:
+            buf = codes
+        else:
+            buf = torch.cat([buf, codes], dim=-1)
+            if buf.shape[-1] > ctx_frames + codes.shape[-1]:
+                buf = buf[..., -(ctx_frames + codes.shape[-1]):]
+        self._ov_codes = buf
+        hidden = dec.quantizer.decode(buf)
+        hidden = dec.pre_conv(hidden).transpose(1, 2)
+        hidden = dec.pre_transformer(inputs_embeds=hidden).last_hidden_state
+        hidden = hidden.permute(0, 2, 1).contiguous()
+        wav = torch.from_numpy(
+            np.ascontiguousarray(compiled(np.ascontiguousarray(hidden.detach().float().cpu().numpy()))[0])
+        )
+        keep = int(codes.shape[-1]) * upsample
+        return wav[..., -keep:].to(dtype=torch.float32)
+
+    ExecutionLane.run_step = run_step
+    log.info("breeze codec tail on OpenVINO %s upsample=%d", device, upsample)
 
 
 def build_app(supports):
