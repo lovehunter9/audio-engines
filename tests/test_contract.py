@@ -1285,6 +1285,38 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
         ])
 
 
+class BaseRegistrationTests(unittest.TestCase):
+    """A base directory, the routing table and the README table name the same 12 bases.
+
+    Adding a base means adding a key to catalog.BASES: app.py routes on AUDIO_BASE, which
+    append-image.sh sets from the directory name, and a base missing from that table exits at
+    startup saying the image was built wrong. Nothing here compared the two, so the way to find
+    out was to build the image and run it. The README table carries the line "Keep this table in
+    sync whenever a base is added", which until now was a sentence asking to be remembered.
+
+    Both walk bases/ rather than a list written here, so a base added tomorrow is in scope
+    without anyone editing this file. append.env is what makes a directory a base: every one has
+    it and bases/runtime, which is shared build scripts rather than a base, does not. nemo is why
+    the marker is not deps.Dockerfile -- it layers on another image and has no deps of its own.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _bases(self):
+        found = {name for name in os.listdir(os.path.join(self.ROOT, "bases"))
+                 if os.path.isfile(os.path.join(self.ROOT, "bases", name, "append.env"))}
+        self.assertTrue(found, "no bases/*/append.env found; this test has lost its anchor")
+        return found
+
+    def test_every_base_directory_is_routable(self):
+        self.assertEqual(self._bases(), set(catalog.BASES))
+
+    def test_every_base_directory_has_a_readme_row(self):
+        with open(os.path.join(self.ROOT, "README.md"), encoding="utf-8") as fh:
+            rows = set(re.findall(r"^\| `([a-z0-9-]+)` \| `beclab/", fh.read(), re.M))
+        self.assertEqual(self._bases(), rows)
+
+
 class OnnxPinTests(unittest.TestCase):
     """The version the images install and the version CI tests against are one version.
 
