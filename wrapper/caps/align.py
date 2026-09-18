@@ -1485,5 +1485,5 @@ def build_app(supports):
 
 
 def run(supports):
-    ov = ovutil.requested()
+    ov = ovutil.is_ov()
     _runtime.serve(supports, (_load_ov if ov else _load), build_app, "Qwen3-ForcedAligner")
