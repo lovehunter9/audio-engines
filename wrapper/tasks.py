@@ -451,8 +451,13 @@ async def dispatch(async_flag, cap, model, work, *, cleanup=None, fail="job fail
     except Busy:
         if cleanup:
             task.run_cleanup()
+        # 🔴 With `Retry-After`, because a 503 without one says "no" and not "not yet", and
+        # what a client does with the difference is the client's decision to make rather than
+        # ours to assume. The queue drains at whatever one job takes, so the number is a hint
+        # and deliberately small.
         raise HTTPException(status_code=503,
-                            detail="engine is busy: %d jobs already queued" % QUEUE_MAX)
+                            detail="engine is busy: %d jobs already queued" % QUEUE_MAX,
+                            headers={"Retry-After": "5"})
     if want:
         return JSONResponse(status_code=202, content={"task": _doc(task)})
     try:
