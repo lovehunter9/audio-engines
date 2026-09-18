@@ -142,8 +142,9 @@ def patch_stateful_kv(ov_model):
     ov_model.add_parameters([beam_idx])
     for name in kv_in:
         port = ov_model.input(name)
+        consumers = list(port.get_target_inputs())
         gather = opset13.gather(port, beam_idx, opset13.constant(0))
-        for consumer in list(port.get_target_inputs()):
+        for consumer in consumers:
             consumer.replace_source_output(gather.output(0))
     ov_model.validate_nodes_and_infer_types()
     apply_make_stateful_transformation(ov_model, dict(zip(kv_in, kv_out)))
