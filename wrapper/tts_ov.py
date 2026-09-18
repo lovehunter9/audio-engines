@@ -644,7 +644,7 @@ class StatefulKvRunner:
             )
         for st, t in zip(states, flat):
             arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
-            st.set_state(ov.Tensor(arr))
+            st.state = ov.Tensor(arr)
         self._prefix = int(flat[0].shape[-2])
         self._ready = True
 

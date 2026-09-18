@@ -2206,6 +2206,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("apply_make_stateful_transformation", inspect.getsource(tts_ov.patch_stateful_kv))
         self.assertIn("consumers = list(port.get_target_inputs())", inspect.getsource(tts_ov.patch_stateful_kv))
         self.assertIn("query_state", inspect.getsource(tts_ov.StatefulKvRunner))
+        self.assertIn("st.state =", inspect.getsource(tts_ov.StatefulKvRunner))
+        self.assertNotIn("set_state", inspect.getsource(tts_ov.StatefulKvRunner))
         self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("INFERENCE_PRECISION_HINT", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("official prefill", inspect.getsource(firered._install_firered_backbone))
