@@ -158,18 +158,19 @@ def causal_full_module(inner):
             self.inner = inner
 
         def forward(self, inputs_embeds, attention_mask):
-            t = inputs_embeds.shape[1]
-            pos = torch.arange(t, device=inputs_embeds.device).unsqueeze(0)
+            wdtype = next(self.inner.parameters()).dtype
+            hidden = inputs_embeds.to(dtype=wdtype)
+            t = hidden.shape[1]
+            pos = torch.arange(t, device=hidden.device).unsqueeze(0)
             cache_pos = pos.reshape(-1)
             causal = torch.triu(
-                torch.ones(t, t, dtype=torch.bool, device=inputs_embeds.device), 1
+                torch.ones(t, t, dtype=torch.bool, device=hidden.device), 1
             )
-            min_v = torch.finfo(inputs_embeds.dtype).min
-            attn = inputs_embeds.new_zeros(1, 1, t, t)
+            min_v = torch.finfo(hidden.dtype).min
+            attn = hidden.new_zeros(1, 1, t, t)
             attn = attn.masked_fill(causal, min_v)
             keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, t)
             attn = attn.masked_fill(~keep, min_v)
-            hidden = inputs_embeds
             rope = self.inner.rotary_emb(hidden, pos)
             for layer in self.inner.layers[:n_layers]:
                 hidden = layer(
@@ -182,7 +183,7 @@ def causal_full_module(inner):
                 )
                 if isinstance(hidden, (tuple, list)):
                     hidden = hidden[0]
-            return self.inner.norm(hidden)
+            return self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
 
     return _Stack()
 
