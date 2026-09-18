@@ -151,6 +151,54 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
     return run
 
 
+def compile_dyn_last(mod, example, xml, stamp, device):
+    """Compile a chunk module whose last axis grows (codec conv time)."""
+    import numpy as np
+    import openvino as ov
+    import torch
+
+    os.makedirs(os.path.dirname(xml), exist_ok=True)
+    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
+        if not isinstance(example, (tuple, list)):
+            example = (example,)
+        log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
+        mod.eval()
+        with torch.inference_mode():
+            ov_model = ov.convert_model(mod, example_input=example)
+        mapping = {}
+        for inp in ov_model.inputs:
+            shape = inp.get_partial_shape()
+            if shape.rank.is_dynamic:
+                continue
+            rank = shape.rank.get_length()
+            if rank < 2:
+                continue
+            shape[rank - 1] = -1
+            try:
+                mapping[inp.any_name] = shape
+            except Exception:
+                mapping[inp] = shape
+        if mapping:
+            ov_model.reshape(mapping)
+        ov.save_model(ov_model, xml)
+        open(stamp, "w").close()
+    core = ov.Core()
+    compiled = core.compile_model(
+        xml, device, {"INFERENCE_PRECISION_HINT": "f32"}
+    )
+    log.info("compiled %s on %s inference_precision=f32", xml, device)
+
+    def run(*arrays):
+        feed = {}
+        for i, arr in enumerate(arrays):
+            key = compiled.inputs[i]
+            feed[key] = np.ascontiguousarray(arr)
+        return compiled(feed)
+
+    run.compiled = compiled
+    return run
+
+
 def causal_full_module(inner):
     """Layer stack only. Official backbone.forward builds an HF causal mask that
     traces into functorch vmap and dies with unordered_map::at (intel3/intel5)."""
