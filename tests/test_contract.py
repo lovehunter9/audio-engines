@@ -2198,6 +2198,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("device-KV", ov_src)
         bb = inspect.getsource(firered._install_firered_backbone)
         self.assertIn("DeviceKvRunner", bb)
+        self.assertIn("firered_llm_prefill", bb)
+        self.assertIn("prefill=prefill", bb)
         self.assertNotIn("tts_ov.KvRunner", bb)
         self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("create_infer_request", inspect.getsource(tts_ov.DeviceKvRunner))
