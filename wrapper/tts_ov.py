@@ -145,6 +145,7 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
             feed[key] = np.ascontiguousarray(arr)
         return compiled(feed)
 
+    run.compiled = compiled
     return run
 
 
@@ -354,7 +355,11 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
 
 
 class KvRunner:
-    """Prefill once, then decode with tensor K/V. No full-seq rerun."""
+    """Prefill once, then decode with tensor K/V. No full-seq rerun.
+
+    Copies every K/V to host numpy each token. Fine for tests / Breeze until
+    DeviceKvRunner covers prefill too.
+    """
 
     def __init__(self, prefill, decode, n_layers):
         self.prefill = prefill
@@ -397,6 +402,75 @@ class KvRunner:
             out = self.decode(arr, mask_np(None, q, self.prefix_len), *self.kv)
         hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
         self.kv = [np.ascontiguousarray(out[i]) for i in range(1, 1 + 2 * self.n_layers)]
+        return hidden[:, -q:, :]
+
+
+class DeviceKvRunner:
+    """Decode with ping-pong InferRequests. Only hidden comes back to host.
+
+    intel12 fed 28×2 numpy K/V every token and lost to official eager (RTF 26
+    vs 16). Keep present K/V as the next request's input tensors so the
+    device-side buffers stay put. Prefill stays official; seed_kv uploads once.
+    """
+
+    def __init__(self, decode, n_layers):
+        compiled = getattr(decode, "compiled", None)
+        if compiled is None:
+            raise RuntimeError("DeviceKvRunner needs compile_causal().compiled")
+        self.compiled = compiled
+        self.reqs = (compiled.create_infer_request(), compiled.create_infer_request())
+        self.which = 0
+        self.n_layers = n_layers
+        self.kv = None
+        self._prefix = 0
+
+    def reset(self):
+        self.kv = None
+        self._prefix = 0
+        self.which = 0
+
+    def seed_kv(self, cache):
+        import numpy as np
+        import openvino as ov
+
+        flat = flatten_kv(cache)
+        if len(flat) != 2 * self.n_layers:
+            raise RuntimeError(
+                "seed_kv expected %d tensors, got %d"
+                % (2 * self.n_layers, len(flat))
+            )
+        self._host = []
+        self.kv = []
+        for t in flat:
+            arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
+            self._host.append(arr)
+            self.kv.append(ov.Tensor(arr))
+        self._prefix = int(self._host[0].shape[-2])
+
+    @property
+    def prefix_len(self):
+        return int(self._prefix)
+
+    def step(self, embeds):
+        import numpy as np
+        import openvino as ov
+        import torch
+
+        if self.kv is None:
+            raise RuntimeError("DeviceKvRunner.step needs seed_kv first")
+        q = int(embeds.shape[1])
+        self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        self._mask = mask_np(None, q, self._prefix)
+        req = self.reqs[self.which]
+        req.set_input_tensor(0, ov.Tensor(self._emb))
+        req.set_input_tensor(1, ov.Tensor(self._mask))
+        for i, t in enumerate(self.kv):
+            req.set_input_tensor(2 + i, t)
+        req.infer()
+        hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
+        self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
+        self._prefix += q
+        self.which ^= 1
         return hidden[:, -q:, :]
 
 
