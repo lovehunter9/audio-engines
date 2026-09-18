@@ -116,7 +116,65 @@ def _dynamize_time(ov_model, ranks=(2, 3, 4)):
     return ov_model
 
 
-def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
+def patch_stateful_kv(ov_model):
+    """Intel FireRedTTS2 helper: hide K/V as InferRequest VariableState.
+
+    Official notebook calls apply_make_stateful_transformation so decode does
+    not bounce 28×2 tensors through Python every token.
+    """
+    import numpy as np
+    import openvino.opset13 as opset13
+    from openvino._offline_transformations import apply_make_stateful_transformation
+
+    if len(ov_model.inputs) < 4:
+        raise RuntimeError("stateful decode needs embeds, mask, and K/V")
+    kv_in = [inp.get_any_name() for inp in ov_model.inputs[2:]]
+    kv_out = [out.get_any_name() for out in ov_model.outputs[1:]]
+    if len(kv_in) != len(kv_out):
+        raise RuntimeError("stateful kv in/out %d vs %d" % (len(kv_in), len(kv_out)))
+    import openvino as ov
+
+    batch = ov_model.inputs[0].get_partial_shape()[0]
+    beam_idx = opset13.parameter(
+        name="beam_idx", dtype=ov.Type.i32, shape=ov.PartialShape([batch])
+    )
+    beam_idx.output(0).get_tensor().add_names({"beam_idx"})
+    ov_model.add_parameters([beam_idx])
+    for name in kv_in:
+        port = ov_model.input(name)
+        gather = opset13.gather(port, beam_idx, opset13.constant(0))
+        for consumer in list(port.get_target_inputs()):
+            consumer.replace_source_output(gather.output(0))
+    ov_model.validate_nodes_and_infer_types()
+    apply_make_stateful_transformation(ov_model, dict(zip(kv_in, kv_out)))
+    embeds = ov_model.inputs[0]
+    batch_g = opset13.gather(
+        opset13.shape_of(embeds, output_type="i64"),
+        opset13.constant([0]),
+        opset13.constant(0),
+    )
+    for op in ov_model.get_ops():
+        if op.get_type_name() != "ReadValue":
+            continue
+        dims = [d.min_length for d in list(op.get_output_partial_shape(0))]
+        dims[0] = batch_g
+        parts = []
+        for dim in dims:
+            if isinstance(dim, int):
+                parts.append(opset13.constant(np.array([max(dim, 0)], dtype=np.int64)))
+            else:
+                parts.append(dim)
+        shape = opset13.concat(parts, axis=0)
+        op.set_arguments([
+            opset13.broadcast(
+                opset13.constant(0.0, dtype=op.get_output_element_type(0)), shape
+            )
+        ])
+    ov_model.validate_nodes_and_infer_types()
+    return ov_model
+
+
+def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4), stateful=False):
     """Like compile_module, but dynamize the time axis before save."""
     import numpy as np
     import openvino as ov
@@ -126,19 +184,26 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
         if not isinstance(example, (tuple, list)):
             example = (example,)
-        log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
+        log.info("exporting %s example=%s stateful=%s", xml, [tuple(t.shape) for t in example], stateful)
         mod.eval()
         with torch.inference_mode():
             ov_model = _dynamize_time(
                 ov.convert_model(mod, example_input=example), dynamize_ranks
             )
+        if stateful:
+            ov_model = patch_stateful_kv(ov_model)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
     compiled = core.compile_model(
-        xml, device, {"INFERENCE_PRECISION_HINT": "f32"}
+        xml,
+        device,
+        {
+            "INFERENCE_PRECISION_HINT": "f32",
+            "KV_CACHE_PRECISION": "undefined",
+        },
     )
-    log.info("compiled %s on %s inference_precision=f32", xml, device)
+    log.info("compiled %s on %s inference_precision=f32 stateful=%s", xml, device, stateful)
 
     def run(*arrays):
         feed = {}
@@ -542,6 +607,65 @@ class DeviceKvRunner:
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
         self._prefix = q
+        return hidden[:, -q:, :]
+
+
+class StatefulKvRunner:
+    """One InferRequest; K/V stay in VariableState. Official prefill then seed_kv."""
+
+    def __init__(self, decode, n_layers):
+        compiled = getattr(decode, "compiled", None)
+        if compiled is None:
+            raise RuntimeError("StatefulKvRunner needs compile_causal().compiled")
+        self.compiled = compiled
+        self.req = compiled.create_infer_request()
+        self.n_layers = n_layers
+        self._prefix = 0
+        self._ready = False
+
+    def reset(self):
+        self.req.reset_state()
+        self._prefix = 0
+        self._ready = False
+
+    def seed_kv(self, cache):
+        import numpy as np
+        import openvino as ov
+
+        flat = flatten_kv(cache)
+        states = self.req.query_state()
+        if len(states) != len(flat):
+            raise RuntimeError(
+                "state %d vs kv %d" % (len(states), len(flat))
+            )
+        for st, t in zip(states, flat):
+            arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
+            st.set_state(ov.Tensor(arr))
+        self._prefix = int(flat[0].shape[-2])
+        self._ready = True
+
+    @property
+    def prefix_len(self):
+        return int(self._prefix)
+
+    def step(self, embeds):
+        import numpy as np
+        import openvino as ov
+        import torch
+
+        if not self._ready:
+            raise RuntimeError("StatefulKvRunner.step needs seed_kv")
+        q = int(embeds.shape[1])
+        self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        self._mask = mask_np(None, q, self._prefix)
+        self._beam = np.zeros((1,), dtype=np.int32)
+        req = self.req
+        req.set_input_tensor(0, ov.Tensor(self._emb))
+        req.set_input_tensor(1, ov.Tensor(self._mask))
+        req.set_input_tensor(2, ov.Tensor(self._beam))
+        req.infer()
+        hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
+        self._prefix += q
         return hidden[:, -q:, :]
 
 
