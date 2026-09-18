@@ -63,6 +63,11 @@ jobs:
         run: python -m compileall -q wrapper tests
       - name: contract tests
         run: python -m unittest tests/test_contract.py
+      # One ENGINE_ARGS string reaches every capability in an image, so a command-line
+      # argument read as a switch in one and as a value in another turns that feature off
+      # in silence. Same note as above about discover.
+      - name: flag registry
+        run: python -m unittest tests/test_flag_registry.py
       - name: capability smoke tests
         run: python tests/caps_smoke.py
       - name: watchdog smoke tests
