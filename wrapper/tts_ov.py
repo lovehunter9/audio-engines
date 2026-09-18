@@ -140,7 +140,7 @@ def compile_causal(mod, example, xml, stamp, device):
 
 
 def causal_full_module(inner):
-    """Layer stack only. Official backbone.forward calls create_causal_mask; that
+    """Layer stack only. Official backbone.forward builds an HF causal mask that
     traces into functorch vmap and dies with unordered_map::at (intel3/intel5)."""
     import torch
     import torch.nn as nn
