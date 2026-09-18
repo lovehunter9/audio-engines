@@ -401,7 +401,7 @@ def _install_breeze_ov(model, path, device):
         tts_ov.causal_kv_module(backbone, True),
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
     )
-    runner = tts_ov.KvRunner(prefill, decode, n_layers)
+    runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):

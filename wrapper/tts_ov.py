@@ -413,7 +413,7 @@ class DeviceKvRunner:
     device-side buffers stay put. Prefill stays official; seed_kv uploads once.
     """
 
-    def __init__(self, decode, n_layers):
+    def __init__(self, decode, n_layers, prefill=None):
         compiled = getattr(decode, "compiled", None)
         if compiled is None:
             raise RuntimeError("DeviceKvRunner needs compile_causal().compiled")
@@ -423,6 +423,8 @@ class DeviceKvRunner:
         self.n_layers = n_layers
         self.kv = None
         self._prefix = 0
+        self.prefill = getattr(prefill, "compiled", None) if prefill is not None else None
+        self.pre_req = self.prefill.create_infer_request() if self.prefill is not None else None
 
     def reset(self):
         self.kv = None
@@ -457,7 +459,9 @@ class DeviceKvRunner:
         import torch
 
         if self.kv is None:
-            raise RuntimeError("DeviceKvRunner.step needs seed_kv first")
+            if self.pre_req is None:
+                raise RuntimeError("DeviceKvRunner.step needs seed_kv or a prefill model")
+            return self._prefill_step(embeds)
         q = int(embeds.shape[1])
         self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
         self._mask = mask_np(None, q, self._prefix)
@@ -471,6 +475,23 @@ class DeviceKvRunner:
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
         self._prefix += q
         self.which ^= 1
+        return hidden[:, -q:, :]
+
+    def _prefill_step(self, embeds):
+        import numpy as np
+        import openvino as ov
+        import torch
+
+        q = int(embeds.shape[1])
+        self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        self._mask = mask_np(None, q, 0)
+        req = self.pre_req
+        req.set_input_tensor(0, ov.Tensor(self._emb))
+        req.set_input_tensor(1, ov.Tensor(self._mask))
+        req.infer()
+        hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
+        self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
+        self._prefix = q
         return hidden[:, -q:, :]
 
 
