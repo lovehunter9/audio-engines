@@ -13,7 +13,7 @@
 #
 # Built from beclab/speakrs-diarization 267bdaa (tag pr6-267bdaa-openvino), --features openvino.
 # Verified against the registry rather than the build log: this digest's
-# org.opencontainers.image.revision reads 170edf544fc67d8b9506794da948ca2343b5975e.
+# org.opencontainers.image.revision reads 267bdaa4fdec6503e6997c45fe52cd8d88fa7d97.
 #
 # A digest, not a tag: it is what puts the engine's identity inside this hashed file, so the deps
 # tag moves when the engine does.
