@@ -52,7 +52,15 @@ jobs:
         # drift in silence and in either direction: a release that tightens infer_shapes or
         # the checker fails this job against a version no image runs, or passes it on
         # behaviour no image has. test_contract.py asserts the two stay equal.
-        run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart uvicorn
+        #
+        # 🔴 soundfile for the same reason a third time, and it was the most expensive of
+        # the three. Without it `align._calibrate` dies at its own `import soundfile`
+        # before it reaches the warm-up call, so every assertion about what a failed
+        # warm-up does was being made about a failed import -- and `audioio.probe_seconds`
+        # falls back to the standard library's `wave`, so tests/test_audio_readers.py, the
+        # whole point of which is that the two readers disagree about which containers they
+        # can measure, was running against one reader. Both printed pass.
+        run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart soundfile uvicorn
       - name: install ffmpeg
         # The tempo assertions for FireRed/Breeze long text shell out to ffmpeg, and skipped
         # themselves on every run without it -- on the one path where a wrong filter chain is
@@ -63,6 +71,23 @@ jobs:
         run: python -m compileall -q wrapper tests
       - name: contract tests
         run: python -m unittest tests/test_contract.py
+      - name: align out-of-memory regression tests
+        # Named so they run whichever branch lands first. ⚠️ feat/stt-seconds-cap adds
+        # `unittest discover -s tests` to this same job, for a reason this branch has no
+        # answer to -- it found 82 tests that CI had never run. Once that lands, discover
+        # is a superset and these named steps are a few redundant seconds, not a competing
+        # policy: keep discover and drop them.
+        run: python -m unittest tests/test_align_oom.py
+      # One ENGINE_ARGS string reaches every capability in an image, so a command-line
+      # argument read as a switch in one and as a value in another turns that feature off
+      # in silence. Same note as above about discover.
+      - name: flag registry
+        run: python -m unittest tests/test_flag_registry.py
+      # 🔴 After the ffmpeg step above, and that is not incidental: this one generates real
+      # containers rather than stubbing the reader, because the gap it pins is between two
+      # libraries and a stub has neither of them.
+      - name: audio duration readers
+        run: python -m unittest tests/test_audio_readers.py
       - name: capability smoke tests
         run: python tests/caps_smoke.py
       - name: watchdog smoke tests
@@ -252,6 +277,38 @@ jobs:
           push: true
           tags: ${{ steps.deps.outputs.base_image }}
           provenance: false
+
+      # 🔴 Here, not in `make deps`, because this workflow never runs make. It computes the
+      # deps tag with scripts/deps-image.sh and builds with build-push-action, so a check
+      # hanging off the Makefile target runs only when a person types it -- and the drift it
+      # guards against happens on a CI rebuild, which is the one path that skipped it.
+      #
+      # The hazard is specific: deps.Dockerfile installs `qwen-asr` with no version, so the
+      # package resolves afresh whenever the recipe's hash changes, while align.py carries a
+      # hand-copied word splitter from it. A copy that has drifted raises nothing; it starts
+      # segmenting differently.
+      #
+      # ⚠️ Runs on whichever slice this runner is, so the matrix checks both architectures --
+      # one more than `make check-units` on a developer's machine ever did.
+      - name: the copied word splitter still matches the library in the deps image
+        if: needs.meta.outputs.kind == 'append' && inputs.base == 'qwen'
+        env:
+          DEPS_IMAGE: ${{ steps.deps.outputs.base_image }}
+        run: |
+          set -euo pipefail
+          test -n "${DEPS_IMAGE}" || { echo "::error::no deps image to check against"; exit 1; }
+          # 🔴 Room first, and this step has to ask for it itself. The cleanup above runs
+          # only for `kind == docker` or when the deps image had to be BUILT -- and the
+          # normal append path is neither: the image is already published, which is why
+          # crane appends onto it instead. crane never pulls it into the daemon, so this
+          # `docker run` is the first thing on the runner to fetch several gigabytes of
+          # CUDA torch, on a disk sized for a job that was not going to.
+          df -h / | tail -1
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/local/.ghcup \
+                      /opt/hostedtoolcache /usr/share/swift /usr/local/share/powershell \
+                      /usr/share/miniconda /usr/lib/jvm || true
+          docker run --rm -v "$PWD:/src:ro" -w /src "${DEPS_IMAGE}" \
+            python3 scripts/check-units-against-upstream.py
 
       - name: docker build (single-arch slice)
         if: needs.meta.outputs.kind == 'docker'

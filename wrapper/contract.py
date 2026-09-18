@@ -148,23 +148,23 @@ class EngineArgs:
     def number(self, name, default):
         raw = self.text(name)
         if self._bare(name):
-            self._unreadable.append((name, None, default))
+            self._unreadable.append((name, None, default, "a number"))
             return float(default)
         try:
             return float(raw or default)
         except (TypeError, ValueError):
-            self._unreadable.append((name, raw, default))
+            self._unreadable.append((name, raw, default, "a number"))
             return float(default)
 
     def count(self, name, default):
         raw = self.text(name)
         if self._bare(name):
-            self._unreadable.append((name, None, default))
+            self._unreadable.append((name, None, default, "a number"))
             return int(default)
         try:
             return int(float(raw or default))
         except (TypeError, ValueError):
-            self._unreadable.append((name, raw, default))
+            self._unreadable.append((name, raw, default, "a number"))
             return int(default)
 
     # The spellings a value may use to mean on and off. Public because a cap that has to tell
@@ -185,7 +185,19 @@ class EngineArgs:
         # has to answer the same question the same way.
         if self._bare(name):
             return True
-        return str(self._vals.get(key)).strip().lower() in self.ON_WORDS
+        word = str(self._vals.get(key)).strip().lower()
+        if word in self.ON_WORDS:
+            return True
+        if word in self.OFF_WORDS:
+            return False
+        # 🔴 Neither word list, so nobody knows what was meant -- and until now that read as
+        # OFF without a sound, while the same typo on a number-taking flag was reported.
+        # The asymmetry cost nothing while every switch defaulted off, because a misspelling
+        # landed on the default; it stopped costing nothing the day one defaulted ON, where
+        # `--align-batch enable` turns the feature off and the log says nothing at all.
+        # Falls back to the default and says so, which is what the number readers do.
+        self._unreadable.append((name, self._vals.get(key), bool(default), "on or off"))
+        return bool(default)
 
     def passthrough(self):
         """The flags no cap claimed, ready to hand to a child engine's argv."""
@@ -200,13 +212,13 @@ class EngineArgs:
         rest = self.passthrough()
         if rest:
             log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
-        for name, raw, default in self._unreadable:
+        for name, raw, default, wanted in self._unreadable:
             if raw is None:
                 # Quoting a placeholder here sends the reader grepping their ENGINE_ARGS for
                 # a string that is not in it, and "not a number" is not what went wrong.
                 log.warning("ENGINE_ARGS %s was given with no value; using %s", name, default)
             else:
-                log.warning("ENGINE_ARGS %s=%r is not a number; using %s", name, raw, default)
+                log.warning("ENGINE_ARGS %s=%r is not %s; using %s", name, raw, wanted, default)
 
 
 def cache_dir(repo):
