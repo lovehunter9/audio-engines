@@ -468,11 +468,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         device, n_layers,
     )
     _install_breeze_depth_ov(model, path, device)
-    # intel11 compiled the tail, then Add broadcast died on the real chunk
-    # length (example_t=2 vs streaming frames). Intel's TTS2 notebook leaves
-    # codec on CPU; official Breeze decode_request_chunk stays until the IR
-    # dynamizes every eltwise, not just the last input axis.
-    log.info("breeze codec stays official CPU; OV tail Add broadcast dies on real chunk length")
+    _install_breeze_codec_ov(audio_tokenizer, path, device)
 
 
 def _install_breeze_depth_ov(model, path, device):
@@ -561,12 +557,14 @@ def _install_breeze_depth_ov(model, path, device):
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
     """Official decoder.forward is codes→wav. Streaming lane kept; tail convs on GPU.
 
-    Intel's FireRedTTS2 notebook leaves codec on CPU. Breeze's tail is conv/upsample,
-    not the HF mask that dies in convert_model, so it can go on GPU.
+    intel11 dynamized the last input axis (example_t=2). Internal Add nodes kept
+    the traced T=2 and died on the real context (up to 25+chunk). Compile a
+    static IR at T=32 and left-pad, same window the lane already keeps.
     """
     import numpy as np
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     from models.stream_runtime.stream.lane import ExecutionLane
 
@@ -576,7 +574,8 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         raise RuntimeError("Breeze audio_tokenizer.model is required for codec OV")
     dec = audio_tokenizer.model.decoder
     hidden = int(dec.config.latent_dim)
-    example_t = 2
+    ctx_frames = 25
+    example_t = 32
 
     class _Tail(nn.Module):
         def __init__(self):
@@ -595,10 +594,9 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             return wav.clamp(min=-1, max=1)
 
     example = torch.zeros(1, hidden, example_t, dtype=torch.float32)
-    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_codec_tail", ".ov-breeze-codec-v1")
-    compiled = tts_ov.compile_dyn_last(_Tail(), example, xml, stamp, device)
+    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_codec_tail", ".ov-breeze-codec-v2")
+    compiled = tts_ov.compile_module(_Tail(), example, xml, stamp, device)
     upsample = int(getattr(dec, "total_upsample", 1) or 1)
-    ctx_frames = 25
 
     def run_step(self, codes_chunk, step_idx):
         codes = codes_chunk.detach()
@@ -616,6 +614,11 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         hidden = dec.pre_conv(hidden).transpose(1, 2)
         hidden = dec.pre_transformer(inputs_embeds=hidden).last_hidden_state
         hidden = hidden.permute(0, 2, 1).contiguous()
+        t = int(hidden.shape[-1])
+        if t < example_t:
+            hidden = F.pad(hidden, (example_t - t, 0))
+        elif t > example_t:
+            hidden = hidden[..., -example_t:]
         wav = torch.from_numpy(
             np.ascontiguousarray(compiled(np.ascontiguousarray(hidden.detach().float().cpu().numpy()))[0])
         )
@@ -623,7 +626,10 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         return wav[..., -keep:].to(dtype=torch.float32)
 
     ExecutionLane.run_step = run_step
-    log.info("breeze codec tail on OpenVINO %s upsample=%d", device, upsample)
+    log.info(
+        "breeze codec tail on OpenVINO %s upsample=%d static_t=%d",
+        device, upsample, example_t,
+    )
 
 
 def build_app(supports):
