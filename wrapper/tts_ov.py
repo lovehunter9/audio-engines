@@ -212,6 +212,18 @@ class FullSeqRunner:
         return hidden[:, -q:, :]
 
 
+def causal_attn_bias(hidden, q_len, past_len):
+    """Additive mask: query i sees keys 0 .. past_len+i. Needed for FireRed q=4."""
+    import torch
+
+    total = int(past_len) + int(q_len)
+    min_v = torch.finfo(hidden.dtype).min
+    attn = hidden.new_zeros(1, 1, q_len, total)
+    q_pos = torch.arange(q_len, device=hidden.device).view(q_len, 1)
+    k_pos = torch.arange(total, device=hidden.device).view(1, total)
+    return attn.masked_fill(k_pos > (past_len + q_pos), min_v)
+
+
 def _rotate_half(x):
     import torch
 
@@ -265,15 +277,9 @@ def causal_kv_module(inner, with_past):
             pos = torch.arange(
                 past_len, total, device=hidden.device
             ).unsqueeze(0)
-            min_v = torch.finfo(hidden.dtype).min
-            attn = hidden.new_zeros(1, 1, q_len, total)
-            if not with_past:
-                causal = torch.triu(
-                    torch.ones(q_len, q_len, dtype=torch.bool, device=hidden.device), 1
-                )
-                attn = attn.masked_fill(causal, min_v)
+            attn = causal_attn_bias(hidden, q_len, past_len)
             keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, total)
-            attn = attn.masked_fill(~keep, min_v)
+            attn = attn.masked_fill(~keep, torch.finfo(hidden.dtype).min)
             rope = self.inner.rotary_emb(hidden, pos)
             present = []
             for i, layer in enumerate(self.inner.layers[:n_layers]):
