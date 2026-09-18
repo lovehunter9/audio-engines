@@ -47,8 +47,14 @@ def compile_module(mod, example, xml, stamp, device):
         for p in getattr(mod, "parameters", lambda: ())():
             p.requires_grad_(False)
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
-        with torch.inference_mode():
-            ov_model = ov.convert_model(mod, example_input=example)
+        try:
+            with torch.inference_mode():
+                ov_model = ov.convert_model(mod, example_input=example)
+        except Exception as e:
+            log.warning("convert_model failed (%s); jit.trace then convert", e)
+            traced = torch.jit.trace(mod, example, strict=False, check_trace=False)
+            with torch.inference_mode():
+                ov_model = ov.convert_model(traced)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
