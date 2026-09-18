@@ -2186,8 +2186,10 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertNotIn("leaving official eager on CPU", src)
         self.assertIn("breeze_backbone_full", src)
         self.assertIn("compile_causal", src)
-        self.assertIn("use_cache=False", inspect.getsource(tts_ov.causal_full_module))
-        self.assertIn("unordered_map", inspect.getsource(tts_ov.causal_full_module))
+        stack = inspect.getsource(tts_ov.causal_full_module)
+        self.assertNotIn("create_causal_mask", stack)
+        self.assertIn("rotary_emb", stack)
+        self.assertIn("unordered_map", stack)
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):
