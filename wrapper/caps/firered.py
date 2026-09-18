@@ -496,7 +496,7 @@ def _install_firered_ov(instruct, path, device):
     core = getattr(instruct, "tts_core", None)
     if core is None:
         raise RuntimeError("FireRedTTS3Instruct has no tts_core")
-    log.info("firered official prefill + stateful decode; DiT+patch on OpenVINO %s", device)
+    log.info("firered OV prefill + stateful decode; DiT+patch on OpenVINO %s", device)
     dit = core.dit
     patch = core.patch_encoder
     hist = int(core.history_length)
@@ -550,7 +550,7 @@ def _install_firered_ov(instruct, path, device):
 
 
 def _install_firered_backbone(core, path, device):
-    """Replace _backbone_one_step: 1.7B Qwen3 prefill+decode with tensor K/V."""
+    """Replace _backbone_one_step: OV prefill seeds stateful decode (same KV layout)."""
     import torch
 
     from .. import tts_ov
@@ -570,11 +570,21 @@ def _install_firered_backbone(core, path, device):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
 
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v14")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+        dynamize_ranks=(2, 3),
+        stateful=False,
+    )
+
     def _compile_q(q):
         embeds = torch.zeros(1, q, hidden, dtype=torch.float32)
         mask = torch.ones(1, example_t + q, dtype=torch.long)
         _, xml, stamp = tts_ov.ir_paths(
-            src, "firered_llm_decode_q%d" % q, ".ov-firered-v13"
+            src, "firered_llm_decode_q%d" % q, ".ov-firered-v14"
         )
         compiled = tts_ov.compile_causal(
             tts_ov.causal_kv_module(inner, True),
@@ -585,7 +595,6 @@ def _install_firered_backbone(core, path, device):
         return tts_ov.StatefulKvRunner(compiled, n_layers)
 
     runners = {1: _compile_q(1), q_patch: _compile_q(q_patch)}
-    orig = core._backbone_one_step
     n_step = {"i": 0}
     times = core._ov_times
 
@@ -605,6 +614,7 @@ def _install_firered_backbone(core, path, device):
 
     def _backbone_one_step(input_embeds, cache=None):
         import time
+        import numpy as np
 
         if input_embeds.shape[0] != 1:
             raise RuntimeError(
@@ -617,9 +627,13 @@ def _install_firered_backbone(core, path, device):
             times["prefill"] = times["ar"] = times["dit"] = 0.0
             n_step["i"] = 0
             t0 = time.perf_counter()
-            hidden, hf_cache = orig(input_embeds, cache=None)
+            q0 = int(input_embeds.shape[1])
+            arr = np.ascontiguousarray(input_embeds.detach().float().cpu().numpy())
+            out = prefill(arr, tts_ov.mask_np(None, q0, 0))
+            hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
+            kv = [np.ascontiguousarray(out[i]) for i in range(1, 1 + 2 * n_layers)]
             for r in runners.values():
-                r.seed_kv(hf_cache)
+                r.seed_flat(kv)
             times["prefill"] += time.perf_counter() - t0
             n_step["i"] = 1
             _log_step(input_embeds, hidden, runners[1].prefix_len)
@@ -641,7 +655,7 @@ def _install_firered_backbone(core, path, device):
 
     core._backbone_one_step = _backbone_one_step
     log.info(
-        "firered official prefill + stateful decode q=1 and q=%d on OpenVINO %s",
+        "firered OV prefill + stateful decode q=1 and q=%d on OpenVINO %s",
         q_patch, device,
     )
 

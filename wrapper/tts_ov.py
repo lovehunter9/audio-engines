@@ -645,19 +645,28 @@ class StatefulKvRunner:
         self._ready = False
 
     def seed_kv(self, cache):
+        self.seed_flat(flatten_kv(cache))
+
+    def seed_flat(self, flat):
+        """Write already-flat K/V (torch or numpy, our [B,kv,T,D] layout) into state."""
         import numpy as np
         import openvino as ov
 
-        flat = flatten_kv(cache)
         states = self.req.query_state()
         if len(states) != len(flat):
             raise RuntimeError(
                 "state %d vs kv %d" % (len(states), len(flat))
             )
+        prefix = None
         for st, t in zip(states, flat):
-            arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
+            if hasattr(t, "detach"):
+                arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
+            else:
+                arr = np.ascontiguousarray(np.asarray(t, dtype=np.float32))
             st.state = ov.Tensor(arr)
-        self._prefix = int(flat[0].shape[-2])
+            if prefix is None:
+                prefix = int(arr.shape[-2])
+        self._prefix = int(prefix or 0)
         self._ready = True
 
     @property
