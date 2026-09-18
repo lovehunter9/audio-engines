@@ -43,6 +43,16 @@ ARG DEBIAN_FRONTEND=noninteractive
 # from a machine with no GPU. So Intel's own compute-runtime and matching IGC are pinned here.
 #
 # Checksums from the upstream release notes; the .ddeb debug packages are skipped.
+#
+# `dpkg -i || apt-get -f` is one command, not two lines: under set -eux a bare `dpkg -i` that
+# exits non-zero ends the build then and there, and the repair written on the next line could
+# never run -- it read like a safety net and was dead code. It works today only because the two
+# libraries these .debs depend on are installed in the apt-get above, so the first .deb that
+# gains a dependency is the one that finds out. The dpkg-query loop is there because the repair
+# has an outside too: `apt-get -f install` exits 0 when it decides there is nothing to fix, so a
+# dpkg that failed for any other reason would leave an image with no driver in it and no failure
+# anywhere in the log. The symptom then is the one this whole block exists to prevent -- 0
+# platforms, CPU only, indistinguishable from a machine with no GPU.
 # Recipe taken from bases/ov on the showcase/intel-openvino-asr branch, which established it
 # for the ASR line on the same hardware. Said with the branch because that base is not on main:
 # a reader who greps bases/ for it here finds nothing and has to decide whether the pinned
@@ -71,8 +81,11 @@ RUN set -eux; \
         "6031a63d6e8a12ce61c14efc15f2c8e727061286e3820b8594e6d00615e04d54  libigdgmm12_22.10.0_amd64.deb" \
         "8bef9f24e03f826f93c076081bda13c6ac3afbd9e42b9fb8f298fab652330e2f  libze-intel-gpu1_${NEO_VER}-0_amd64.deb" \
         | sha256sum -c; \
-    dpkg -i /tmp/neo/*.deb; \
-    apt-get install -y -f --no-install-recommends; \
+    dpkg -i /tmp/neo/*.deb || apt-get install -y -f --no-install-recommends; \
+    for p in intel-igc-core-2 intel-igc-opencl-2 intel-ocloc intel-opencl-icd \
+             libigdgmm12 libze-intel-gpu1; do \
+        dpkg-query -W -f='${Status}' "$p" | grep -q 'install ok installed'; \
+    done; \
     rm -rf /tmp/neo /var/lib/apt/lists/*
 
 # ffmpeg is the engine's decoder, not a convenience: speakrs takes 16 kHz mono f32 and the Rust
