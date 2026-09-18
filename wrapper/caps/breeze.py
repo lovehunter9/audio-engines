@@ -364,37 +364,118 @@ def _load():
 
 
 def _install_breeze_ov(model, path, device):
-    """DiT-less: export the depth decoder one-step. Backbone loop stays official eager."""
+    """Compile the backbone that FastBreezeStreamingRuntime actually calls.
+
+    Official iter_audio_chunks never hits model.depth_decoder.forward. Prefill
+    is backbone_model(...); every later frame is BackboneGraph._decode_step
+    (embed → backbone → lm_head). Those two go to GPU. Export failure is fatal.
+    """
+    import numpy as np
     import torch
+
+    from models.cudagraph.backbone_graph import BackboneGraph
 
     from .. import tts_ov
 
-    ir_dir, xml, stamp = tts_ov.ir_paths(str(path), "breeze_depth", ".ov-breeze-v1")
-    decoder = getattr(model, "depth_decoder", None)
-    if decoder is None:
-        raise RuntimeError("Breeze model has no depth_decoder to export")
-    hidden = int(getattr(model.config, "hidden_size", 2048) or 2048)
-    # One dummy last-token hidden; official depth graph consumes this every frame.
-    example = torch.zeros(1, hidden, dtype=torch.float32)
-    try:
-        compiled = tts_ov.compile_module(decoder, example, xml, stamp, device)
-    except Exception:
-        log.exception("breeze depth IR export failed; leaving official eager on CPU")
-        return
-    orig = decoder.forward
+    backbone = getattr(model, "backbone_model", None)
+    if backbone is None:
+        raise RuntimeError("Breeze model has no backbone_model to export")
+    cfg = getattr(backbone, "config", None) or model.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    src = str(path)
+    example_t = 16
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v2")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v2")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_step_module(backbone, n_layers, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    )
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_step_module(backbone, n_layers, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
 
-    def forward(*args, **kwargs):
-        if args and hasattr(args[0], "detach"):
-            import numpy as np
+    def _as_out(hidden_np, kv_np, fallback_past=None):
+        hidden = torch.from_numpy(np.ascontiguousarray(hidden_np))
+        kv = [torch.from_numpy(np.ascontiguousarray(x)) for x in kv_np]
+        past_out = tts_ov.unflatten_kv(kv, n_layers) if kv else fallback_past
+        return type("BBOut", (), {"last_hidden_state": hidden, "past_key_values": past_out})()
 
-            arr = np.ascontiguousarray(args[0].detach().float().cpu().numpy())
-            out = compiled(arr)
-            first = out[0]
-            return torch.from_numpy(np.ascontiguousarray(first))
-        return orig(*args, **kwargs)
+    orig_bb = backbone.forward
 
-    decoder.forward = forward
-    log.info("breeze depth decoder on OpenVINO %s", device)
+    def bb_forward(*args, **kwargs):
+        embeds = kwargs.get("inputs_embeds")
+        if embeds is None and args:
+            embeds = args[0]
+        past_in = kwargs.get("past_key_values")
+        if embeds is None:
+            return orig_bb(*args, **kwargs)
+        if embeds.shape[0] != 1:
+            raise RuntimeError(
+                "breeze ov backbone is compiled for batch=1 (cfg_scale=1); got %s"
+                % (tuple(embeds.shape),)
+            )
+        arr = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        attn = kwargs.get("attention_mask")
+        if past_in is None:
+            mask = tts_ov.mask_np(attn, arr.shape[1], 0)
+            out = prefill(arr, mask)
+            return _as_out(out[0], list(out)[1:])
+        flat = []
+        used = None
+        if kwargs.get("cache_position") is not None:
+            used = int(kwargs["cache_position"].reshape(-1)[0])
+        for t in tts_ov.flatten_kv(past_in):
+            # StaticCache is allocated to max_seq; feed the used prefix only.
+            sl = t.shape[-2]
+            take = sl if used is None else max(1, min(used, sl))
+            flat.append(np.ascontiguousarray(t[..., :take, :].detach().float().cpu().numpy()))
+        past_len = flat[0].shape[-2]
+        mask = tts_ov.mask_np(attn, arr.shape[1], past_len)
+        out = decode(arr, mask, *flat)
+        hidden_np, kv_np = out[0], list(out)[1:]
+        if hasattr(past_in, "layers"):
+            kv_t = [torch.from_numpy(np.ascontiguousarray(x)) for x in kv_np]
+            tts_ov.write_static_kv(past_in, kv_t)
+            return _as_out(hidden_np, [], fallback_past=past_in)
+        return _as_out(hidden_np, kv_np)
+
+    backbone.forward = bb_forward
+
+    def decode_step(self):
+        if self.batch_size != 1:
+            raise RuntimeError(
+                "breeze ov BackboneGraph is compiled for batch=1; got %d" % self.batch_size
+            )
+        inputs_embeds = self.embed_tokens(self.input_ids_buf)
+        out = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=self.attn_mask,
+            past_key_values=self.static_cache,
+            position_ids=self.position_ids,
+            cache_position=self.cache_position,
+            use_cache=True,
+        )
+        self.hidden_buf.copy_(out.last_hidden_state.to(self.hidden_buf.dtype))
+        logits = self.lm_head(self.hidden_buf[:, -1, :].float())
+        self.logits_buf.copy_(logits)
+        self.cfg_logits_buf.copy_(self.logits_buf[: self.half])
+
+    decode_step._ov = True
+    BackboneGraph._decode_step = decode_step
+    log.info(
+        "breeze backbone prefill+decode on OpenVINO %s layers=%d (depth loop stays official)",
+        device, n_layers,
+    )
 
 
 def build_app(supports):

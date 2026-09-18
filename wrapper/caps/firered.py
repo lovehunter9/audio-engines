@@ -488,7 +488,7 @@ def _load():
 
 
 def _install_firered_ov(instruct, path, device):
-    """Official generate() loop stays. DiT one flow step and patch_encoder go to GPU IR."""
+    """Official generate() loop stays. AR backbone + DiT + patch_encoder on GPU IR."""
     import torch
 
     from .. import tts_ov
@@ -496,6 +496,7 @@ def _install_firered_ov(instruct, path, device):
     core = getattr(instruct, "tts_core", None)
     if core is None:
         raise RuntimeError("FireRedTTS3Instruct has no tts_core")
+    _install_firered_backbone(core, path, device)
     dit = core.dit
     patch = core.patch_encoder
     hist = int(core.history_length)
@@ -540,6 +541,72 @@ def _install_firered_ov(instruct, path, device):
 
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
+
+
+def _install_firered_backbone(core, path, device):
+    """Replace _backbone_one_step: that is the 1.7B Qwen3 AR, every token."""
+    import numpy as np
+    import torch
+
+    from .. import tts_ov
+
+    llm = getattr(core, "backbone_llm", None)
+    inner = getattr(llm, "model", None) if llm is not None else None
+    if inner is None:
+        raise RuntimeError("FireRed tts_core has no backbone_llm.model")
+    cfg = inner.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    example_t = 16
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+    src = str(path)
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v2")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v2")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_step_module(inner, n_layers, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    )
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_step_module(inner, n_layers, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+
+    def _backbone_one_step(input_embeds, cache=None):
+        arr = np.ascontiguousarray(input_embeds.detach().float().cpu().numpy())
+        if arr.shape[0] != 1:
+            raise RuntimeError(
+                "firered ov backbone is compiled for batch=1; got %s" % (arr.shape,)
+            )
+        if cache is None:
+            out = prefill(arr, tts_ov.mask_np(None, arr.shape[1], 0))
+        else:
+            flat = [
+                np.ascontiguousarray(
+                    (t.detach() if hasattr(t, "detach") else torch.as_tensor(t))
+                    .float().cpu().numpy()
+                )
+                for t in tts_ov.flatten_kv(cache)
+            ]
+            out = decode(arr, tts_ov.mask_np(None, arr.shape[1], flat[0].shape[-2]), *flat)
+        hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
+        new_cache = tts_ov.unflatten_kv(
+            [torch.from_numpy(np.ascontiguousarray(out[i])) for i in range(1, len(out))],
+            n_layers,
+        )
+        return hidden, new_cache
+
+    core._backbone_one_step = _backbone_one_step
+    log.info(
+        "firered Qwen3 backbone prefill+decode on OpenVINO %s layers=%d",
+        device, n_layers,
+    )
 
 
 def build_app(supports):
