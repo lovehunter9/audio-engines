@@ -319,6 +319,7 @@ class RuntimeHelperTest(unittest.TestCase):
 
             def start(self):
                 events.append("thread.start")
+                self.target()
 
         with (
             mock.patch("wrapper.runtime.threading.Thread", FakeThread),
@@ -345,6 +346,7 @@ class RuntimeHelperTest(unittest.TestCase):
             [
                 "thread.start",
                 "watchdog",
+                "load",
                 ("build", ["vad"]),
                 (
                     "uvicorn",
