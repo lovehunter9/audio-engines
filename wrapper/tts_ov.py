@@ -365,6 +365,20 @@ class KvRunner:
     def reset(self):
         self.kv = None
 
+    def seed_kv(self, cache):
+        """Copy an official HF cache into numpy K/V after a CPU prefill."""
+        import numpy as np
+
+        flat = flatten_kv(cache)
+        if len(flat) != 2 * self.n_layers:
+            raise RuntimeError(
+                "seed_kv expected %d tensors, got %d"
+                % (2 * self.n_layers, len(flat))
+            )
+        self.kv = [
+            np.ascontiguousarray(t.detach().float().cpu().numpy()) for t in flat
+        ]
+
     @property
     def prefix_len(self):
         if self.kv is None:
