@@ -26,6 +26,16 @@ BASES = {
     "speakrs": [
         (("diar",), "diar_speakrs"),
     ],
+    # The Intel sibling of speakrs. A separate base image because the runtime differs -- ONNX
+    # Runtime's OpenVINO build rather than its CUDA one -- but the same engine binary behind it,
+    # serving the same capability through the same module.
+    #
+    # It has to be listed: app.py routes on AUDIO_BASE, which append-image.sh sets from the base
+    # directory name, so a base absent from this table exits at startup with "the image is built
+    # wrong" -- which is accurate, and was how this was found.
+    "speakrs-ov": [
+        (("diar",), "diar_speakrs"),
+    ],
     # Qwen3-TTS in-process: which routes a checkpoint can honour is read off the weights
     # (e.g. CustomVoice -> tts, Base -> tts_clone, VoiceDesign -> tts, etc.).
     "qwen3tts": [

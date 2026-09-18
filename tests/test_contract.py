@@ -1285,5 +1285,68 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
         ])
 
 
+class BaseRegistrationTests(unittest.TestCase):
+    """A base directory, the routing table and the README table name the same 12 bases.
+
+    Adding a base means adding a key to catalog.BASES: app.py routes on AUDIO_BASE, which
+    append-image.sh sets from the directory name, and a base missing from that table exits at
+    startup saying the image was built wrong. Nothing here compared the two, so the way to find
+    out was to build the image and run it. The README table carries the line "Keep this table in
+    sync whenever a base is added", which until now was a sentence asking to be remembered.
+
+    Both walk bases/ rather than a list written here, so a base added tomorrow is in scope
+    without anyone editing this file. append.env is what makes a directory a base: every one has
+    it and bases/runtime, which is shared build scripts rather than a base, does not. nemo is why
+    the marker is not deps.Dockerfile -- it layers on another image and has no deps of its own.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _bases(self):
+        found = {name for name in os.listdir(os.path.join(self.ROOT, "bases"))
+                 if os.path.isfile(os.path.join(self.ROOT, "bases", name, "append.env"))}
+        self.assertTrue(found, "no bases/*/append.env found; this test has lost its anchor")
+        return found
+
+    def test_every_base_directory_is_routable(self):
+        self.assertEqual(self._bases(), set(catalog.BASES))
+
+    def test_every_base_directory_has_a_readme_row(self):
+        with open(os.path.join(self.ROOT, "README.md"), encoding="utf-8") as fh:
+            rows = set(re.findall(r"^\| `([a-z0-9-]+)` \| `beclab/", fh.read(), re.M))
+        self.assertEqual(self._bases(), rows)
+
+
+class OnnxPinTests(unittest.TestCase):
+    """The version the images install and the version CI tests against are one version.
+
+    bases/speakrs-ov/deps.Dockerfile says onnx decides whether the derived model is accepted
+    -- the derivation runs infer_shapes and the checker over a graph it edited -- and its
+    comment states the image and the test run against the same release. Nothing held that
+    claim up: the workflow installed onnx unpinned, so the two could differ for months with
+    every run green. This is the cheapest thing that holds it, because it compares the two
+    files as text and needs neither onnx installed nor a particular host.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _pins(self, path, pattern):
+        with open(os.path.join(self.ROOT, path), encoding="utf-8") as fh:
+            return re.findall(pattern, fh.read())
+
+    def test_ci_installs_the_version_the_images_install(self):
+        ci = self._pins(".github/workflows/build-image.yml", r"onnx==([0-9][^\s\"']*)")
+        self.assertEqual(len(ci), 1, "expected exactly one onnx pin in build-image.yml")
+        images = []
+        for dockerfile in sorted(glob.glob(os.path.join(self.ROOT, "bases", "*",
+                                                        "deps.Dockerfile"))):
+            rel = os.path.relpath(dockerfile, self.ROOT)
+            images += [(rel, v) for v in self._pins(rel, r"onnx==([0-9][^\s\"']*)")]
+        self.assertTrue(images, "no base pins onnx; drop this test with the last one")
+        for rel, version in images:
+            self.assertEqual(version, ci[0],
+                             "%s installs onnx %s, CI tests against %s" % (rel, version, ci[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

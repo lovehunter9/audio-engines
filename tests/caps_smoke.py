@@ -343,6 +343,235 @@ def t_diar():
               r.status_code == 400, (r.status_code, r.text[:120]))
 
 
+def t_diar_speakrs_openvino_models_dir():
+    """Preparing the batched segmentation model, and every way it is allowed to give up.
+
+    The giving-up cases matter more than the happy one: this runs at startup, and anything
+    that stops the engine from launching costs more than the batching it was buying.
+    """
+    import shutil
+    import tempfile
+    from wrapper.caps import diar_speakrs as ds
+    from wrapper.contract import EngineArgs
+
+    root = tempfile.mkdtemp(prefix="ovmodels-")
+    farm = ds._farm_for(root)
+    shutil.rmtree(farm, ignore_errors=True)
+    original = ds.EXECUTION_MODE
+    batching = ds.OPENVINO_BATCHING
+    try:
+        # Off for every other backend: they compile the stock export and batch with it.
+        open(os.path.join(root, "segmentation-3.0-b32.onnx"), "wb").close()
+        ds.EXECUTION_MODE = "cuda"
+        check("non-openvino modes are handed the cache directory untouched",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+
+        ds.EXECUTION_MODE = "openvino"
+        # 🔴 A directory that is not there. The wrapper script starts this process offline when
+        # llm-init never names the model, and _models_dir then returns a path that does not
+        # exist so the engine can report the missing weights by name. Listing it unguarded
+        # raised at import, on the Intel image only, and the engine never got to say anything.
+        absent = os.path.join(root, "not-downloaded-yet")
+        check("a models directory that does not exist is handed over untouched",
+              ds._openvino_models_dir(absent) == absent, ds._openvino_models_dir(absent))
+
+        # No stock export to derive from -- the cpu file list does not fetch one.
+        empty = tempfile.mkdtemp(prefix="ovempty-")
+        try:
+            check("a cache with no batched export is handed over untouched",
+                  ds._openvino_models_dir(empty) == empty, ds._openvino_models_dir(empty))
+        finally:
+            shutil.rmtree(empty, ignore_errors=True)
+
+        # 🔴 The one that has to hold: a file that is not a model at all. Anything thrown while
+        # deriving must come back as the original directory, so the engine starts unbatched
+        # rather than not at all.
+        check("an unreadable batched export falls back to the cache directory",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        # The farm is built before the export is read, so a failure used to leave a directory
+        # of symlinks that looked exactly like a working one -- to anyone asking why batching
+        # was off, evidence pointing the wrong way.
+        check("and takes its half-built farm with it", not os.path.exists(farm))
+
+        try:
+            import onnx
+            from onnx import helper, TensorProto
+        except ImportError:
+            # 🔴 A failure on CI rather than a print. Returning here skips every assertion
+            # below and the suite still reports that everything passed -- which is the shape
+            # this repository already paid for once, with the tempo assertions that shelled
+            # out to a missing ffmpeg on every run. CI installs onnx; if it ever stops, this
+            # says so instead of going quiet.
+            if os.environ.get("CI"):
+                check("onnx is installed so the derivation itself is exercised", False)
+                return
+            print("  (skipped the derivation itself: onnx is not installed here)")
+            return
+
+        # 🔴 An op from a domain onnx knows nothing about, deliberately. This stood in as an
+        # Identity, and Identity ties the output's shape to the input's: shape inference
+        # propagated [32, 1, 160000] over the declared output and the derivation's edit to the
+        # frame dimension could not be observed at all. The real export's output is not a copy
+        # of its input -- [32, 589, 7], windows by frames by speakers -- and an op with no
+        # inference rule is what lets a two-node fake say so.
+        node = helper.make_node("Segment", ["input"], ["output"], domain="test.fake")
+        graph = helper.make_graph(
+            [node], "seg",
+            [helper.make_tensor_value_info("input", TensorProto.FLOAT, [32, 1, 160000])],
+            [helper.make_tensor_value_info("output", TensorProto.FLOAT, [32, 589, 7])])
+        model = helper.make_model(graph)
+        model.opset_import.append(helper.make_opsetid("test.fake", 1))
+        onnx.save(model, os.path.join(root, "segmentation-3.0-b32.onnx"))
+
+        got = ds._openvino_models_dir(root)
+        check("a derivable export produces a directory of its own", got == farm, got)
+
+        # The switch, asserted where deriving succeeds -- against a case that already returns
+        # the cache directory it would prove nothing. Off means the cache directory; a value
+        # that is neither on nor off must not quietly become off, because that is a 4x loss
+        # with nothing in the output saying why.
+        ds.OPENVINO_BATCHING = "off"
+        check("--openvino-batching off hands over the cache directory",
+              ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        ds.OPENVINO_BATCHING = "OFF"
+        check("and the value is not case-sensitive", ds._openvino_models_dir(root) == root)
+        # 🔴 The whole vocabulary, walked rather than spelled out here. Every other boolean in
+        # this wrapper answers to 0/false/no/off -- --exclusive is read four lines from where
+        # this flag is -- so a person turning batching off for a measurement has four ways to
+        # write what reads to them as one word, and any spelling that falls through to the
+        # unrecognised branch derives: the measurement then reports "batching off" for a run
+        # with batching on. Walking EngineArgs' own tuples is the point rather than a tidiness
+        # -- a list copied into this file goes green on the day a fifth spelling is added to
+        # them, which is the same second copy that put the defect here in the first place.
+        for word in EngineArgs.OFF_WORDS:
+            ds.OPENVINO_BATCHING = word
+            check("--openvino-batching %s hands over the cache directory" % word,
+                  ds._openvino_models_dir(root) == root, ds._openvino_models_dir(root))
+        for word in EngineArgs.ON_WORDS:
+            ds.OPENVINO_BATCHING = word
+            check("--openvino-batching %s derives" % word,
+                  ds._openvino_models_dir(root) == farm, ds._openvino_models_dir(root))
+        ds.OPENVINO_BATCHING = "maybe"
+        check("an unrecognised value still derives", ds._openvino_models_dir(root) == farm)
+        ds.OPENVINO_BATCHING = batching
+
+        # 🔴 A device may be named, and on a two-card machine it will be: the engine takes
+        # openvino:<device> and the chart could start sending one. So the guard has to be a
+        # prefix test, and this has to be asserted where deriving SUCCEEDS -- asserted against
+        # an unreadable export instead, both answers are the cache directory and the case
+        # proves nothing, which is how it was written the first time.
+        ds.EXECUTION_MODE = "openvino:GPU.1"
+        check("a mode naming a device still derives", ds._openvino_models_dir(root) == farm,
+              ds._openvino_models_dir(root))
+        ds.EXECUTION_MODE = "openvino"
+        prepared = os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")
+        check("the prepared model is there under the name speakrs looks for",
+              os.path.isfile(prepared) and not os.path.islink(prepared), prepared)
+        # 🔴 Followed, not just identified as a link. os.path.islink is True for a dangling
+        # one, so a farm of links that all point at themselves satisfied the old wording of
+        # this check -- "reachable through it" was the one thing it did not test. The engine
+        # joins the embedding weights and the PLDA directory off this path; dead links there
+        # turn "slower but running" into a pipeline that cannot build, which is the failure
+        # this whole function is written to avoid.
+        linked = os.path.join(farm, "segmentation-3.0-b32.onnx")
+        check("the rest of the cache is reachable through it",
+              os.path.islink(linked) and os.path.isfile(linked)
+              and os.path.realpath(linked).startswith(os.path.realpath(root)),
+              os.path.realpath(linked))
+        for name in os.listdir(farm):
+            entry = os.path.join(farm, name)
+            check("every entry in the farm resolves: %s" % name, os.path.exists(entry),
+                  os.path.realpath(entry))
+
+        dims = onnx.load(prepared).graph.input[0].type.tensor_type.shape.dim
+        # Batch static, samples dynamic. The other way round was measured and still fails.
+        check("the batch dimension stays fixed", dims[0].dim_value == 32, dims[0].dim_value)
+        check("the sample dimension becomes dynamic",
+              dims[2].dim_param == "samples" and dims[2].dim_value == 0, str(dims[2]))
+        out = onnx.load(prepared).graph.output[0].type.tensor_type.shape.dim
+        # Both ends, or the graph contradicts itself: a dynamic sample count feeding a fixed
+        # frame count. onnx's own checker accepts that and ORT runs it on CPU, so nothing
+        # downstream of here would notice the output edit going missing.
+        check("the frame dimension becomes dynamic too",
+              out[1].dim_param == "frames" and out[1].dim_value == 0, str(out[1]))
+        check("the speaker dimension stays fixed", out[2].dim_value == 7, out[2].dim_value)
+        check("no half-written model is left behind",
+              not os.path.exists(prepared + ".partial"))
+
+        # 🔴 The name has to track the export, not a literal. speakrs builds what it looks
+        # for out of its own PRIMARY_BATCH_SIZE, so a cache shipping a different batch size is
+        # the case where a hardcoded 32 here and the constant there stop agreeing -- and the
+        # failure is batching silently off, which nothing errors on.
+        other = os.path.join(root, "segmentation-3.0-b64.onnx")
+        shutil.copyfile(os.path.join(root, "segmentation-3.0-b32.onnx"), other)
+        ds._openvino_models_dir(root)
+        check("a different batch size is derived under its own name",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b64-dynseq.onnx")),
+              sorted(os.listdir(farm)))
+        check("and the original is still derived alongside it",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")))
+        # 🔴 The pattern must not match what this function writes. Asserting that no
+        # `-dynseq-dynseq` file appears could not fail: the exports are read from the cache
+        # and the derivatives are written to the farm, two directories that are never the
+        # same one, so the scenario it described cannot arise. Ask the pattern directly
+        # instead -- that is the property, and it is the one a loosened regex breaks.
+        check("the pattern does not match a derived model",
+              not ds._BATCHED_SEGMENTATION.fullmatch("segmentation-3.0-b32-dynseq.onnx"))
+        check("and still matches a real export",
+              bool(ds._BATCHED_SEGMENTATION.fullmatch("segmentation-3.0-b32.onnx")))
+        os.remove(other)
+
+        # 🔴 /tmp is a mounted volume and survives a restart. A farm left from a previous
+        # revision would aim at weights the cache has moved past, and nothing would say so,
+        # so a second call must rebuild rather than find its own work and keep it.
+        stale = os.path.join(farm, "left-from-a-previous-revision.onnx")
+        open(stale, "wb").close()
+        os.utime(prepared, (1000000, 1000000))
+        ds._openvino_models_dir(root)
+        check("a farm left over from an earlier run is rebuilt, not reused",
+              not os.path.exists(stale))
+        check("and the model is derived again rather than found",
+              os.stat(prepared).st_mtime > 1000000, os.stat(prepared).st_mtime)
+        # 🔴 Two caches, two farms. /tmp is a mounted volume shared by every replica of this
+        # application, and under one fixed name the second replica tears down and rebuilds the
+        # directory the first is serving out of -- while that one holds open handles to paths
+        # that have just been replaced. Asserted as the property rather than by restating the
+        # formula, which would be this module asked twice.
+        check("a second cache directory gets a farm of its own",
+              ds._farm_for(root) != ds._farm_for(root + "-other"),
+              ds._farm_for(root))
+
+        # 🔴 One unconvertible export must not take the others with it. This loop used to sit
+        # inside a single try, so a cache carrying both a b32 and a b64 export lost BOTH when
+        # either would not convert: the farm was torn down, the engine ran a window at a time,
+        # and the log named a file that had nothing wrong with it.
+        broken = os.path.join(root, "segmentation-3.0-b64.onnx")
+        open(broken, "wb").write(b"not an onnx graph")
+        got = ds._openvino_models_dir(root)
+        check("a broken export does not cost the ones that convert", got == farm, got)
+        check("and the good one is still derived",
+              os.path.isfile(os.path.join(farm, "segmentation-3.0-b32-dynseq.onnx")),
+              sorted(os.listdir(farm)))
+        check("while the broken one leaves no half-written file behind",
+              not os.path.exists(os.path.join(farm, "segmentation-3.0-b64-dynseq.onnx.partial")))
+        os.remove(broken)
+
+        # 🔴 That the function is reached at all. Every check above calls it directly, so
+        # deleting the call from the engine's argv left all of them green and turned
+        # batching silently off -- which is the entire reason this code exists.
+        source = open(ds.__file__, encoding="utf-8").read()
+        wired = [line for line in source.splitlines()
+                 if "--models-dir" in line
+                 or ("_openvino_models_dir(" in line and "def " not in line)]
+        check("the engine is handed the prepared directory, not the raw cache",
+              any("_openvino_models_dir(" in line for line in wired), wired)
+    finally:
+        ds.EXECUTION_MODE = original
+        ds.OPENVINO_BATCHING = batching
+        shutil.rmtree(root, ignore_errors=True)
+        shutil.rmtree(farm, ignore_errors=True)
+
+
 def t_diar_speakrs_models_dir():
     import shutil
     import tempfile
@@ -3349,6 +3578,8 @@ def main():
                            ("firered design speak", t_firered_design_speak, "firered"),
                            ("diar_speakrs", t_diar_speakrs, "speakrs"),
                            ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs"),
+                           ("diar_speakrs openvino models dir",
+                            t_diar_speakrs_openvino_models_dir, "speakrs"),
                            ("diar_stream offline", t_diar_stream_offline, "nemo")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base

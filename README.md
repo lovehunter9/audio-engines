@@ -213,6 +213,7 @@ passes. For the same reason the build's final import check must go **through**
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
+| `speakrs-ov` | `beclab/audio-speakrs-ov` | `diar` | the same speakrs, on ONNX Runtime's OpenVINO provider for Intel GPUs (amd64 only) | in progress |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |

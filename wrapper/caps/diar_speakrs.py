@@ -9,9 +9,12 @@
 # no audio. This removes one copy of a hundreds-of-megabytes clip, not the memory it needs -- the
 # engine still holds the whole thing decoded, which is what BOUNDS below caps.
 import contextlib
+import hashlib
 import json
 import logging
 import os
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -38,6 +41,169 @@ ENGINE_BIN = os.environ.get("SPEAKRS_ENGINE_BIN") or "/usr/local/bin/speakrs-eng
 # preference, not a dependency: when the file is there it is authoritative and no guessing is
 # needed, and when it is not, the cache layout below answers.
 RUN_DIR = os.environ.get("RUN_DIR") or "/run/llm-init"
+
+
+# The batched segmentation exports speakrs can be asked to load. Any batch size, because the
+# number is upstream's PRIMARY_BATCH_SIZE and the point of matching rather than spelling it is
+# that this side does not have to be edited when it changes. Excludes what this function
+# writes, or a restart would derive from its own output.
+_BATCHED_SEGMENTATION = re.compile(r"segmentation-[\d.]+-b\d+\.onnx")
+
+
+def _farm_for(models_dir):
+    """Where the prepared models for one cache directory go.
+
+    Keyed on the directory it derives from, so two engines reading different caches on one
+    machine do not tear down each other's work. The digest only has to separate cache
+    directories, not identify them.
+
+    🔴 What this does NOT solve, said here because the first version of this comment claimed it
+    did: two replicas of one deployment read the SAME cache, so they land on the same key and
+    collide exactly as a fixed name would. Separating those needs a key per process or per pod,
+    not per cache. It does not arise under the chart that ships this -- one replica, and a
+    Recreate strategy, so no two pods are ever up together -- and that is the reason it is left
+    alone rather than an oversight. A chart that scales this out has to revisit the key before
+    anything else.
+    """
+    return "/tmp/speakrs-models-openvino-" + hashlib.sha256(
+        os.path.abspath(models_dir).encode()).hexdigest()[:12]
+
+
+def _openvino_models_dir(models_dir):
+    """The directory to hand the engine, with a batched segmentation model OpenVINO can use.
+
+    Batching segmentation is speakrs' own feature and it is on for every other backend. On
+    OpenVINO's GPU plugin it is off, because the stock segmentation-3.0-b32 export has a static
+    sequence length and that plugin cannot compile an LSTM kernel for that graph -- measured on
+    both an Arrow Lake integrated part and an Arc Pro B70.
+
+    🔴 The plugin, not the backend: OpenVINO on the processor compiles the stock export and
+    speakrs takes it there. So this runs wider than the consumer that reads its output, and
+    deliberately -- deriving a file nothing asks for costs one pass over a 6 MB graph, while
+    not deriving one that is asked for turns batching off with nothing in the log. The two
+    sides live in different repositories, so the asymmetry is what keeps them safe to drift. The same export with its sample dimension
+    made dynamic compiles and runs, and is 15x faster per window than going one at a time --
+    529.5 ms against 34.9, one card, 64 windows, best of three, recorded with the rest of the
+    conditions in beclab/speakrs-diarization's README.
+
+    That model is derived here rather than baked into the image, because baking it would pin a
+    copy of weights the engine resolves separately: a new revision upstream and the two drift
+    apart with nothing to notice. Derived at startup, it is always the cache's own file.
+
+    The result is a directory of symlinks plus the one real file, not an edit of the cache.
+    The cache is shared with other applications and is huggingface_hub's to manage; adding
+    files to a snapshot directory is not ours to do.
+
+    Every failure here returns the original directory. Then speakrs finds no prepared model,
+    batching stays off, and the engine runs exactly as it did before this existed -- slower,
+    and working. There is no failure mode worth stopping startup for.
+    """
+    if not EXECUTION_MODE.startswith("openvino"):
+        return models_dir
+    # 🔴 The same spellings switch() decides by, not the two literal words. `off` is not the
+    # only way this flag is turned off: every other boolean in this wrapper answers to
+    # 0/false/no/off -- --exclusive, a few lines below where this one is read, is one of them.
+    # Reading only the word "off" sends `--openvino-batching false` into the branch below,
+    # which keeps deriving, and the flag exists to be turned off for measurement: the number
+    # that comes back says "batching off" while batching was on.
+    # An unrecognised value still derives, deliberately -- see the note in tests/caps_smoke.py.
+    _batching = OPENVINO_BATCHING.strip().lower()
+    if _batching in EngineArgs.OFF_WORDS:
+        log.info("--openvino-batching %s: segmentation will run one window at a time",
+                 _batching)
+        return models_dir
+    if _batching not in EngineArgs.ON_WORDS:
+        log.warning("--openvino-batching %r is neither on nor off; treating it as on",
+                    OPENVINO_BATCHING)
+    # 🔴 Found by pattern, and the derived name follows the one found, rather than both being
+    # written out here. speakrs asks for "<the batched export's name>-dynseq.onnx", building
+    # the batch number from its own PRIMARY_BATCH_SIZE constant; spelling 32 on this side made
+    # the two agree only as long as nobody changed that constant. Deriving from whatever
+    # export is actually in the cache keeps them in step through a change of batch size,
+    # because the export upstream ships and the constant it compiles against move together.
+    #
+    # Every match is derived, not just one, so a cache carrying more than one batched export
+    # has a prepared model for whichever the engine turns out to ask for.
+    # 🔴 Inside a try, like everything below it. _models_dir hands over a directory that may
+    # not exist yet -- the wrapper script starts this process offline when llm-init's sentinel
+    # never arrives, and its comment says the engine reports the missing weights by name,
+    # which is a better error than one invented here. Listing that directory unguarded turned
+    # the engine's clean report into a traceback at import, before the engine was ever run.
+    try:
+        stock = sorted(
+            os.path.join(models_dir, name)
+            for name in os.listdir(models_dir)
+            if _BATCHED_SEGMENTATION.fullmatch(name)
+        )
+    except OSError as e:
+        log.info("cannot list %s (%s); leaving batching to the engine's own report", models_dir, e)
+        return models_dir
+    if not stock:
+        log.info("no batched segmentation model in the cache; leaving batching off")
+        return models_dir
+    farm = _farm_for(models_dir)
+    try:
+        import onnx
+        from onnx import shape_inference
+
+        # 🔴 Rebuilt, never reused. /tmp is a mounted volume here and survives a restart, so
+        # keeping what is already there would mean symlinks still aimed at the revision that
+        # was current when they were made, and a derived model still carrying its weights --
+        # against a cache that has moved on. Nothing would report the disagreement. Rebuilding
+        # costs a directory of symlinks and one pass over a 6 MB graph.
+        shutil.rmtree(farm, ignore_errors=True)
+        os.makedirs(farm)
+        for name in os.listdir(models_dir):
+            os.symlink(os.path.join(models_dir, name), os.path.join(farm, name))
+
+        # 🔴 One export failing does not take the others with it. This loop was inside the
+        # single try below, so a cache holding both a b32 and a b64 export lost BOTH when either
+        # one would not convert -- the farm was torn down and the engine ran unbatched, with the
+        # log naming a file that had nothing wrong with it. Each conversion answers for itself;
+        # the farm survives as long as one of them lands, and speakrs picks whichever it asks for.
+        derived = 0
+        for source in stock:
+            prepared = os.path.join(
+                farm, os.path.basename(source)[: -len(".onnx")] + "-dynseq.onnx")
+            try:
+                model = onnx.load(source)
+                # The sample count, and only it. The batch dimension is deliberately left static:
+                # making that one dynamic instead was measured and does not avoid the failure.
+                dims = model.graph.input[0].type.tensor_type.shape.dim
+                dims[2].ClearField("dim_value")
+                dims[2].dim_param = "samples"
+                out = model.graph.output[0].type.tensor_type.shape.dim
+                out[1].ClearField("dim_value")
+                out[1].dim_param = "frames"
+                model = shape_inference.infer_shapes(model, strict_mode=True)
+                onnx.checker.check_model(model)
+                onnx.save(model, prepared + ".partial")
+            except Exception:
+                log.warning("could not prepare %s; the others are unaffected", source,
+                            exc_info=True)
+                with contextlib.suppress(OSError):
+                    os.remove(prepared + ".partial")
+                continue
+            # Renamed into place. Not because a half-written model could otherwise be loaded
+            # -- the farm above is deleted and rebuilt on every start, so nothing from a
+            # crashed run survives to be found. It is that the engine is handed this directory
+            # as soon as the function returns, and a reader arriving between the write and the
+            # end of it would see a truncated file under the name speakrs looks for.
+            os.replace(prepared + ".partial", prepared)
+            derived += 1
+            log.info("prepared a batched segmentation model for OpenVINO: %s", prepared)
+        if not derived:
+            raise RuntimeError("no batched segmentation model could be prepared")
+        return farm
+    except Exception:
+        log.warning("could not prepare the batched segmentation model; "
+                    "OpenVINO will run segmentation one window at a time", exc_info=True)
+        # Nothing points at the half-built farm once the cache directory is returned, so
+        # leaving it would not break anything. It is removed because a directory full of
+        # symlinks named like a working farm is the first thing someone debugging "why is
+        # batching off" will find, and it says the opposite of what happened.
+        shutil.rmtree(farm, ignore_errors=True)
+        return models_dir
 
 
 def _models_dir(repo):
@@ -103,6 +269,12 @@ _args = EngineArgs()
 # Upstream's own spelling for the mode; "cuda-fast" trades ~0.3 points of DER for roughly double
 # the speed by stepping the segmentation window 2s instead of 1s.
 EXECUTION_MODE = _args.text("--execution-mode", "cuda")
+# The one switch on the OpenVINO batched-segmentation derivation, and it exists for measuring:
+# the 4x on the integrated part was established by turning this off and running the same clip
+# again, and the next person with a number to check should not have to break the derivation
+# to do that. "on" is the default and the only other value is "off"; anything else is a typo,
+# said so in the log, and treated as on -- silently losing 4x is the outcome to avoid.
+OPENVINO_BATCHING = _args.text("--openvino-batching", "on")
 CLUSTERING_THRESHOLD = _args.text("--clustering-threshold")
 MIN_DURATION_OFF = _args.text("--min-duration-off")
 MIN_DURATION_ON = _args.text("--min-duration-on")
@@ -226,7 +398,7 @@ class _Child:
 
 
 _child = _Child([ENGINE_BIN, "--mode", EXECUTION_MODE,
-                 "--models-dir", _models_dir(MODEL_REPO)])
+                 "--models-dir", _openvino_models_dir(_models_dir(MODEL_REPO))])
 
 # Set once this process is on its way out, so the child dying with us is not read as a crash.
 _stopping = threading.Event()
