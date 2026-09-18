@@ -468,7 +468,11 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         device, n_layers,
     )
     _install_breeze_depth_ov(model, path, device)
-    _install_breeze_codec_ov(audio_tokenizer, path, device)
+    # intel11 compiled the tail, then Add broadcast died on the real chunk
+    # length (example_t=2 vs streaming frames). Intel's TTS2 notebook leaves
+    # codec on CPU; official Breeze decode_request_chunk stays until the IR
+    # dynamizes every eltwise, not just the last input axis.
+    log.info("breeze codec stays official CPU; OV tail Add broadcast dies on real chunk length")
 
 
 def _install_breeze_depth_ov(model, path, device):
@@ -550,6 +554,8 @@ def _install_breeze_depth_ov(model, path, device):
 
     DepthDecoderGraph._full_loop = _full_loop
     log.info("breeze depth prefill+decode device-KV on OpenVINO %s layers=%d", device, n_layers)
+    import gc
+    gc.collect()
 
 
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
