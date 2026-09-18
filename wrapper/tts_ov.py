@@ -1,4 +1,6 @@
 # Shared OpenVINO compile for TTS one-step modules. Loops stay in official Python.
+# Causal AR (Breeze backbone / FireRed Qwen3) is compiled here too: the official
+# Python loop still drives sampling, but each transformer step runs on GPU.
 import logging
 import os
 
@@ -55,6 +57,145 @@ def compile_module(mod, example, xml, stamp, device):
         return compiled(feed)
 
     return run
+
+
+def flatten_kv(cache):
+    """Turn an HF Cache / legacy tuple into [k0, v0, k1, v1, ...]."""
+    if cache is None:
+        return []
+    layers = cache.layers if hasattr(cache, "layers") else cache
+    out = []
+    for item in layers:
+        if hasattr(item, "keys"):
+            out.extend([item.keys, item.values])
+        else:
+            out.extend([item[0], item[1]])
+    return out
+
+
+def unflatten_kv(flat, n_layers):
+    return tuple((flat[2 * i], flat[2 * i + 1]) for i in range(n_layers))
+
+
+def kv_meta(config):
+    n_layers = int(config.num_hidden_layers)
+    n_kv = int(getattr(config, "num_key_value_heads", config.num_attention_heads))
+    head_dim = getattr(config, "head_dim", None)
+    if head_dim is None:
+        head_dim = int(config.hidden_size) // int(config.num_attention_heads)
+    return n_layers, n_kv, int(head_dim)
+
+
+def _dynamize_time(ov_model):
+    """Prefill embeds are [B,T,H]; cached K/V are [B,kv,T,D]. T must grow."""
+    mapping = {}
+    for inp in ov_model.inputs:
+        shape = inp.get_partial_shape()
+        if shape.rank.is_dynamic:
+            continue
+        rank = shape.rank.get_length()
+        if rank == 2 or rank == 3:
+            shape[1] = -1
+        elif rank == 4:
+            shape[2] = -1
+        else:
+            continue
+        try:
+            mapping[inp.any_name] = shape
+        except Exception:
+            mapping[inp] = shape
+    if mapping:
+        ov_model.reshape(mapping)
+    return ov_model
+
+
+def compile_causal(mod, example, xml, stamp, device):
+    """Like compile_module, but dynamize the time axis before save."""
+    import numpy as np
+    import openvino as ov
+
+    os.makedirs(os.path.dirname(xml), exist_ok=True)
+    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
+        if not isinstance(example, (tuple, list)):
+            example = (example,)
+        log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
+        ov_model = _dynamize_time(ov.convert_model(mod, example_input=example))
+        ov.save_model(ov_model, xml)
+        open(stamp, "w").close()
+    core = ov.Core()
+    compiled = core.compile_model(xml, device)
+    log.info("compiled %s on %s", xml, device)
+
+    def run(*arrays):
+        feed = {}
+        for i, arr in enumerate(arrays):
+            key = compiled.inputs[i]
+            feed[key] = np.ascontiguousarray(arr)
+        return compiled(feed)
+
+    return run
+
+
+def causal_step_module(inner, n_layers, with_past):
+    """HF inner model → (hidden, k0, v0, ...) so convert_model sees tensors only."""
+    import torch.nn as nn
+
+    class _Step(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask, *past):
+            kwargs = {
+                "inputs_embeds": inputs_embeds,
+                "attention_mask": attention_mask,
+                "use_cache": True,
+            }
+            if with_past:
+                kwargs["past_key_values"] = unflatten_kv(past, n_layers)
+            out = self.inner(**kwargs)
+            return (out.last_hidden_state, *flatten_kv(out.past_key_values))
+
+    return _Step()
+
+
+def mask_np(mask, q_len, past_len):
+    """2-D [1, past+q] keep-mask for a causal step. 4-D additive masks: 0 = keep."""
+    import numpy as np
+    import torch
+
+    total = int(past_len) + int(q_len)
+    if mask is None:
+        return np.ones((1, total), dtype=np.int64)
+    t = mask.detach() if hasattr(mask, "detach") else torch.as_tensor(mask)
+    if t.dim() == 2:
+        return np.ascontiguousarray(t.long().cpu().numpy())
+    sl = min(total, int(t.shape[-1]))
+    row = t[0, 0, 0, :sl]
+    if row.dtype.is_floating_point:
+        keep = (row == 0)
+    else:
+        keep = row.bool()
+    out = keep.long().cpu().numpy().reshape(1, -1)
+    if out.shape[1] < total:
+        out = np.concatenate([out, np.ones((1, total - out.shape[1]), dtype=np.int64)], 1)
+    return np.ascontiguousarray(out)
+
+
+def write_static_kv(cache, flat):
+    """Copy OV present K/V (used prefix) back into a transformers StaticCache."""
+    n = len(flat) // 2
+    for i in range(n):
+        k, v = flat[2 * i], flat[2 * i + 1]
+        layer = cache.layers[i]
+        sl = k.shape[-2]
+        keys = getattr(layer, "keys", None)
+        vals = getattr(layer, "values", None)
+        if keys is None:
+            keys = layer.key_cache
+            vals = layer.value_cache
+        keys[..., :sl, :].copy_(k)
+        vals[..., :sl, :].copy_(v)
 
 
 def force_cpu_torch_device():

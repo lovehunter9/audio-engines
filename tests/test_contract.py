@@ -2107,6 +2107,49 @@ class FireRedOvDeviceLieTest(unittest.TestCase):
         self.assertEqual(str(torch.device("cuda")), "cuda")
 
 
+class TtsOvCausalHelpersTest(unittest.TestCase):
+    def test_flatten_unflatten_roundtrip(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        k0 = torch.zeros(1, 2, 4, 8)
+        v0 = torch.ones(1, 2, 4, 8)
+        k1 = torch.zeros(1, 2, 4, 8) + 2
+        v1 = torch.ones(1, 2, 4, 8) + 2
+        flat = tts_ov.flatten_kv(((k0, v0), (k1, v1)))
+        self.assertEqual(len(flat), 4)
+        back = tts_ov.unflatten_kv(flat, 2)
+        self.assertTrue(torch.equal(back[1][0], k1))
+
+    def test_mask_np_ones_and_additive(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        ones = tts_ov.mask_np(None, 3, 0)
+        self.assertEqual(ones.shape, (1, 3))
+        add = torch.zeros(1, 1, 1, 5)
+        add[..., :2] = torch.finfo(torch.float32).min
+        keep = tts_ov.mask_np(add, 1, 4)
+        self.assertEqual(keep.shape, (1, 5))
+        self.assertEqual(int(keep[0, 0]), 0)
+        self.assertEqual(int(keep[0, 2]), 1)
+
+    def test_breeze_install_does_not_swallow_export_failure(self):
+        import inspect
+        from wrapper.caps import breeze
+
+        src = inspect.getsource(breeze._install_breeze_ov)
+        self.assertNotIn("leaving official eager on CPU", src)
+        self.assertIn("breeze_backbone_decode", src)
+        self.assertIn("compile_causal", src)
+
+
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
