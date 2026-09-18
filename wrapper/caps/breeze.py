@@ -706,12 +706,12 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
         ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
     src = str(path)
-    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v6")
-    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v6")
-    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v6")
-    compiled_q = tts_ov.compile_module(_Quant(dec), example, q_xml, q_stamp, device)
-    compiled_pre = tts_ov.compile_module(_Pre(dec), ex_q, p_xml, p_stamp, device)
-    compiled_tail = tts_ov.compile_module(
+    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v7")
+    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v7")
+    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v7")
+    compiled_q = tts_ov.compile_static(_Quant(dec), example, q_xml, q_stamp, device)
+    compiled_pre = tts_ov.compile_static(_Pre(dec), ex_q, p_xml, p_stamp, device)
+    compiled_tail = tts_ov.compile_static(
         _Tail(dec), ex_h.permute(0, 2, 1).contiguous(), t_xml, t_stamp, device
     )
     upsample = int(getattr(dec, "total_upsample", 1) or 1)
@@ -734,10 +734,22 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         else:
             padded = buf[..., -example_t:]
         codes_np = np.ascontiguousarray(padded.detach().cpu().numpy())
-        h = compiled_q(codes_np)[0]
-        h = compiled_pre(np.ascontiguousarray(h))[0]
+        try:
+            h = compiled_q(codes_np)[0]
+        except Exception:
+            log.exception("codec quant in=%s", getattr(codes_np, "shape", None))
+            raise
+        try:
+            h = compiled_pre(np.ascontiguousarray(h))[0]
+        except Exception:
+            log.exception("codec pre in=%s", getattr(h, "shape", None))
+            raise
         h = np.ascontiguousarray(np.transpose(h, (0, 2, 1)))
-        wav = torch.from_numpy(np.ascontiguousarray(compiled_tail(h)[0]))
+        try:
+            wav = torch.from_numpy(np.ascontiguousarray(compiled_tail(h)[0]))
+        except Exception:
+            log.exception("codec tail in=%s", getattr(h, "shape", None))
+            raise
         keep = int(codes.shape[-1]) * upsample
         return wav[..., -keep:].to(dtype=torch.float32)
 

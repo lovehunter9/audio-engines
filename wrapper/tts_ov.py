@@ -71,6 +71,56 @@ def compile_module(mod, example, xml, stamp, device):
     return run
 
 
+def compile_static(mod, example, xml, stamp, device):
+    """Like compile_module, but pin every input to the example shape.
+
+    convert_model leaves codec T dynamic. Upsample residuals then Add a
+    frozen length against a runtime length (intel11/intel20). Codec always
+    pads to example_t, so the IR must be that same static T.
+    """
+    import numpy as np
+    import openvino as ov
+    import torch
+
+    os.makedirs(os.path.dirname(xml), exist_ok=True)
+    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
+        if not isinstance(example, (tuple, list)):
+            example = (example,)
+        if hasattr(mod, "eval"):
+            mod.eval()
+        for p in getattr(mod, "parameters", lambda: ())():
+            p.requires_grad_(False)
+        log.info("exporting static %s example=%s", xml, [tuple(t.shape) for t in example])
+        try:
+            with torch.inference_mode():
+                ov_model = ov.convert_model(mod, example_input=example)
+        except Exception as e:
+            log.warning("convert_model failed (%s); jit.trace then convert", e)
+            traced = torch.jit.trace(mod, example, strict=False, check_trace=False)
+            with torch.inference_mode():
+                ov_model = ov.convert_model(traced)
+        mapping = {}
+        for inp, t in zip(ov_model.inputs, example):
+            mapping[inp.get_any_name()] = [int(x) for x in t.shape]
+        ov_model.reshape(mapping)
+        ov_model.validate_nodes_and_infer_types()
+        log.info("froze %s inputs=%s", xml, mapping)
+        ov.save_model(ov_model, xml)
+        open(stamp, "w").close()
+    core = ov.Core()
+    compiled = core.compile_model(xml, device)
+    log.info("compiled static %s on %s", xml, device)
+
+    def run(*arrays):
+        feed = {}
+        for i, arr in enumerate(arrays):
+            key = compiled.inputs[i]
+            feed[key] = np.ascontiguousarray(arr)
+        return compiled(feed)
+
+    return run
+
+
 def flatten_kv(cache):
     """Turn an HF Cache / legacy tuple into [k0, v0, k1, v1, ...]."""
     if cache is None:
