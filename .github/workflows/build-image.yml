@@ -52,6 +52,14 @@ jobs:
         # drift in silence and in either direction: a release that tightens infer_shapes or
         # the checker fails this job against a version no image runs, or passes it on
         # behaviour no image has. test_contract.py asserts the two stay equal.
+        #
+        # 🔴 soundfile for the same reason a third time, and it was the most expensive of
+        # the three. Without it `align._calibrate` dies at its own `import soundfile`
+        # before it reaches the warm-up call, so every assertion about what a failed
+        # warm-up does was being made about a failed import -- and `audioio.probe_seconds`
+        # falls back to the standard library's `wave`, so tests/test_audio_readers.py, the
+        # whole point of which is that the two readers disagree about which containers they
+        # can measure, was running against one reader. Both printed pass.
         run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart soundfile uvicorn
       - name: install ffmpeg
         # The tempo assertions for FireRed/Breeze long text shell out to ffmpeg, and skipped
@@ -63,11 +71,17 @@ jobs:
         run: python -m compileall -q wrapper tests
       - name: contract tests
         run: python -m unittest tests/test_contract.py
+      - name: align out-of-memory regression tests
+        # Named so they run whichever branch lands first. ⚠️ feat/stt-seconds-cap adds
+        # `unittest discover -s tests` to this same job, for a reason this branch has no
+        # answer to -- it found 82 tests that CI had never run. Once that lands, discover
+        # is a superset and these named steps are a few redundant seconds, not a competing
+        # policy: keep discover and drop them.
+        run: python -m unittest tests/test_align_oom.py
       # One ENGINE_ARGS string reaches every capability in an image, so a command-line
       # argument read as a switch in one and as a value in another turns that feature off
       # in silence. Same note as above about discover.
       - name: flag registry
-        run: python -m unittest tests/test_flag_registry.py
         run: python -m unittest tests/test_flag_registry.py
       # 🔴 After the ffmpeg step above, and that is not incidental: this one generates real
       # containers rather than stubbing the reader, because the gap it pins is between two
@@ -295,6 +309,7 @@ jobs:
                       /usr/share/miniconda /usr/lib/jvm || true
           docker run --rm -v "$PWD:/src:ro" -w /src "${DEPS_IMAGE}" \
             python3 scripts/check-units-against-upstream.py
+
       - name: docker build (single-arch slice)
         if: needs.meta.outputs.kind == 'docker'
         env:

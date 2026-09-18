@@ -15,6 +15,10 @@ from wrapper import catalog, contract, gpu, tasks
 
 EXPECTED_CAPABILITY_ENDPOINTS = {
     ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},
+    # 🔴 Listed here as well as in the catalog, which is the point of this table: a route
+    # mounted and not advertised is the easy mistake, and a diagnostic one is the easiest
+    # of all because nothing calling the engine misses it.
+    ("align", "align", "GET", "/v1/audio/align/telemetry"): {"async_supported": False},
     # No WS: ggml synthesizes whole utterances, so stream=1 is sentence-scoped.
     ("crispasr_tts", "tts", "GET", "/v1/audio/voices"): {"async_supported": False},
     ("crispasr_tts", "tts", "POST", "/v1/audio/speech"): {"async_supported": True},
@@ -1377,6 +1381,106 @@ class OnnxPinTests(unittest.TestCase):
         for rel, version in images:
             self.assertEqual(version, ci[0],
                              "%s installs onnx %s, CI tests against %s" % (rel, version, ci[0]))
+
+
+class RawBodyIsReachedOnlyThroughItsWrapperTest(unittest.TestCase):
+    """`_x_raw` is a body someone pulled a universal obligation out of. Only `_x` may call it.
+
+    🔴 The failure this exists for has no symptom. `align._align` owns one line -- put the
+    GPU's all-time peak back when a model call raises -- and that line was written out by
+    hand at four call sites and missed a site every time: the enumeration said three paths,
+    then five, then seven, and the eighth was found by listing callers rather than by
+    thinking harder. A missed site does not raise, does not log and does not change a
+    response; it freezes the cost model, because `_used` answers zero for every call that
+    stays below a peak nothing reset. **Extraction is what fixed it, and extraction only
+    holds while the raw body stays unreachable.** One `res = _align_raw(...)` typed at a new
+    call site -- by someone copying the line above it, which is the normal way a call site is
+    written -- puts the bug straight back with nothing red.
+
+    Deliberately a convention and not one hard-coded name: the next obligation somebody
+    pulls out of a function gets this check by naming the body `_<name>_raw`, with no edit
+    here. `wrapper/` only -- a test that stubs the raw body is reaching past the wrapper on
+    purpose, which is the one place doing so is right.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    @staticmethod
+    def _offences(source, where):
+        """[(where, line, raw_name, enclosing function)] for every reference out of place.
+
+        Reads names AND attributes: `_align_raw(...)` inside the module and
+        `mod._align_raw(...)` from another one are the same mistake, and only the first is a
+        bare Name. The enclosing function is tracked by walking the tree rather than by
+        `ast.walk`, because walk loses the nesting that decides whether a reference is legal.
+        """
+        import ast
+        found = []
+
+        def visit(node, fn):
+            here = fn
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                here = node.name
+            for child in ast.iter_child_nodes(node):
+                name = (child.id if isinstance(child, ast.Name)
+                        else child.attr if isinstance(child, ast.Attribute) else None)
+                # A def of the raw body is not a reference to it.
+                if (name and name.startswith("_") and name.endswith("_raw")
+                        and here != name[:-len("_raw")]):
+                    found.append((where, child.lineno, name, here))
+                visit(child, here)
+
+        visit(ast.parse(source), None)
+        return found
+
+    def test_nothing_in_the_wrapper_reaches_a_raw_body_except_its_wrapper(self):
+        import ast
+        bad, raw_bodies = [], []
+        for path in sorted(glob.glob(os.path.join(self.ROOT, "wrapper", "**", "*.py"),
+                                     recursive=True)):
+            rel = os.path.relpath(path, self.ROOT)
+            with open(path, encoding="utf-8") as fh:
+                source = fh.read()
+            raw_bodies += [n.name for n in ast.walk(ast.parse(source))
+                           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                           and n.name.startswith("_") and n.name.endswith("_raw")]
+            bad += self._offences(source, rel)
+        # 🔴 A ratchet on the anchor, not on the offences. With no `_x_raw` defined anywhere
+        # the loop above finds nothing and this file passes while saying nothing -- which is
+        # what it would do the day someone renames `_align_raw` to `_align_inner` and keeps
+        # every call site. Name the convention here so the rename has to come past it.
+        self.assertIn("_align_raw", raw_bodies,
+                      "wrapper/ defines no _align_raw, so this check is watching an empty "
+                      "set. Either the extraction was undone -- then the peak-reset is back "
+                      "to being written out by hand at every call site -- or the body was "
+                      "renamed out of the _<name>_raw convention this check reads")
+        self.assertEqual(bad, [], "\n".join([
+            "a raw body is referenced from outside the wrapper that owns it.",
+            "`_x_raw` exists because `_x` does something at EVERY call -- for _align_raw,",
+            "putting the GPU peak back when the call raises. Reaching past `_x` skips it,",
+            "silently: nothing raises, nothing logs, and the cost model stops correcting.",
+            "Call `_x`.", *["%s:%d refers to %s from %s" % b for b in bad]]))
+
+    def test_the_scan_sees_the_shapes_a_call_site_is_written_in(self):
+        """🔴 A positive control. The assertion above is an empty-set assertion on a clean
+        tree, so it passes just as well after the scan goes blind -- which is how a check
+        like this normally dies: someone reformats, the pattern stops matching, and the
+        green stays green. These are the shapes themselves.
+        """
+        cases = {
+            "def f():\n    return _align_raw(1)\n": 1,               # bare name
+            "def f():\n    return align._align_raw(1)\n": 1,         # through a module
+            "def f():\n    g = _align_raw\n": 1,                     # taken, not called
+            "def _align():\n    return _align_raw(1)\n": 0,          # its own wrapper
+            "def _align():\n    def inner():\n        return _align_raw(1)\n": 1,
+            "def _align_raw():\n    return 1\n": 0,                  # the definition
+        }
+        for source, expected in cases.items():
+            self.assertEqual(
+                len(self._offences(source, "<control>")), expected,
+                "the raw-body scan reads %r as %d offence(s), not %d -- so every call site "
+                "written that way is invisible to the assertion above"
+                % (source, len(self._offences(source, "<control>")), expected))
 
 
 if __name__ == "__main__":

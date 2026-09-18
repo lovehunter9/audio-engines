@@ -25,7 +25,7 @@ def claims():
 
 #: A ratchet, not a floor: "more than twenty" passes just as well after the scan goes
 #: half-blind, which is how both widenings were found by reading, not by a red test.
-FLAGS_SEEN = 59
+FLAGS_SEEN = 63
 
 
 class FlagRegistryTest(unittest.TestCase):

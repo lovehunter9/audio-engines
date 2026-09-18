@@ -8,6 +8,7 @@ wiring (form fields, dispatch, progress, result shape), which is exactly where a
 import base64
 import copy
 import io
+import logging
 import os
 import sys
 import time
@@ -27,6 +28,41 @@ def check(name, cond, extra=""):
         FAILED.append(name)
 
 
+class said:
+    """Capture what a logger says while the block runs, so a fix whose whole content is a
+    warning can be tested at all.
+
+    🔴 This did not exist, and everything it guards was written without it. Four changes in
+    one review round had "it now says so once" as their entire content -- an unreadable GPU
+    limit, a checkpoint whose dimensions cannot be read, a tokenizer that refused a span,
+    an ordering forced on by the padding rule -- and none was testable, because the harness
+    never looked at a log record. One of the four was then reverted by a mutation and all
+    886 checks still passed.
+    """
+
+    def __init__(self, name="audio-align"):
+        self.log = logging.getLogger(name)
+        self.records = []
+
+    def __enter__(self):
+        class _Sink(logging.Handler):
+            def emit(_, record):
+                self.records.append(record.getMessage())
+        self.handler = _Sink()
+        self.kept = self.log.disabled
+        self.log.disabled = False
+        self.log.addHandler(self.handler)
+        return self
+
+    def __exit__(self, *exc):
+        self.log.removeHandler(self.handler)
+        self.log.disabled = self.kept
+        return False
+
+    def mentions(self, *needles):
+        return any(all(n in m for n in needles) for m in self.records)
+
+
 def wav_of(seconds):
     """Silence of a given length as real RIFF WAV bytes, for caps that measure what they got."""
     import wave
@@ -38,6 +74,26 @@ def wav_of(seconds):
         wf.setframerate(SR)
         wf.writeframes(b"\x00\x00" * int(round(seconds * SR)))
     return buf.getvalue()
+
+
+
+def kappa(align, pair):
+    """Pin one of the two fitted factor pairs for a check that is about that build.
+
+    🔴 The shipped default is the pair fitted WITH a KV cache, because --no-kv-cache is
+    opt-in. A check about the cache-off calibration has to say so, or it reads the shipping
+    constants and asserts things that are true of the other build.
+    """
+    keep = (align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES,
+            align._encoder_rate)
+    align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES = pair
+    align._encoder_rate = None
+    return keep
+
+
+def kappa_restore(align, keep):
+    (align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES,
+     align._encoder_rate) = keep
 
 
 def fake_soundfile():
@@ -863,6 +919,1793 @@ def t_align():
         check("align batch bills the slices it aligned, not the file",
               (batch or {}).get("input_duration_seconds") == 2.0,
               (batch or {}).get("input_duration_seconds"))
+
+        # The cap is on a span, not on the upload: a caller legitimately sends half an
+        # hour of audio with seconds of speech marked in it. Lowered here because the
+        # stub decodes to four seconds; 300 is what ships.
+        was, align.MAX_SPAN_SEC = align.MAX_SPAN_SEC, 1.5
+        try:
+            over = c.post("/v1/audio/align", files=WAV,
+                          data={"segments": '[{"start":0,"end":1,"text":"hi"},'
+                                            '{"start":1,"end":4,"text":"yo"}]'}).json()
+            got = over.get("results") or []
+            check("a span over the limit fails alone, and says the limit",
+                  len(got) == 2 and not got[0].get("error")
+                  # The knob name is part of the message on purpose: the number alone reads
+                  # as a property of the model rather than a setting a deployment can move.
+                  and "--max-span-seconds" in (got[1].get("error") or ""),
+                  got)
+            check("the spans under it still align",
+                  bool((got[0] or {}).get("units")), got[:1])
+            single_over = c.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+            check("single mode refuses an over-long clip with 413",
+                  single_over.status_code == 413
+                  and "aligns at most" in single_over.text, single_over.status_code)
+        finally:
+            align.MAX_SPAN_SEC = was
+
+        # 🔴 Outside the lowered-ceiling block: in there the stub clip is
+        # already over the limit, the request is refused with 413 and the work
+        # never runs, so the assertion would pass without measuring anything.
+        # The single-file path measures too. It is the largest shape this engine
+        # runs -- the whole upload -- so it sets the process's all-time high, and
+        # `_used` answers zero for anything below that. Unmeasured, one ordinary
+        # successful request here froze the correction for the life of the process:
+        # every grouped call afterwards measured as nothing. ⚠️ Nothing unlucky is
+        # needed; every other way the peak could stick needed a failure, this one
+        # needs a success.
+        # ⚠️ The counters only move where there is a card to read, and there is none
+        # here, so the pair is produced: a reading before, and a used figure after.
+        keep_mem = (align._memory_now, align._used_bytes)
+        try:
+            align._memory_now = lambda: (0, 0)
+            align._used_bytes = lambda *_: 10 ** 8
+            seen_before = align._calls_seen
+            c.post("/v1/audio/align", files=WAV, data={"text": "hi"})
+            check("a single-file request is measured, not just served",
+                  align._calls_seen > seen_before,
+                  (seen_before, align._calls_seen))
+
+            # 🔴 And measured in the SAME unit the other two call sites use. `_observe`'s
+            # first argument is a cost -- the larger of the encoder and language-model
+            # terms -- and a single span is exactly the shape where the encoder wins, so
+            # the raw position count is 2.25x low with the cache on and 12.2x low with
+            # `--no-kv-cache`. `_scale` is global and shared with the grouped path, so one
+            # such request divides every later request's budget by that factor: grouping
+            # collapses to one span a call, and the log blames the library. Both arguments
+            # type as a number and both are plausible sizes, so nothing else can catch it.
+            # ⚠️ The two are told apart by which FUNCTION answered, not by a number: both
+            # are position counts and both are plausible. So each is stubbed to its own
+            # marker value and the assertion is on which marker arrived.
+            keep = (align._observe, align._cost, align._span_positions)
+            seen_cost = []
+            align._observe = lambda cost, used: seen_cost.append(cost)
+            align._span_positions = lambda *a, **k: 111.0     # the raw count
+            align._cost = lambda members, extra=None: 777.0   # what a call really costs
+            try:
+                c.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+            finally:
+                align._observe, align._cost, align._span_positions = keep
+            check("and what it reports is the call's cost, not the span's position count",
+                  seen_cost == [777.0], {"reported": seen_cost,
+                                         "cost": 777.0, "raw positions": 111.0})
+
+            # 🔴 And the failing half, which is the likelier one: 300 s is the largest
+            # shape this engine runs and the one most likely to hit the wall on a 4 GiB
+            # grant -- this file's own header prices it at 2.2 GiB, 3.3 with dense text.
+            # The commit that added the measurement above covered only the success.
+            # 🔴 `_align_raw`, not `_align`. The reset now lives in the `_align` wrapper,
+            # so a stub installed on `_align` REPLACES the thing under test and this check
+            # goes green on a build with no reset anywhere. Stub the layer below whatever
+            # owns the behaviour, or the test measures the stub.
+            resets = []
+            keep_rp, keep_al = align._reset_peak, align._align_raw
+
+            def _raises_oom(*a, **k):
+                raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+
+            align._reset_peak = lambda: resets.append(1)
+            align._align_raw = _raises_oom
+            try:
+                c.post("/v1/audio/align", files=WAV, data={"text": "hi"})
+            except Exception:
+                pass
+            finally:
+                align._reset_peak, align._align_raw = keep_rp, keep_al
+            check("and a single-file request that fails puts the peak back",
+                  bool(resets), resets)
+        finally:
+            align._memory_now, align._used_bytes = keep_mem
+
+        # 🔴 Outside the lowered-limit block on purpose. Inside it the stub clip is already
+        # over the ceiling, so a reader that never consults the stub still answers 413 and
+        # the assertion passes for the wrong reason -- which is what the first version of
+        # this check did. Here the ceiling is the shipped one and the clip is well under it,
+        # so only a path that reads the WIDE measurement can refuse.
+        #
+        # What it is guarding: `audioio.probe_seconds` tries soundfile and the stdlib `wave`
+        # module and nothing else -- measured, libsndfile 1.2.2 answers "Format not
+        # recognised" for m4a and lists no M4A/MP4/AAC format at all -- while the engine
+        # decodes through ffmpeg and reads it happily. A clip that runs and cannot be
+        # measured walks past a limit keyed to the measurement, and 200 with saturated
+        # timestamps is the outcome the limit exists to prevent.
+        keep_dur = align.duration
+        try:
+            align.duration = lambda _p: 3600.0      # only the wide reader can answer this
+            unmeasurable = c.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+            check("a clip only ffprobe can measure is still held to the span limit",
+                  unmeasurable.status_code == 413 and "aligns at most" in unmeasurable.text,
+                  (unmeasurable.status_code, unmeasurable.text[:90]))
+            # ⚠️ None still passes through, deliberately: ffprobe may be absent from an
+            # image, and a clip three readers cannot measure is one the engine fails on by
+            # itself. Refusing here would reject working files on a thin image.
+            align.duration = lambda _p: None
+            unknown = c.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+            check("but a duration nothing can read is passed through, not refused",
+                  unknown.status_code == 200, unknown.status_code)
+        finally:
+            align.duration = keep_dur
+
+        # A container whose header parses and whose body does not. The probe in front of the
+        # decode reads the format block and stops, so this gets past it -- measured, a FLAC
+        # truncated to half its length: `info` returns, `read` raises. The decode then runs on
+        # the worker, where an unguarded exception becomes a 500, and a 5xx is what tells a
+        # retrying caller to come back for a file that will never decode. WAV hides this:
+        # libsndfile returns the frames it has rather than raising.
+        sf = sys.modules["soundfile"]
+        kept_read = sf.read
+
+        def _body_will_not_decode(*a, **k):
+            raise RuntimeError("Error opening: File contains data in an unknown format.")
+
+        sf.read = _body_will_not_decode
+        try:
+            before = len(align._telemetry)
+            bad = c.post("/v1/audio/align", files=WAV,
+                         data={"segments": '[{"start":0,"end":1,"text":"hi"}]'})
+            check("a body that will not decode is a 400, not a 500",
+                  bad.status_code == 400 and "could not decode audio" in bad.text,
+                  (bad.status_code, bad.text[:160]))
+            # 🔴 And it is recorded on the way out. This exact defect has already come back
+            # once: the serial path below was fixed with a `finally` and the batched path's
+            # early exit, which leaves ABOVE both `finally` blocks, repeated it. A request
+            # that exits here unrecorded leaves `_last_request_ended` at the request before
+            # it, so the NEXT request's `idle_before` spans two requests -- and that gap is
+            # the half of the measurement that says whether a neighbour moved the wall while
+            # this engine was not running. A wrong gap is worse than a missing one.
+            check("and the request is still recorded, so the next idle gap starts here",
+                  len(align._telemetry) == before + 1,
+                  (before, len(align._telemetry)))
+        finally:
+            sf.read = kept_read
+
+
+
+def t_align_batching():
+    """The grouping rule, the budget it finds, and what happens when a call fails.
+
+    🔴 The batched path was never exercised before this: the stub returned one result
+    however many spans were sent, which pairs only the first member and looks like a pass.
+    This stub returns one result a span, so a group that silently dropped members would
+    fail here.
+    """
+    from fastapi.testclient import TestClient
+    from wrapper.caps import align
+
+    fake_soundfile()
+    unit = {"text": "hi", "start_time": 0.1, "end_time": 0.4}
+    calls = []
+    fail_on = {}
+
+    def fake_align(audio=None, text=None, language=None):
+        texts = text if isinstance(text, list) else [text]
+        calls.append(list(texts))
+        for t in texts:
+            if t in fail_on:
+                raise fail_on[t]
+        return [[unit] for _ in texts]
+
+    model = types.SimpleNamespace(align=fake_align)
+    align._state.update(ready=True, model=model, device="cpu")
+    # 🔴 A loaded engine has been weighed: `_calibrate` runs one throwaway call before
+    # `ready`, and grouping is held off until something has. Without this the stub is a
+    # machine where nothing ever measured -- a real state, tested on its own below -- and
+    # every grouping case here would quietly become a test of the gate instead of the rule.
+    align._scale_seen = 1
+
+    # 🔴 What a position costs follows the CHECKPOINT, not the flag. The two part company
+    # on one that ships `use_cache: false`: nothing overrides it any more, so no cache is
+    # built -- and a cost model reading the flag prices 138 kB for a cache that does not
+    # exist, over-predicting by five, which this file's own note calls the slow failure that
+    # raises nothing. The log line and telemetry read the same value for the same reason.
+    keep_pricing = (align.CACHE_ON, align.KAPPA_LM, align.KAPPA_ENCODER,
+                    align.ENCODER_FIXED_BYTES)
+    try:
+        align._rebind_cache_pricing([None, None, True])      # what the shipped one holds
+        with_cache = (align.CACHE_ON, align.KAPPA_LM)
+        align._rebind_cache_pricing([False, False, False])   # a checkpoint that ships it off
+        without = (align.CACHE_ON, align.KAPPA_LM)
+        check("a checkpoint that ships the cache off is priced without one",
+              with_cache[0] is True and without[0] is False and with_cache[1] != without[1],
+              (with_cache, without))
+        # 🔴 The third row, wrong here for one commit: nothing readable at all. An empty
+        # list means `_kv_configs` matched no object, so the write loop was a no-op and the
+        # checkpoint builds whatever it ships -- a cache, on this family. Pricing it as none
+        # under-predicts by five, the direction that walks into the card; pricing it as a
+        # cache costs speed and nothing else.
+        for nothing in ([], [None, None, None]):
+            align._rebind_cache_pricing(nothing)
+            check("nothing readable prices as a cache, not as none (%r)" % (nothing,),
+                  align.CACHE_ON is True, (nothing, align.CACHE_ON))
+        align._rebind_cache_pricing([True, False])
+        check("configs that disagree are priced as a cache",
+              align.CACHE_ON is True, align.CACHE_ON)
+    finally:
+        (align.CACHE_ON, align.KAPPA_LM, align.KAPPA_ENCODER,
+         align.ENCODER_FIXED_BYTES) = keep_pricing
+
+    # ---- the pieces, before the path that uses them ----------------------------------
+    check("units split CJK singly and latin on whitespace",
+          align._units_of("hi there \u4f60\u597d") == ["hi", "there", "\u4f60", "\u597d"],
+          align._units_of("hi there \u4f60\u597d"))
+    check("a latin run inside CJK stays one unit",
+          align._units_of("\u4f60abc\u597d") == ["\u4f60", "abc", "\u597d"],
+          align._units_of("\u4f60abc\u597d"))
+    # 2 + 13*seconds + per unit (its tokens + two timestamp slots); no tokenizer on the
+    # stub, so the fallback counts one token a CJK character.
+    check("positions = 2 + 13 a second + 3 a CJK unit",
+          align._span_positions(10, "\u4f60\u597d") == 2 + 130 + 6,
+          align._span_positions(10, "\u4f60\u597d"))
+
+    long_span = align._Span(0, None, "x", "auto", 30.0, 800)
+    short_span = align._Span(1, None, "x", "auto", 2.0, 100)
+    mixed = align._cost([long_span, short_span, short_span, short_span])
+    uniform = align._cost([long_span, long_span, long_span, long_span])
+    check("a batch costs count x longest, so mixed and uniform are equal",
+          mixed == uniform == 4 * 800, (mixed, uniform))
+    # 🔴 The larger of two phases, not their sum. Measured on the batch axis: one span and
+    # two spans of the same length cost the same, because the encoder sets the peak in both,
+    # and from four up the cost tracks the batch because the language model has taken over.
+    rate = align._encoder_positions_a_second()
+    # Little text against long audio, so the encoder is the taller phase for the first few
+    # spans -- which is the regime the batch axis exposed: one span and two of the same
+    # length measured the same, 227.0 against 230.0 MiB.
+    sparse = align._Span(2, None, "x", "auto", 30.0, 300)
+    check("while the encoder is the taller phase, adding a span costs nothing",
+          align._cost([sparse]) == align._cost([sparse, sparse]) == rate * 30,
+          (align._cost([sparse]), align._cost([sparse, sparse]), rate * 30))
+    check("and the same spans cost more once enough of them are in the call",
+          align._cost([sparse] * 8) == 8 * 300 > rate * 30,
+          (align._cost([sparse] * 8), rate * 30))
+    check("and once the batch is the taller phase the cost tracks the batch",
+          align._cost([long_span] * 4) == 4 * 800 > rate * 30,
+          (align._cost([long_span] * 4), rate * 30))
+    check("a long span alone is not cheap for being alone",
+          align._cost([long_span]) > 800, align._cost([long_span]))
+
+    # ---- the encoder's fixed part -----------------------------------------------------
+    # 🔴 Only measurable once the KV cache came off: at 5 MB it is 3% of what the cache
+    # alone cost, so while the cache was on it had nowhere to show. Everything above this
+    # block runs on a stub with no dimensions, where the term is deliberately zero -- so
+    # without this block the term would be in the shipped arithmetic and in none of the
+    # checks.
+    keep_model = align._state.get("model")
+    keep_rate = align._encoder_rate
+    keep_k = kappa(align, align.KAPPA_NO_CACHE)
+    try:
+        align._encoder_rate = None
+        align._state["model"] = types.SimpleNamespace(
+            model=types.SimpleNamespace(
+                config=types.SimpleNamespace(
+                    text_config=types.SimpleNamespace(hidden_size=1024,
+                                                      intermediate_size=3072),
+                    audio_config=types.SimpleNamespace(downsample_hidden_size=480,
+                                                       n_window=50),
+                    classify_num=5000),
+                parameters=lambda: iter(())))
+        fixed = align._encoder_fixed_positions()
+        check("the encoder costs something before its per-second term starts",
+              abs(fixed - align.ENCODER_FIXED_BYTES
+                  / align._bytes_a_position(align._dims())) < 1e-9, fixed)
+        tiny = align._Span(3, None, "x", "auto", 0.5, 20)
+        check("and on four short spans it is most of what the call costs",
+              align._cost([tiny] * 4) > 2 * (4 * 20), align._cost([tiny] * 4))
+        # 🔴 With real dimensions and no KV cache, a second of audio is worth about 300
+        # positions, so four 30-second spans are priced by the ENCODER (9016) and not by the
+        # batch (3200). While the cache was on the same four priced by the batch. This is
+        # the behaviour change that commit makes and it is not a small one: long spans got
+        # about five times dearer against short ones, which is what moves the division.
+        rate4 = align._encoder_positions_a_second()
+        check("with the cache off a long span is priced by the encoder, not by the batch",
+              align._cost([long_span] * 4) == rate4 * 30 + fixed > 4 * 800,
+              (align._cost([long_span] * 4), rate4 * 30 + fixed, 4 * 800))
+        check("and the batch takes over once enough spans ride in the call",
+              align._cost([long_span] * 16) == 16 * 800,
+              (align._cost([long_span] * 16), 16 * 800))
+        # 🔴 The fixed part belongs to the encoder phase, so where the language model is the
+        # taller phase it does not appear at all. Charged to the call instead, it would sit
+        # on top of both -- and the six shapes rule that out, see the constant's own note.
+        check("and where the batch decides, the encoder's fixed part is not charged",
+              align._cost([long_span] * 16) % 800 == 0, align._cost([long_span] * 16))
+    finally:
+        align._state["model"] = keep_model
+        align._encoder_rate = keep_rate
+        kappa_restore(align, keep_k)
+    check("with no dimensions to read there is no fixed term either, not a guessed floor",
+          align._encoder_fixed_positions() == 0.0, align._encoder_fixed_positions())
+
+    # ---- the host's account, which is the one that kills --------------------------------
+    # 🔴 Everything above prices the GPU. Crossing the GPU's limit raises an exception this
+    # module catches, halves and retries; crossing the container's memory limit is an OOMKill
+    # that takes the process and every in-flight request with it. So the guard refuses rather
+    # than trying, and these read the source because what they check cannot be seen at
+    # runtime until it has already gone wrong.
+    src2 = open(os.path.join(os.path.dirname(__file__), "..", "wrapper", "caps",
+                             "align.py")).read()
+    # 🔴 Sliced on CODE landmarks, never on a comment. `work` used to end at the text of a
+    # comment, so deleting that comment silently changed what this check reads -- a comment a
+    # test greps for is not a comment, it is an interface, and nothing marks it as one.
+    # `_slice` takes the source of one function by name, off the parse tree.
+    def _slice(src, fname):
+        import ast as _ast
+        lines = src.split("\n")
+        for node in _ast.walk(_ast.parse(src)):
+            if isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)) and node.name == fname:
+                return "\n".join(lines[node.lineno - 1:node.end_lineno])
+        raise AssertionError("%s is gone from align.py, so this check reads nothing" % fname)
+
+    handler = src2[src2.index("if MAX_UPLOAD_BYTES > 0"):src2.index("def _work_batch(ctx):")]
+    work = _slice(src2, "_work_batch")
+    check("the decode happens on the task worker, not in the request handler",
+          "_decode_all()" in work and "await asyncio.to_thread(_decode_all)" not in handler,
+          "_decode_all()" in work)
+    # 🔴 That IS the admission control: one worker means one decoded request at a time, and
+    # the queue behind it holds undecoded bytes. A semaphore beside it was written first and
+    # removed -- it was a second scheduler next to the one `tasks` already runs, and the only
+    # thing it could add was a permit to leak.
+    check("and there is no second admission counter beside the queue",
+          "_inflight" not in src2 and "_Slot" not in src2,
+          [w for w in ("_inflight", "_Slot") if w in src2])
+    # ---- what a group the card refuses costs ------------------------------------------
+    # 🔴 The recovery that used to live here worked and was removed on purpose: 4000 spans
+    # came back with zero errors (V76), and the price was a ceiling that never rose, so one
+    # oversized call left the process at one span a call for its whole life at about a tenth
+    # of the throughput, with a complete response and a zero error count. What is left has to
+    # stay gone, so the check is on the source.
+    src3 = open(os.path.join(os.path.dirname(__file__), "..", "wrapper", "caps",
+                             "align.py")).read()
+    # 🔴 The split is fine and stays. What was toxic is the MEMORY: a ceiling that only fell,
+    # so one unlucky call left the process at one span a call for its whole life.
+    for gone, what in (("_ceiling", "a ceiling that outlives the call"),
+                       ("DEGRADED", "a degraded state to report")):
+        check("no %s" % what, gone not in src3, gone)
+    check("a group that will not fit is split and retried",
+          '"split"' in src3 and "group[:half]" in src3, "absent")
+    check("and a group that fails for some other reason is isolated, one member at a time",
+          '"isolate"' in src3, "absent")
+
+
+    check("the header is read before anything is decoded",
+          "_sf.info(" in handler and handler.index("_sf.info(") < handler.index("status_code=400"),
+          "sf.info before the refusal it answers")
+    # 🔴 This branch refuses nothing on how much audio an upload holds. The guard that
+    # would, and the measured rate it rests on, are deferred: that rate came from one machine
+    # and from a probe that could not separate "cost follows the file" from "cost follows the
+    # sum of the spans". What holds here is structural, and the test for it is above -- the
+    # decode is on the single worker, so the multiplication an OOMKill is made of is gone.
+    check("and no limit on how much audio a request may hold ships in this branch",
+          "MAX_AUDIO_SECONDS" not in src2 and "_host_audio_seconds" not in src2,
+          [w for w in ("MAX_AUDIO_SECONDS", "_host_audio_seconds") if w in src2])
+    check("unreadable audio is still a 400 rather than a server error",
+          "status_code=400" in handler, handler.count("status_code=400"))
+    # 🔴 A 503 without Retry-After says "no" rather than "not yet", and what a client does
+    # with the difference is the client's decision rather than this engine's assumption. One
+    # caller read in 2026-09 retries 5xx and abandons the rest; the next will differ.
+    tsrc = open(os.path.join(os.path.dirname(__file__), "..", "wrapper", "tasks.py")).read()
+    check("a busy engine says how long to wait, not just no",
+          "Retry-After" in tsrc and "status_code=503" in tsrc, "Retry-After present")
+    check("and so does an engine that is not loaded yet",
+          "Retry-After" in src2[:src2.index("async def _work_batch") if
+                                "async def _work_batch" in src2
+                                else src2.index("def _work_batch")], "Retry-After present")
+
+    # 🔴 The six shapes the constants were fitted from, with what each actually peaked at
+    # on hzydemo01 with the cache off. **This is a consistency check, not a validation** --
+    # these are the points the fit saw, so passing it says the constants in the module are
+    # the ones that were fitted and no digit was lost on the way in. It is worth having for
+    # exactly that: a typo in KAPPA_LM changes no test above, because everything above runs
+    # on a stub with no dimensions.
+    keep_model, keep_rate = align._state.get("model"), align._encoder_rate
+    try:
+        align._encoder_rate = None
+        align._state["model"] = types.SimpleNamespace(
+            model=types.SimpleNamespace(
+                config=types.SimpleNamespace(
+                    text_config=types.SimpleNamespace(hidden_size=1024,
+                                                      intermediate_size=3072),
+                    audio_config=types.SimpleNamespace(downsample_hidden_size=480,
+                                                       n_window=50),
+                    classify_num=5000),
+                parameters=lambda: iter(())))
+        keep_k3 = kappa(align, align.KAPPA_NO_CACHE)
+        perpos = align._bytes_a_position(align._dims())
+        # 🔴 The six were measured on a build with no KV cache, so they check that pair. The
+        # shipping pair is the other one, and a check that read it would be asserting the
+        # wrong build's numbers while still passing something.
+        measured = ((4, 100, 2.0, 21.8), (8, 126, 4.0, 38.6), (32, 99, 1.0, 88.7),
+                    (64, 99, 1.0, 178.2), (16, 112, 2.0, 51.0), (8, 178, 8.0, 72.3))
+        worst, where = 0.0, None
+        for n, pos, sec, mb in measured:
+            group = [align._Span(i, None, "x", "auto", sec, pos) for i in range(n)]
+            off = abs(align._cost(group) * perpos / 1e6 - mb) / mb
+            if off > worst:
+                worst, where = off, (n, sec, align._cost(group) * perpos / 1e6, mb)
+        check("the cache-off pair reproduces the six shapes it was fitted from",
+              worst < 0.05, (round(worst * 100, 1), where))
+        kappa_restore(align, keep_k3)
+        # And the shipping default is the OTHER pair, which is what makes --no-kv-cache
+        # opt-in rather than a thing that happened.
+        check("what ships is the pair fitted with a cache, not this one",
+              (align.KAPPA_LM, align.KAPPA_ENCODER,
+               align.ENCODER_FIXED_BYTES) == align.KAPPA_WITH_CACHE,
+              (align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES))
+    finally:
+        align._state["model"], align._encoder_rate = keep_model, keep_rate
+
+    # ---- the cache that is built and never read ---------------------------------------
+    # 🔴 `_kv_configs` walks a nesting rather than naming it, because the decorator reads
+    # whichever `self.config` the module it decorates has. A walk that stopped at the first
+    # level would set the flag on an object nothing reads and report success.
+    leaf = types.SimpleNamespace(use_cache=True)
+    mid = types.SimpleNamespace(text_config=leaf, use_cache=True)
+    top = types.SimpleNamespace(thinker_config=mid, use_cache=True)
+    found = align._kv_configs(types.SimpleNamespace(model=types.SimpleNamespace(config=top)))
+    check("every config on the path the decoder reads use_cache from is found",
+          found == [top, mid, leaf], found)
+    check("a model that is not loaded yields no configs rather than raising",
+          align._kv_configs(types.SimpleNamespace()) == [],
+          align._kv_configs(types.SimpleNamespace()))
+    # A config that points at itself would otherwise loop forever inside model loading.
+    loop = types.SimpleNamespace()
+    loop.thinker_config = loop
+    check("a config that points at itself terminates",
+          align._kv_configs(types.SimpleNamespace(
+              model=types.SimpleNamespace(config=loop))) == [loop], "no hang")
+
+    # ---- the whole path --------------------------------------------------------------
+    was = (align.BATCH, align._budget, align.MAX_SPAN_SEC)
+    # 🔴 The promise the switches make is that the *grouping* is off until asked for. Read
+    # from the module rather than from the table in the comment, which is where the two
+    # would drift.
+    #
+    # ⚠️ There used to be three switches here and the other two answered nothing: the
+    # padding rule brings its own ascending walk, and handing the library arrays rather
+    # than temp wavs changes no output byte. They are gone; what is left is the one switch
+    # that decides whether a request is grouped at all.
+    # 🔴 An ordering bug, so the check is on the order. `warn_unclaimed` reports what is
+    # left over and drains the bad values it has seen SO FAR: a flag claimed after it is
+    # announced as one this engine does not take, and a typo in that flag's value falls
+    # back to the default in silence. It sat above two of the four claims with a comment
+    # over it explaining why it must sit below all of them.
+    import re as _re
+    _src = io.open(os.path.join(os.path.dirname(align.__file__), "align.py"),
+                   encoding="utf-8").read()
+    _claims = [m.start() for m in
+               _re.finditer(r"_args\.(number|count|text|flag|switch)\(", _src)]
+    _warn = _src.index("_args.warn_unclaimed(")
+    check("every ENGINE_ARGS flag is claimed before the unclaimed ones are reported",
+          bool(_claims) and _warn > max(_claims),
+          (len(_claims), _warn, max(_claims) if _claims else None))
+
+    # 🔴 On by default as of this branch, and that is the whole point of the branch: the
+    # recommended configuration is this flag with `--no-kv-cache`, and a default of off left
+    # every deployment one edit away from the behaviour the work was for. Asserted rather
+    # than left to the flag line because the default IS the product decision -- flipping it
+    # back is a thing someone may do to quiet a failing acceptance check, and it has to cost
+    # a deliberate edit here.
+    # ⚠️ What a deployment that does nothing gets: grouped calls, and output that is NOT
+    # byte-identical. 226 of 17550 timestamps moved on the corpus this was measured against.
+    check("--align-batch defaults on, so the shipped image groups without being asked",
+          align.BATCH is True, align.BATCH)
+    # 🔴 And "off" still has to mean the machinery does not RUN, not that it runs and decides
+    # to do nothing. An operator who types `--align-batch off` is asking for main's behaviour
+    # back -- most likely because something went wrong -- so the fallback has to be a path
+    # these 1300 lines are not on at all, and the way to hold a promise like that is to make
+    # the code that would break it explode. Reading `if BATCH:` proves only that somebody
+    # wrote it.
+    # ⚠️ Set on the module rather than reloaded with a flag: `_run_group` and the rest read
+    # the global per request (there is a second site below that flips it the same way to
+    # compare billing across the two paths), and a reload here would rebuild every stub this
+    # function has installed.
+    # 🔴 And the memory counter is stubbed to ANSWER, which is the whole point. This check
+    # used to run on a host with no card, where `_memory_now()` returns None and the
+    # single-file path's measurement block is skipped for that reason alone -- so it went
+    # green about the test host rather than about the code, while a real deployment with
+    # grouping off called `_observe` on every single-file request. A check that asserts a
+    # property of the machine it runs on cannot fail on the machine that matters.
+    _kept_on = align.BATCH
+    align.BATCH = False
+    _kept_mem = align._memory_now
+    align._memory_now = lambda: (0, 0)
+    _boom = types.SimpleNamespace()
+    _names = ("_batched", "_next_group", "_run_group", "_call", "_solve_budget",
+              "_effective_budget", "_observe", "_record_group", "_cost", "_span_positions")
+    _kept = {n: getattr(align, n) for n in _names}
+    try:
+        for _n in _names:
+            setattr(align, _n, lambda *a, **k: (_ for _ in ()).throw(
+                AssertionError("the batching path ran with --align-batch off")))
+        with TestClient(align.build_app(["align"])) as c_off:
+            _b = c_off.post("/v1/audio/align", files=WAV,
+                            data={"segments": '[{"start":0,"end":1,"text":"hi"},'
+                                              '{"start":1,"end":2,"text":"yo"}]'})
+            _s = c_off.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+        check("and with it off neither path touches any of the sizing machinery",
+              _b.status_code == 200 and _s.status_code == 200
+              and len(_b.json().get("results") or []) == 2,
+              (_b.status_code, _s.status_code, _b.text[:120]))
+        # 🔴 `batch` is the multi-segment form and is true on main too; `grouped` is the one
+        # that answers what --align-batch did. A caller reading `batch` to find out whether
+        # grouping is on gets true from the day the image ships, since the chart passes no
+        # flags -- which is the reason for the second field, so it has to be asserted apart.
+        check("with grouping off the segment form still reports batch, and grouped is off",
+              _b.json().get("batch") is True and _b.json().get("grouped") is False,
+              {k: _b.json().get(k) for k in ("batch", "grouped")})
+    finally:
+        for _n, _v in _kept.items():
+            setattr(align, _n, _v)
+        align.BATCH, align._memory_now = _kept_on, _kept_mem
+    # 🔴 Every tunable an operator may set is an ENGINE_ARGS flag, which is this engine's
+    # own convention and what the other five capabilities do. Three of these used to be
+    # separate environment variable names; the module must not grow them back.
+    # ⚠️ The check is on how a value is READ, not on the names: ALIGN_FIXED_BUDGET and
+    # ALIGN_GROUP_SLACK are module constants and keep their names.
+    check("no tunable hides in an environment variable of its own",
+          'os.environ.get("ALIGN' not in _src,
+          [ln for ln in _src.splitlines() if 'os.environ.get("ALIGN' in ln])
+    check("the four flags an operator may set are all claimed",
+          all(f in _src for f in ("--align-batch", "--gpu-budget-fraction", "--max-span-seconds")),
+          [f for f in ("--align-batch", "--gpu-budget-fraction", "--max-span-seconds")
+           if f not in _src])
+    # 🔴 The line exists because reading the source does not answer "what is this process
+    # doing". Two measurements were taken on an engine left in a previous arm's state and
+    # both looked like results.
+    # 🔴 The cache and its calibration are ONE change, and the direction that hurts is
+    # silent: the cache-off pair with a cache on prices a position at a fifth of what it
+    # costs, which is a budget 5.1x too large and a batch that walks into the card. Nothing
+    # raises. The invariant is that the three move as a unit and follow the switch.
+    check("the factors are whichever pair the cache switch selects, all three together",
+          (align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES)
+          == (align.KAPPA_NO_CACHE if align.NO_KV_CACHE else align.KAPPA_WITH_CACHE),
+          (align.KAPPA_LM, align.KAPPA_ENCODER, align.ENCODER_FIXED_BYTES))
+    check("and the default is the with-cache pair, so a fresh deployment is what ships",
+          align.NO_KV_CACHE is False
+          and (align.KAPPA_LM, align.KAPPA_ENCODER,
+               align.ENCODER_FIXED_BYTES) == align.KAPPA_WITH_CACHE,
+          (align.NO_KV_CACHE, align.KAPPA_LM))
+    _d = {"hidden": 1024, "ffn": 3072, "classes": 5000, "width": 2,
+          "downsample": 480, "window": 50}
+    _wrong = align.KAPPA_NO_CACHE[0] * (6 * 1024 + 2 * 3072 + 5000) * 2
+    check("and mixing them the wrong way under-prices a position about five-fold",
+          4.5 < align._bytes_a_position(_d) / _wrong < 5.5,
+          round(align._bytes_a_position(_d) / _wrong, 2))
+
+    # ---- what the engine records about the machine it is on ---------------------------
+    # 🔴 Two questions decide the next design and neither has an answer today: what makes the
+    # wall move and how often, and whether the transcription engine runs beside us or finishes
+    # before us. The pipeline reaches alignment after transcription, so the second one is
+    # genuinely open, and `outside` -- free plus our own reserved pool, which cancels our own
+    # allocations out -- is what would show it.
+    with TestClient(align.build_app(["align"])) as c_t:
+        before = len(align._telemetry)
+        t0 = c_t.get("/v1/audio/align/telemetry")
+        check("the engine serves its own telemetry, which the bench copy used to hold alone",
+              t0.status_code == 200 and set(t0.json()) == {"now", "budget", "model",
+                                                           "requests"},
+              (t0.status_code, sorted(t0.json()) if t0.status_code == 200 else t0.text[:80]))
+        check("and reports the sample size beside the correction, never the correction alone",
+              {"scale", "scale_seen", "calls_seen"} <= set(t0.json()["model"]),
+              sorted(t0.json()["model"]))
+        # ⚠️ Batching ships off, so a sample taken only inside it would be empty on every
+        # deployment that has not turned it on -- which is all of them.
+        was_batch = align.BATCH
+        try:
+            align.BATCH = False
+            c_t.post("/v1/audio/align", files=WAV,
+                     data={"segments": '[{"start":0,"end":1,"text":"hi"}]'})
+            check("a serial request is recorded too, not only a batched one",
+                  len(align._telemetry) == before + 1, len(align._telemetry))
+            rec = align._telemetry[-1]
+            check("and it carries both ends plus the gap nobody was looking",
+                  {"started", "ended", "idle_before", "spans", "calls"} <= set(rec),
+                  sorted(rec))
+            c_t.post("/v1/audio/align", files=WAV, data={"text": "hi there"})
+            check("a single align request is recorded too, not only segmented requests",
+                  len(align._telemetry) == before + 2, len(align._telemetry))
+            check("and it records one span and one model call",
+                  align._telemetry[-1]["spans"] == 1 and align._telemetry[-1]["calls"] == 1,
+                  align._telemetry[-1])
+
+            # 🔴 `calls` is the denominator a sweep divides by, so it has to be the calls
+            # that happened, not a guess read back off the results. Counting results with
+            # units was wrong in BOTH directions at once: an empty-text span is answered
+            # without calling the model and was counted, and a span whose call raised is
+            # answered with an error and was not. Four spans -- one empty, one that fails,
+            # The mix is deliberately lopsided so the two ways of counting disagree: four
+            # spans, TWO empty and one that fails, is two calls -- while counting answers
+            # that carry units gives three, the two empties plus the one that worked.
+            calls_made = []
+            real_align = model.align
+
+            def counting_align(audio=None, text=None, language=None, **kw):
+                calls_made.append(1)
+                if "boom" in (text if isinstance(text, str) else ""):
+                    raise RuntimeError("this span is broken")
+                return real_align(audio=audio, text=text, language=language, **kw)
+
+            model.align = counting_align
+            try:
+                mixed = ('[{"start":0,"end":1,"text":"hi"},'
+                         '{"start":1,"end":2,"text":""},'
+                         '{"start":2,"end":3,"text":""},'
+                         '{"start":3,"end":4,"text":"boom"}]')
+                c_t.post("/v1/audio/align", files=WAV, data={"segments": mixed})
+                rec2 = align._telemetry[-1]
+                check("serial calls counts the calls, not the answers that carry units",
+                      rec2["calls"] == len(calls_made),
+                      (rec2["calls"], len(calls_made)))
+                check("and the two empty spans made no call at all",
+                      len(calls_made) == 2, len(calls_made))
+            finally:
+                model.align = real_align
+        finally:
+            align.BATCH = was_batch
+    # ⚠️ A telemetry field must not be able to break a request: the body parser admits
+    # shapes the engine cannot read, and a sum written the obvious way raised out of the
+    # loop that exists so one bad span does not cost the others theirs.
+    check("the covered-seconds sum cannot raise, whatever the body holds",
+          align._covered_seconds([{"start": "x", "end": 1}, "not a dict", None,
+                                  {"start": 0, "end": 2}]) == 2.0,
+          align._covered_seconds([{"start": "x", "end": 1}, "not a dict", None,
+                                  {"start": 0, "end": 2}]))
+    check("and the ring is bounded, because a history in a process holding a model is a leak",
+          align._telemetry.maxlen == align.TELEMETRY_KEEP, align._telemetry.maxlen)
+    # 🔴 `outside` is the only number here that answers the question, and it answers it by
+    # cancelling US out: an allocation of ours lowers free and raises reserved by the same
+    # amount, so what is left moves only when another container moves. Written as free alone
+    # it would read our own batch as a neighbour arriving, every reading would be wrong, and
+    # nothing would say so -- the whole sample would be a plausible wrong answer.
+    _torch = types.ModuleType("torch")
+    _torch.cuda = types.SimpleNamespace(
+        is_available=lambda: True,
+        mem_get_info=lambda: (7 * 2 ** 30, 15 * 2 ** 30),
+        memory_reserved=lambda: 2 * 2 ** 30,
+        memory_allocated=lambda: 1 * 2 ** 30)
+    _keep_torch = sys.modules.get("torch")
+    sys.modules["torch"] = _torch
+    try:
+        card = align._card()
+        check("outside is free plus what we hold, so our own allocations cancel out",
+              card["outside"] == card["free"] + card["reserved"],
+              (card["outside"], card["free"], card["reserved"]))
+        # ⚠️ And the sample carries the test for what its own numbers MEAN: under HAMi's
+        # meminfo hook `free` is quota arithmetic that nets out nothing another container
+        # holds, so a neighbour arriving and leaving both read as no change at all.
+        _keep_env = os.environ.get("CUDA_DEVICE_MEMORY_LIMIT_0")
+        try:
+            os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = "4096m"
+            check("and it says whether that free is the card or a quota",
+                  align._card()["quota_view"] is False, align._card())
+            _torch.cuda.mem_get_info = lambda: (1 * 2 ** 30, 4 * 2 ** 30)
+            check("a total at or under the published limit can only be the rewrite",
+                  align._card()["quota_view"] is True, align._card())
+        finally:
+            if _keep_env is None:
+                os.environ.pop("CUDA_DEVICE_MEMORY_LIMIT_0", None)
+            else:
+                os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = _keep_env
+    finally:
+        if _keep_torch is None:
+            sys.modules.pop("torch", None)
+        else:
+            sys.modules["torch"] = _keep_torch
+
+    # ---- the machine calibrates itself before it serves anything ----------------------
+    # 🔴 The two factors are what differs between machines, and `_observe` only learns from
+    # calls that have already run -- so without this the FIRST request on an unmeasured
+    # machine is sized by a calibration taken somewhere else. Where a quota is enforced the
+    # only margin is the fraction itself.
+    _src_cal = open(os.path.join(os.path.dirname(align.__file__), "align.py"),
+                    encoding="utf-8").read()
+    check("the calibration runs before ready, so nothing races it on the card",
+          _src_cal.index("_calibrate()") < _src_cal.index('_state["ready"] = True'),
+          "calibrate then ready")
+    keep_sc = (align._scale, align._scale_seen, align._calls_seen, align._state.get("model"),
+               align._encoder_rate)
+    try:
+        align._encoder_rate = None
+        align._state["model"] = types.SimpleNamespace(
+            model=types.SimpleNamespace(
+                config=types.SimpleNamespace(
+                    text_config=types.SimpleNamespace(hidden_size=1024,
+                                                      intermediate_size=3072),
+                    audio_config=types.SimpleNamespace(downsample_hidden_size=480,
+                                                       n_window=50),
+                    classify_num=5000),
+                parameters=lambda: iter(())))
+        align._scale, align._scale_seen, align._calls_seen = 1.0, 0, 0
+        seen_text = []
+        keep_align = align._align
+        keep_mem, keep_used = align._memory_now, align._used_bytes
+        try:
+            align._align = lambda path, text, language: seen_text.append(text) or [[]]
+            # A call that takes twice what the model predicts: the correction lands near 2.
+            _warm = align._Span(0, None, "\u5b57" * 120, "auto", 30.0,
+                                align._span_positions(30.0, "\u5b57" * 120, "auto"))
+            align._memory_now = lambda: (0, 0)
+            align._used_bytes = lambda before, peak: int(
+                2 * align._cost([_warm]) * align._bytes_a_position(align._dims()))
+            with said() as heard_cal:
+                align._calibrate()
+            check("it sends one span of the production shape, not silence",
+                  len(seen_text) == 1 and len(seen_text[0]) == 120, seen_text)
+            check("and folds what it measured into the correction before any traffic",
+                  1.5 < align._scale < 2.5 and align._scale_seen == 1,
+                  (align._scale, align._scale_seen))
+            check("and says how long it took, because nobody has measured that yet",
+                  heard_cal.mentions("calibrated on this machine in"), heard_cal.records)
+            # 🔴 A calibration that observed nothing must not read as a calibration that ran.
+            # Loading the model leaves a historical peak; a warm-up that stays under it makes
+            # `_used` answer zero, `_observe` discard the sample, and the success line print
+            # "it took 0 MB, so the correction is 1.00" -- a machine reported as calibrated
+            # against a correction nothing on it ever checked. Reported by review 2026-09-14.
+            align._scale, align._scale_seen = 1.0, 0
+            align._used_bytes = lambda before, peak: 0
+            with said() as heard_zero:
+                align._calibrate()
+            check("a calibration that observed no new peak says so, and does not claim to "
+                  "have calibrated",
+                  heard_zero.mentions("took no measurement")
+                  and not heard_zero.mentions("calibrated on this machine")
+                  and align._scale_seen == 0,
+                  heard_zero.records)
+        finally:
+            align._align = keep_align
+            align._memory_now, align._used_bytes = keep_mem, keep_used
+        # ⚠️ A card too full to warm on is a card that will refuse the first real call too.
+        # Saying so beats refusing to start.
+        align._scale, align._scale_seen = 1.0, 0
+        try:
+            align._align = lambda *a, **k: (_ for _ in ()).throw(
+                RuntimeError("CUDA out of memory."))
+            with said() as heard_bad:
+                align._calibrate()
+            check("a calibration that cannot run is a warning, not a failed startup",
+                  heard_bad.mentions("could not calibrate") and align._scale == 1.0,
+                  heard_bad.records)
+        finally:
+            align._align = keep_align
+    finally:
+        (align._scale, align._scale_seen, align._calls_seen, align._state["model"],
+         align._encoder_rate) = keep_sc
+
+    with said() as heard:
+        align._say_config()
+    check("and the engine says its whole effective configuration in one line",
+          heard.mentions("batching") and heard.mentions("groups sized at run time")
+          # ⚠️ Not "as shipped" any more. This line runs before the checkpoint is open, so
+          # the only thing it knows is the flag -- and since an explicit `use_cache: false`
+          # stopped being overridden, claiming the checkpoint's own state here would be a
+          # guess. What is really built is reported by the `use_cache was ...` line at load.
+          and heard.mentions("KV cache not turned off here")
+          and heard.mentions("% of what the grant leaves"), heard.records)
+    check("and it is the only switch there is; the other two collapsed into it",
+          not hasattr(align, "SORT_BY_LEN") and not hasattr(align, "NO_TEMPFILE"),
+          [n for n in ("SORT_BY_LEN", "NO_TEMPFILE") if hasattr(align, n)])
+    # ⚠️ And the promise stops there. Admission is on in both paths by design: a span
+    # longer than the model aligns used to come back with units and HTTP 200, and now it
+    # comes back refused. That is a deliberate change in what ships and it is not behind a
+    # switch, so the assertion above must not be read as "nothing changed".
+    check("admission is on without any switch, which is a change in what ships",
+          align.MAX_SPAN_SEC > 0 and align.MAX_UNITS_A_SECOND > 0,
+          (align.MAX_SPAN_SEC, align.MAX_UNITS_A_SECOND))
+    align.BATCH = True
+    align._budget = 0.0
+    try:
+        with TestClient(align.build_app(["align"])) as c:
+            four = ('[{"start":0,"end":1,"text":"aa"},{"start":1,"end":2,"text":"bb"},'
+                    '{"start":2,"end":3,"text":"cc"},{"start":3,"end":4,"text":"dd"}]')
+
+            calls[:] = []
+            got = c.post("/v1/audio/align", files=WAV, data={"segments": four}).json()
+            res = got.get("results") or []
+            check("every span comes back, in the order it was sent",
+                  [r.get("units") and r["units"][0]["text"] for r in res] == ["hi"] * 4, res)
+            # 🔴 With no dimensions to read -- the stub is a SimpleNamespace -- the opening
+            # budget is zero and the ramp starts at one span, which is the fallback the real
+            # engine takes only when it cannot read its own config.
+            check("with nothing readable the first call carries one span",
+                  calls and len(calls[0]) == 1, calls)
+            # 🔴 `grouped` answers what HAPPENED, so it is pinned against the calls rather
+            # than against a constant: --align-batch is on for this whole block, and the
+            # answer still has to follow whether any call carried more than one span. It
+            # does not always -- on the shipped 4 GiB aligner one 290 s span alone exceeds
+            # the budget, so every group comes out single and a caller told "grouped" there
+            # would believe its spans were combined when each still had its own call.
+            check("grouped follows the calls, not the flag",
+                  got.get("grouped") == any(len(c) > 1 for c in calls),
+                  (align.BATCH, got.get("grouped"), [len(c) for c in calls]))
+            # 🔴 And the case that gives the field its reason to exist: --align-batch still
+            # on, two spans, and the ramp never gets to carry both -- so every call is a
+            # single span and the honest answer is false. This is the shape the shipped
+            # 4 GiB aligner is in for meeting-length spans, where one span alone exceeds the
+            # budget. Without this case the assertion above passes on a hardcoded true.
+            calls[:] = []
+            # The ramp grew on the request above, so it is put back where the block set it.
+            align._budget = 0.0
+            two = '[{"start":0,"end":1,"text":"aa"},{"start":1,"end":2,"text":"bb"}]'
+            solo = c.post("/v1/audio/align", files=WAV, data={"segments": two}).json()
+            check("two spans that never share a call report grouped false",
+                  all(len(x) == 1 for x in calls) and solo.get("grouped") is False,
+                  (solo.get("grouped"), [len(x) for x in calls]))
+            # 🔴 The third state, and the one both cases above miss: a call that DID carry
+            # two spans, was refused by the card, and was split into singles that worked.
+            # `_groups` keeps the refused group's record -- that is what `failed` is for --
+            # so counting attempts reports `grouped` for a request in which every span ended
+            # up in a call of its own. Both assertions above pass either way, because in
+            # neither of them does a multi-span call get as far as being attempted.
+            # ⚠️ It is the field the 4 GiB round read as evidence that nothing grouped.
+            calls[:] = []
+            keep_budget = align._budget
+            align._budget = 10.0 ** 9          # big enough that both spans travel together
+            oom = MemoryError("CUDA out of memory. Tried to allocate 2.00 GiB")
+            fail_on["aa"] = oom
+            try:
+                split = c.post("/v1/audio/align", files=WAV,
+                               data={"segments": two}).json()
+            finally:
+                fail_on.clear()
+            check("a group the card refused and split does not report itself grouped",
+                  max(len(x) for x in calls) > 1            # it really was attempted as one
+                  and split.get("grouped") is False,        # and no call carried two
+                  (split.get("grouped"), [len(x) for x in calls]))
+            align._budget = keep_budget        # this block's later cases read it
+
+            check("a checkpoint whose dimensions are unreadable opens at zero",
+                  align._opening_budget() == 0.0, align._opening_budget())
+            # And with dimensions, the opening is a real number of positions rather than one
+            # span: 6h + 2f + classes per position, against half of what the grant leaves.
+            d = {"hidden": 1024, "ffn": 3072, "classes": 5000, "width": 2,
+                 "downsample": 480, "window": 50}
+            check("a position is priced from the model's own dimensions",
+                  align._bytes_a_position(d)
+                  == align.KAPPA_LM * (6 * 1024 + 2 * 3072 + 5000) * 2,
+                  align._bytes_a_position(d))
+            # 🔴 The band depends on which build is loaded, and that is the point: a
+            # position goes from 143 KB to 28 KB when the cache comes off while a second of
+            # audio barely moves, so the same second is worth about 56 positions with a cache
+            # and about 300 without. A long span is five times dearer against a batch of short
+            # ones in the second build, which is what moves the division. Checking both is
+            # what stops one pair being read while the other is loaded.
+            band = (20, 100) if not align.NO_KV_CACHE else (100, 600)
+            check("a second of audio is worth what this build's pair says it is",
+                  band[0] < align._bytes_a_second(d) / align._bytes_a_position(d) < band[1],
+                  (align._bytes_a_second(d) / align._bytes_a_position(d), band))
+            keep_k4 = kappa(align, align.KAPPA_NO_CACHE)
+            try:
+                check("and with the cache off the same second is worth hundreds",
+                      100 < align._bytes_a_second(d) / align._bytes_a_position(d) < 600,
+                      align._bytes_a_second(d) / align._bytes_a_position(d))
+            finally:
+                kappa_restore(align, keep_k4)
+            check("the budget grew while the calls kept working", align._budget > 0,
+                  align._budget)
+
+            # Grown budget, same request: now they travel together.
+            calls[:] = []
+            c.post("/v1/audio/align", files=WAV, data={"segments": four})
+            check("a grown budget groups the spans instead of sending singles",
+                  max(len(x) for x in calls) > 1, calls)
+
+            # 🔴 And the budget is not the only thing that has to be true. `_calibrate`
+            # swallows its own failures and `ready` goes up either way, so an engine can
+            # serve with a correction fitted on another machine -- the state this line's
+            # own note records a 5x under-prediction from. Grouping against it is the
+            # direction the card answers by refusing the call, so it waits.
+            # ⚠️ Produced, not asserted: the gate reads `_scale_seen`, so the state has to
+            # be the one an unweighed engine is actually in.
+            keep_seen = align._scale_seen
+            try:
+                # ⚠️ The gate needs a cost model to exist before it has anything to
+                # distrust. With `_dims()` unreadable there is none -- the ramp takes over,
+                # which is safe without a measurement by construction -- so the gate
+                # deliberately does not apply, and the stub reads None. Produce the state
+                # the gate is actually about.
+                keep_dims = align._dims
+                align._dims = lambda: {"hidden": 1024, "ffn": 3072, "classes": 5000,
+                                       "width": 2, "downsample": 480, "window": 50}
+                align._scale_seen = 0
+                calls[:] = []
+                c.post("/v1/audio/align", files=WAV, data={"segments": four})
+                check("an engine nothing has weighed sends one span a call",
+                      max(len(x) for x in calls) == 1, calls)
+                check("and it says which condition closed the group, not memory",
+                      [g["closed_by"] for g in align._groups] == ["unmeasured"] * 4,
+                      [g["closed_by"] for g in align._groups])
+                # 🔴 A gate, not a switch: the span that went alone is also the
+                # measurement, so grouping is back on the next call without a restart.
+                # Without this the check above passes just as well for a permanent
+                # disable, which is a different and much worse change.
+                align._scale_seen = 1
+                calls[:] = []
+                c.post("/v1/audio/align", files=WAV, data={"segments": four})
+                check("and grouping resumes once something has been weighed",
+                      max(len(x) for x in calls) > 1, calls)
+                # 🔴 The transition, inside ONE request. The two cases above set the
+                # counter between requests, so neither of them steps over the moment a
+                # measurement lands mid-request -- and that is where the gate was read one
+                # call too early: from before the span that produces the measurement, so the
+                # second span went alone as well and only the third grouped.
+                align._scale_seen = 0
+                calls[:] = []
+                real_align = align._align
+
+                def _measures_on_first_call(*a, **k):
+                    align._scale_seen = 1          # what `_observe` does after a real call
+                    align._align = real_align
+                    return real_align(*a, **k)
+
+                align._align = _measures_on_first_call
+                try:
+                    c.post("/v1/audio/align", files=WAV, data={"segments": four})
+                finally:
+                    align._align = real_align
+                check("the span that measures is the only one that goes alone",
+                      len(calls) >= 2 and len(calls[0]) == 1 and len(calls[1]) > 1,
+                      [len(x) for x in calls])
+                # 🔴 The row the first version of this gate shut off. `_observe` returns
+                # early when the dimensions do not read, so `_scale_seen` can never leave
+                # zero there -- gating on it alone disabled a documented path for the life
+                # of the process, while `_effective_budget` still promised it in a warning.
+                align._dims = keep_dims          # back to the stub's unreadable answer
+                align._scale_seen = 0
+                calls[:] = []
+                c.post("/v1/audio/align", files=WAV, data={"segments": four})
+                check("with no cost model at all the ramp still runs, gate or no gate",
+                      max(len(x) for x in calls) > 1, calls)
+            finally:
+                align._dims = keep_dims
+                align._scale_seen = keep_seen
+
+            # 🔴 One bad span must not cost the others theirs.
+            calls[:] = []
+            fail_on.clear()
+            fail_on["cc"] = RuntimeError("this span is broken")
+            got = c.post("/v1/audio/align", files=WAV, data={"segments": four}).json()
+            res = got.get("results") or []
+            check("a failing span fails alone and the rest still align",
+                  [bool(r.get("error")) for r in res] == [False, False, True, False], res)
+            # Halving beats singles only above four spans, so the claim is checked where
+            # it is actually made: eight spans, one bad, against the 1 + n singles cost.
+            eight = "[" + ",".join('{"start":%.1f,"end":%.1f,"text":"s%d"}' % (i * 0.5, i * 0.5 + 0.5, i)
+                                   for i in range(8)) + "]"
+            calls[:] = []
+            fail_on.clear()
+            fail_on["s5"] = RuntimeError("this span is broken")
+            align._budget = 100000.0
+            got8 = c.post("/v1/audio/align", files=WAV, data={"segments": eight}).json()
+            res8 = got8.get("results") or []
+            check("in a group of eight only the bad span fails",
+                  [bool(r.get("error")) for r in res8]
+                  == [i == 5 for i in range(8)], res8)
+            # ⚠️ It costs the failed call plus one a member. Halving would cost about
+            # 2*log2(n); the isolation is the same and this has no recursion. The trade is
+            # stated here so a later reader does not read the count as an accident.
+            check("and it costs the failed call plus one a span, no recursion",
+                  len(calls) == 1 + 8, len(calls))
+
+            # 🔴 The two paths must bill the same request the same amount. A failing
+            # span still cost the audio it read, and the batched path bills it; the serial
+            # path metered after the call and outside the `finally`, so the same four-span
+            # request with one failure cost four seconds batched and three serial --
+            # the charge depending on a performance switch. The file already states this
+            # rule for admission ("both paths refuse through the same function, or the two
+            # would drift"); it was missing on the meter.
+            four_one_bad = ('[{"start":0,"end":1,"text":"aa"},{"start":1,"end":2,"text":"bb"},'
+                            '{"start":2,"end":3,"text":"boom"},{"start":3,"end":4,"text":"dd"}]')
+            fail_on.clear()
+            fail_on["boom"] = RuntimeError("this span is broken")
+            billed = {}
+            keep_batch = align.BATCH
+            try:
+                for mode in (True, False):
+                    align.BATCH = mode
+                    r = c.post("/v1/audio/align", files=WAV,
+                               data={"segments": four_one_bad})
+                    billed[mode] = r.headers.get("X-Audio-Input-Duration-Seconds")
+            finally:
+                align.BATCH = keep_batch
+                fail_on.clear()
+            check("both paths bill the same four seconds when one span of four fails",
+                  billed[True] == billed[False]
+                  and float(billed[True] or 0) == 4.0, billed)
+
+            # 🔴 The same rule on the only failure a client can reach directly. The body
+            # parser checks that segments is a JSON array and nothing about its elements,
+            # so a start that is not a number, a bare string, or a null used to raise out
+            # of the preparation loop and answer 500 for the whole request -- while the
+            # identical request with batching off returned 200 and one error object. Four
+            # shapes, because they fail at four different lines.
+            for label, body in (
+                    ("a start that is not a number",
+                     '[{"start":0,"end":1,"text":"aa"},{"start":"x","end":2,"text":"bb"}]'),
+                    ("an element that is a bare string",
+                     '[{"start":0,"end":1,"text":"aa"},"hello"]'),
+                    ("an element that is null",
+                     '[{"start":0,"end":1,"text":"aa"},null]'),
+                    ("a start that is not finite",
+                     '[{"start":0,"end":1,"text":"aa"},{"start":1e400,"end":2,"text":"bb"}]')):
+                r = c.post("/v1/audio/align", files=WAV, data={"segments": body})
+                rows = (r.json() or {}).get("results") or []
+                check("%s fails alone rather than failing the request" % label,
+                      r.status_code == 200 and len(rows) == 2
+                      and not (rows[0] or {}).get("error")
+                      and bool((rows[1] or {}).get("error")),
+                      (r.status_code, rows))
+
+            # 🔴 A group that runs out of memory is split and retried, and the caller is
+            # not told: every member is innocent, the problem is how many rode together, and
+            # a prediction that was wrong about this machine is ours to find rather than
+            # theirs to handle. What must NOT happen is the process remembering it.
+            fail_on.clear()
+            align._budget = 10000.0
+            sizes = []
+
+            def oom_group(audio=None, text=None, language=None):
+                texts = text if isinstance(text, list) else [text]
+                sizes.append(len(texts))
+                if len(texts) > 2:
+                    raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+                return [[unit] for _ in texts]
+
+            model.align = oom_group
+            keep_budget_oom = align._budget
+            with said() as heard_oom:
+                r_oom = c.post("/v1/audio/align", files=WAV, data={"segments": four})
+            res_oom = (r_oom.json().get("results") or []) if r_oom.status_code == 200 else []
+            check("a group the card refuses is split, and every span still comes back",
+                  r_oom.status_code == 200 and len(res_oom) == 4
+                  and all(not (x or {}).get("error") for x in res_oom),
+                  (r_oom.status_code, res_oom))
+            check("and it halved rather than going one at a time, so the call count is log-ish",
+                  sizes == [4, 2, 2], sizes)
+            # 🔴 The budget is untouched. This is the whole difference from the version that
+            # recovered and then ran at a tenth of the throughput for the life of the process.
+            check("and nothing is remembered: the budget stands and no ceiling appears",
+                  align._budget == keep_budget_oom and not hasattr(align, "_ceiling"),
+                  (align._budget, keep_budget_oom, getattr(align, "_ceiling", "absent")))
+            # ⚠️ Not told to the caller, but not silent either: we need to know when our own
+            # prediction is wrong about a machine, and the log and the telemetry are where.
+            check("the caller is not told, but the log says it and names the knob",
+                  heard_oom.mentions("out of memory on a call carrying")
+                  and heard_oom.mentions("--gpu-budget-fraction"), heard_oom.records)
+            check("and the telemetry counts it, so how often can be read rather than guessed",
+                  align._telemetry[-1]["ooms"] == 1, align._telemetry[-1].get("ooms"))
+            # 🔴 A span that fails ALONE is that span not fitting, which retrying cannot
+            # change. It comes back as that span's error and the other three still align.
+            # A budget this small makes every group a single span, which is the state this
+            # is about; with a large budget the four ride together and the path never runs
+            # -- the first version of this check passed for that reason.
+            align._budget = 1.0
+
+            def oom_alone(audio=None, text=None, language=None):
+                texts = text if isinstance(text, list) else [text]
+                if len(texts) == 1:
+                    raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+                return [[unit] for _ in texts]
+
+            model.align = oom_alone
+            alone = c.post("/v1/audio/align", files=WAV, data={"segments": four})
+            check("a span that fails on its own is that span's error, inside a 200",
+                  alone.status_code == 200
+                  and all((r or {}).get("error")
+                          for r in (alone.json().get("results") or [{}])),
+                  (alone.status_code, alone.json().get("results")))
+            model.align = fake_align
+
+            # 🔴 The rule that decides a group, and the reason it gives for closing one.
+            # Memory and padding produce the same wall clock and call for opposite changes,
+            # so a run that cannot tell them apart cannot be read at all.
+            keep_slack = align.ALIGN_GROUP_SLACK
+            check("the padding rule ships on, at the figure the sweep measured",
+                  keep_slack == 50, keep_slack)
+            align._budget = 10 ** 9
+            try:
+                # 🔴 The default is 50 and it is measured, so the off case has to be set
+                # explicitly here: a test that inherited the default would stop testing
+                # "off" the day the default moved, and would pass either way.
+                align.ALIGN_GROUP_SLACK = 0
+                c.post("/v1/audio/align", files=WAV, data={"segments": four})
+                check("with the padding rule off a generous budget sends one call",
+                      len(align._groups) == 1 and align._groups[0]["closed_by"] == "no more spans",
+                      align._groups)
+                # Four spans of equal length whose TEXT climbs, so their positions climb
+                # and each addition re-pads what is already there. Equal durations on
+                # purpose: it is the text half of a span's length that a seconds-based rule
+                # would have missed, which is why this rule counts positions.
+                climbing = ('[{"start":0,"end":1,"text":"aa"},'
+                            '{"start":1,"end":2,"text":"aa bb"},'
+                            '{"start":2,"end":3,"text":"aa bb cc"},'
+                            '{"start":3,"end":4,"text":"aa bb cc dd"}]')
+                align.ALIGN_GROUP_SLACK = 1
+                c.post("/v1/audio/align", files=WAV, data={"segments": climbing})
+                # The last group has no successor to refuse, so it closes on running out
+                # rather than on padding -- distinguishing the two is the whole point of
+                # recording a reason, so the check states it instead of accepting either.
+                check("a slack of one position closes each group on padding, the last on "
+                      "running out of spans",
+                      [g["closed_by"] for g in align._groups]
+                      == ["padding", "padding", "padding", "no more spans"],
+                      align._groups)
+                check("and each of those groups still carries exactly one span",
+                      all(g["spans"] == 1 for g in align._groups), align._groups)
+                # 🔴 The count is the half that makes the rule self-limiting: the same
+                # small step costs more the more spans are already paying it. These four
+                # climb by three positions each, so at a slack of seven the walk takes two
+                # steps (3, then 6) and refuses the third (9) -- a rule that priced only
+                # the step would take all four and never close.
+                align.ALIGN_GROUP_SLACK = 7
+                c.post("/v1/audio/align", files=WAV, data={"segments": climbing})
+                check("the re-padding is charged to every span already in the group",
+                      [g["spans"] for g in align._groups] == [3, 1], align._groups)
+
+                # 🔴 A fixed budget stops the engine re-deciding between rounds, which is
+                # what a sweep needs. It is now the whole answer: nothing lowers it any
+                # more, because nothing remembers a wall.
+                keep_pin = align.ALIGN_FIXED_BUDGET
+                try:
+                    align.ALIGN_FIXED_BUDGET, align._budget = 4242.0, 0.0
+                    check("a fixed budget is the budget, without solving for one",
+                          align._effective_budget() == 4242.0, align._effective_budget())
+                    check("and it stays it, because no wall is remembered",
+                          align._effective_budget() == 4242.0, align._effective_budget())
+                finally:
+                    align.ALIGN_FIXED_BUDGET = keep_pin
+                    align._budget = 10 ** 9
+
+                align.ALIGN_GROUP_SLACK = 10 ** 9
+                c.post("/v1/audio/align", files=WAV, data={"segments": climbing})
+                check("a slack larger than any re-padding leaves the grouping to memory",
+                      len(align._groups) == 1, align._groups)
+
+                # 🔴 The rule prices an ascending walk, so it brings the ordering with it.
+                # This was once a second switch an operator could set the wrong way, and
+                # that combination degraded silently in whichever direction the rule
+                # happened to be wrong: one enormous over-padded group before both
+                # directions were priced, one span a call after. The switch is gone; the
+                # behaviour it used to be able to break is what this checks. Sorting is
+                # internal -- results are written back by original index.
+                try:
+                    align.ALIGN_GROUP_SLACK = 50
+                    align._budget = 10 ** 9
+                    falling_body = ("[" + ",".join(
+                        '{"start":%d,"end":%d,"text":"%s"}' % (i, i + 1, "aa " * n)
+                        for i, n in enumerate([9, 1, 1, 1])) + "]")
+                    r = c.post("/v1/audio/align", files=WAV,
+                               data={"segments": falling_body}).json()
+                    check("the rule brings its own ordering, so the longest span does not "
+                          "drag three short ones into its padding",
+                          len(align._groups) == 2
+                          and [g["spans"] for g in align._groups] == [3, 1],
+                          [(g["spans"], g["closed_by"]) for g in align._groups])
+                    check("and every span still comes back against its own index",
+                          len(r.get("results") or []) == 4
+                          and all(not (x or {}).get("error")
+                                  for x in (r.get("results") or [])),
+                          r.get("results"))
+                    align.ALIGN_GROUP_SLACK = 0
+                    c.post("/v1/audio/align", files=WAV, data={"segments": falling_body})
+                    check("with the rule off the order is left alone and memory decides",
+                          len(align._groups) == 1, align._groups)
+
+                    # 🔴 A budget of zero is the ramp's opening state on a machine with no
+                    # memory authority, not the card refusing. Every process's first group
+                    # hits it, and calling that `memory` puts a reading in the record that
+                    # claims the card declined a call nobody offered it.
+                    align._budget = 0.0
+                    align.ALIGN_GROUP_SLACK = 50
+                    spans4 = [align._Span(i, None, "x", "auto", 1.0, 100) for i in range(4)]
+                    keep_priced = align._budget_priced
+                    try:
+                        align._budget_priced = False
+                        g, _, why = align._next_group(spans4, list(range(4)), 0)
+                        check("a group closed with no budget yet says ramping, not memory",
+                              (len(g), why) == (1, "ramping"), (len(g), why))
+                        # 🔴 The other zero. A grant that was read and is spoken for prices
+                        # at 0.0, and that IS the card refusing -- keying the label off
+                        # `budget > 0` merged the two states one layer below the place
+                        # `_solve_budget` exists to separate them, and merged them for as
+                        # long as the quota stayed full rather than for one group.
+                        # `_effective_budget` re-derives the flag, which is right -- so
+                        # the state has to be produced, not asserted: a grant that reads
+                        # and has nothing left.
+                        keep_solve = align._solve_budget
+                        try:
+                            align._solve_budget = lambda: 0.0
+                            align._budget = 0.0
+                            g2, _, why2 = align._next_group(spans4, list(range(4)), 0)
+                        finally:
+                            align._solve_budget = keep_solve
+                        # 🔴 And the label must survive the ramp. Once doubling has
+                        # produced a positive budget, a test on the budget's value passes
+                        # and the flag is never read -- so the first group said `ramping`
+                        # and every group after it went back to blaming a card nobody had
+                        # asked, which is most of the groups in a request.
+                        align._budget_priced = False
+                        align._budget = 10.0 ** 9
+                        g3, _, why3 = align._next_group(
+                            spans4 + [align._Span(9, None, "x", "auto", 1.0, 10 ** 9)],
+                            list(range(5)), 0)
+                        check("a group closed on a ramped budget still says ramping",
+                              why3 == "ramping", (len(g3), why3))
+                        # ⚠️ There used to be a second half to this: a wall that had been
+                        # hit also forced `memory`, because the out-of-memory path returned
+                        # from inside `except` and never reached the line that prices the
+                        # budget. Nothing remembers a wall now, so the flag is the whole
+                        # answer and the two labels mean exactly what they say.
+                        align._budget_priced = True
+                        g4, _, why4 = align._next_group(
+                            spans4 + [align._Span(9, None, "x", "auto", 1.0, 10 ** 9)],
+                            list(range(5)), 0)
+                        check("and a priced budget that binds says memory",
+                              why4 == "memory", (len(g4), why4))
+                        # 🔴 The invariant the three-writers-one-reader arrangement rests
+                        # on, which was holding by accident until it was written down: the
+                        # reader refreshes the flag before reading it. Pinned by making the
+                        # flag stale on purpose and checking the answer is still right --
+                        # move the `_effective_budget()` call out of `_next_group`, or read
+                        # the flag ahead of it, and this goes red instead of going quiet.
+                        keep_solve2 = align._solve_budget
+                        try:
+                            align._budget_priced = True      # stale, and wrong
+                            align._budget = 0.0
+                            align._solve_budget = lambda: None
+                            g5, _, why5 = align._next_group(spans4, list(range(4)), 0)
+                            check("a stale flag is refreshed by the read path, not trusted",
+                                  why5 == "ramping", (why5, align._budget_priced))
+                        finally:
+                            align._solve_budget = keep_solve2
+                        check("a zero budget that was actually priced still says memory",
+                              (len(g2), why2) == (1, "memory"), (len(g2), why2))
+                    finally:
+                        align._budget_priced = keep_priced
+                    align._budget = 10 ** 9
+                finally:
+                    align.ALIGN_GROUP_SLACK = 50
+
+                # 🔴 The rule has to work on the order it is given. Charging only "everyone
+                # already here gets re-padded" reads zero for every candidate shorter than
+                # the group's longest -- so on unsorted input the rule closed nothing and
+                # reported "no more spans" while the call was padded to several times its
+                # real work. It is reached only by calling _next_group directly now that the
+                # walk is always sorted, and it is kept because that is one edit away.
+                # Descending is the worst case and the cheapest to state.
+                Span = align._Span
+                falling = [Span(i, None, "x", "auto", 1.0, p)
+                           for i, p in enumerate([600] + [20] * 8)]
+                align.ALIGN_GROUP_SLACK = 50
+                keep_budget = align._budget
+                align._budget = 10 ** 9
+                try:
+                    g, at, why = align._next_group(falling, list(range(len(falling))), 0)
+                    check("a candidate shorter than the group's longest is charged the "
+                          "padding it will be given",
+                          (len(g), why) == (1, "padding"), (len(g), why))
+                    # And the term is zero whenever the order is ascending, which is what
+                    # keeps every measured figure in the record valid.
+                    rising = [Span(i, None, "x", "auto", 1.0, p)
+                              for i, p in enumerate([20] * 8 + [600])]
+                    g2, _, why2 = align._next_group(rising, list(range(len(rising))), 0)
+                    check("and ascending order is unaffected, so the sweep still holds",
+                          (len(g2), why2) == (8, "padding"), (len(g2), why2))
+                finally:
+                    align._budget = keep_budget
+            finally:
+                align.ALIGN_GROUP_SLACK = keep_slack
+
+            # 🔴 An answer that does not match the question must not be believed. zip
+            # stops at the shorter side, so a library returning fewer results leaves spans
+            # null while the group reports itself finished, and one returning a flat list
+            # of items gives every span the same wrong answer with HTTP 200.
+            calls[:] = []
+            fail_on.clear()
+            align._budget = 100000.0
+            def one_only(audio=None, text=None, language=None):
+                calls.append(list(text if isinstance(text, list) else [text]))
+                return [[unit]]
+
+            model.align = one_only
+            short = c.post("/v1/audio/align", files=WAV, data={"segments": four}).json()
+            rs = short.get("results") or []
+            check("a short answer never reaches the caller as a null or a wrong result",
+                  len(rs) == 4 and all(r and r.get("units") and not r.get("error")
+                                       for r in rs), rs)
+            # 🔴 And the recovery is the useful part: a library that only ever answers one
+            # span degrades into one call a span instead of handing back four copies of the
+            # first answer, because the mismatch fails the group and halving reaches singles.
+            check("a library that answers one at a time is driven one at a time",
+                  calls and max(len(k) for k in calls) > 1
+                  and [len(k) for k in calls][-1] == 1, calls)
+            # With nothing returned at all even a single span fails, and says what it got.
+            def none_at_all(audio=None, text=None, language=None):
+                return []
+
+            model.align = none_at_all
+            none_back = c.post("/v1/audio/align", files=WAV,
+                               data={"segments": '[{"start":0,"end":1,"text":"aa"}]'}).json()
+            check("an empty answer is reported against what was asked",
+                  "results for" in ((none_back.get("results") or [{}])[0].get("error") or ""),
+                  none_back.get("results"))
+            model.align = fake_align
+
+            # Metering is additive, so a halved retry must not bill a span twice.
+            billed = []
+            align._budget = 100000.0
+            fail_on.clear()
+            fail_on["cc"] = RuntimeError("this span is broken")
+            # 🔴 The double bill needs _call to fail *partway through writing results*, so
+            # that spans already billed are billed again by the retry. A span failing before
+            # the call never reaches the meter, which is why the obvious test misses it.
+            def breaks_third(audio=None, text=None, language=None):
+                texts = text if isinstance(text, list) else [text]
+                calls.append(list(texts))
+                # An item _units cannot iterate: the spans before it are written and billed,
+                # then this raises out of the middle of the loop.
+                return [[unit] if t != "cc" else 12345 for t in texts]
+
+            real_meter = align._bill
+
+            def watched(ctx, m):
+                charged = real_meter(ctx, m)
+                if charged:
+                    billed.append(m.index)
+                return charged
+
+            align._bill = watched
+            model.align = breaks_third
+            try:
+                got = c.post("/v1/audio/align", files=WAV,
+                             data={"segments": four}).json()
+                check("a result the reader cannot walk fails its own span, not the batch",
+                      [bool(r.get("error")) for r in (got.get("results") or [])]
+                      == [False, False, True, False], got.get("results"))
+                check("no span is billed twice when the group is halved and retried",
+                      sorted(billed) == [0, 1, 2, 3], billed)
+            finally:
+                align._bill = real_meter
+                model.align = fake_align
+            fail_on.clear()
+
+            # A script written without spaces that the unit split does not break up would
+            # otherwise be one unit, and the guard would read 1 against 48.
+            check("a long unspaced run is counted by its characters, not as one unit",
+                  align._dense(2.0, "\u3042" * 3000) > 0,
+                  align._dense(2.0, "\u3042" * 3000))
+            check("an ordinary long word is still one unit",
+                  align._dense(2.0, "internationalisation") == 0,
+                  align._dense(2.0, "internationalisation"))
+
+            # 🔴 The library deletes punctuation before it splits, so punctuation never
+            # becomes a unit and never separates its neighbours. Counting it doubled this
+            # sentence -- 8 units against the library's 4 -- which priced its memory at
+            # twice the cost and made the density guard twice as strict as it reads. The
+            # case is Chinese on purpose: in English the punctuation sits inside a
+            # whitespace-delimited word and the count comes out right by accident.
+            check("punctuation is deleted before the split, not counted as a unit",
+                  align._units_of("\u554a\u2026\u2026\u5bf9\uff0c\u5bf9\uff0c\u5bf9\u3002")
+                  == ["\u554a", "\u5bf9", "\u5bf9", "\u5bf9"],
+                  align._units_of("\u554a\u2026\u2026\u5bf9\uff0c\u5bf9\uff0c\u5bf9\u3002"))
+            check("and a run of punctuation does not keep its neighbours apart",
+                  align._units_of("a.b.c") == ["abc"], align._units_of("a.b.c"))
+            check("text that is only punctuation has no units at all",
+                  align._units_of("\u2026\u2026!!") == [], align._units_of("\u2026\u2026!!"))
+            # The apostrophe is the library's one exception to "letters and numbers only",
+            # and without it every contraction splits in two.
+            check("an apostrophe is kept, so a contraction stays one unit",
+                  align._units_of("don't stop") == ["don't", "stop"],
+                  align._units_of("don't stop"))
+
+            # 🔴 The library picks its tokeniser by language name and the name comes
+            # from the caller -- every segment carries its own, and nothing validates it.
+            # Japanese and Korean run nagisa and soynlp, which cut running kana and hangul
+            # into words, while the split above leaves a kana sentence as ONE unit: the
+            # span would be priced at a fraction of its cost and the density guard would
+            # wave it through. Counting a character a unit is an upper bound, wrong in the
+            # direction that costs a call rather than an out-of-memory.
+            kana = "\u3053\u3093\u306b\u3061\u306f\u307f\u306a\u3055\u3093"
+            check("a kana sentence is one unit on the space path, which is the trap",
+                  len(align._units_of(kana)) == 1, align._units_of(kana))
+            check("and is counted a character a unit when the caller says japanese",
+                  len(align._units_of(kana, "Japanese")) == len(kana),
+                  align._units_of(kana, "Japanese"))
+            check("the density note therefore sees a kana span the space path misses",
+                  align._dense(0.2, kana, "japanese") > 0 and align._dense(0.2, kana) == 0,
+                  (align._dense(0.2, kana, "japanese"), align._dense(0.2, kana)))
+            # \U0001f534 And it is a note, not a refusal: admission turns on duration alone,
+            # because that is the one the model cannot answer past. A span nothing can fit
+            # fails on its own and comes back as an error anyway; refusing it early would buy
+            # one call and risk losing the words of a span that would have aligned.
+            check("and density alone never refuses a span",
+                  align._admit(0.2, kana, "japanese") is None,
+                  align._admit(0.2, kana, "japanese"))
+            check("and the language name is matched however it is capitalised",
+                  align._units_of(kana, "KOREAN") == align._units_of(kana, "korean"),
+                  align._units_of(kana, "KOREAN"))
+
+            # ---- the span ceiling, re-derived from whatever checkpoint loaded -----------
+            # 🔴 The figure this build was written against is the shipped model's, worked
+            # out by hand. A model upgrade invalidates it without failing anything: a head
+            # with fewer classes or a coarser grid still answers 200 and saturates its
+            # timestamps, which is the one outcome the ceiling exists to prevent.
+            span_was = (align.EXPRESSIBLE_SPAN_SEC, align.MAX_SPAN_SEC)
+            try:
+                same = {"classes": 5000, "grid_ms": 80.0}
+                check("the shipped checkpoint re-derives the figure it was written against",
+                      align._expressible_span_sec(same) == span_was[0],
+                      (align._expressible_span_sec(same), span_was[0]))
+                with said() as heard_same:
+                    align._rebind_span_limit(same)
+                check("so nothing is rebound and nothing is said",
+                      (align.EXPRESSIBLE_SPAN_SEC, align.MAX_SPAN_SEC) == span_was
+                      and not heard_same.mentions("output head expresses"),
+                      (align.EXPRESSIBLE_SPAN_SEC, align.MAX_SPAN_SEC, heard_same.records))
+
+                # 🔴 This is the case that makes the pair worth having. With only the one
+                # above, deleting the whole rebinding leaves both of them green: a function
+                # that does nothing passes "it changed nothing" perfectly.
+                with said() as heard_diff:
+                    align._rebind_span_limit({"classes": 2500, "grid_ms": 80.0})
+                check("half the classes halves what the head can express",
+                      align.EXPRESSIBLE_SPAN_SEC == 200.0, align.EXPRESSIBLE_SPAN_SEC)
+                check("and the limit follows it down",
+                      align.MAX_SPAN_SEC == min(align._asked_span_sec, 200.0),
+                      align.MAX_SPAN_SEC)
+                check("and it says so, because that is the model having changed",
+                      heard_diff.mentions("output head expresses", "200.0"),
+                      heard_diff.records)
+                # The shipped default asks for 300, which a 200 s head cannot give. The
+                # import-time warning compared against the old figure, so without this the
+                # clamp happens with nothing having mentioned it.
+                check("and warns when the deployment asked for more than that",
+                      align._asked_span_sec <= 200.0
+                      or heard_diff.mentions("--max-span-seconds", "can express"),
+                      heard_diff.records)
+
+                # 🔴 The visible consequence, pinned on purpose. The configuration line is
+                # printed before the model loads, so after a rebind the startup log says one
+                # number and the refusals say another. On the shipped model they agree; a
+                # model that moved is exactly when they should not, and somebody reading the
+                # log needs that disagreement to be real rather than tidied away.
+                with said() as heard_cfg:
+                    align._say_config()
+                check("the configuration line still quotes the value it was called with",
+                      heard_cfg.mentions("longest span 200s"), heard_cfg.records)
+
+                # Read from a checkpoint that does not say, the ceiling stays where it is
+                # rather than disappearing: no grid means no derivation, not an unlimited
+                # span. 🔴 Restored first on purpose -- the fallback returns whatever the
+                # global currently holds, and the check above just moved it, so asking
+                # without restoring tests the wrong baseline.
+                # 🔴 Everything above calls the rebinding directly, which leaves the one
+                # thing that makes it matter untested: that loading a checkpoint actually
+                # calls it. `_load` needs torch and real weights, so it cannot be run
+                # here, and deleting its one call would leave every check above green
+                # while the ceiling never moved on any real machine. Read from the source
+                # instead -- a coarse check, and coarse beats absent.
+                import inspect as _inspect
+                _src = _inspect.getsource(align._load)
+                check("loading a checkpoint rebinds the ceiling, after the dims are read",
+                      "_rebind_span_limit(" in _src
+                      and _src.index("_dims()") < _src.index("_rebind_span_limit("),
+                      _src[:0])
+
+                align.EXPRESSIBLE_SPAN_SEC, align.MAX_SPAN_SEC = span_was
+                for blind in ({"classes": 5000, "grid_ms": None}, {"classes": 0}, None, {}):
+                    check("a checkpoint that does not say keeps the shipped figure",
+                          align._expressible_span_sec(blind) == span_was[0], blind)
+            finally:
+                align.EXPRESSIBLE_SPAN_SEC, align.MAX_SPAN_SEC = span_was
+
+            # ---- the correction that outlives the library ------------------------------
+            # 🔴 What makes the model survive the algorithm changing is that it checks
+            # itself on every call. These guard the checking, not the model.
+            keep = (align._scale, align._scale_seen)
+            try:
+                align._scale, align._scale_seen = 1.0, 0
+                # grid_ms is None because these stubs carry no timestamp_segment_time,
+                # which is the case the span ceiling falls back on rather than deriving.
+                # 🔴 The key is here because `_dims` now returns it, not because the check
+                # needed loosening: an exact-equality test has to name every field, and a
+                # field was added. Anyone reading this as a test bent to fit the code has
+                # it backwards.
+                d2 = {"hidden": 1024, "ffn": 3072, "classes": 5000, "width": 2,
+                      "grid_ms": None, "downsample": 480, "window": 50}
+                perpos = align._bytes_a_position(d2)
+                # A stub has no dimensions, so _observe has nothing to divide by and must
+                # leave the correction alone rather than invent one.
+                align._observe(100, int(100 * perpos * 3))
+                check("with no dimensions to read the correction does not move",
+                      (align._scale, align._scale_seen) == (1.0, 0),
+                      (align._scale, align._scale_seen))
+
+                align._state["model"] = types.SimpleNamespace(
+                    model=types.SimpleNamespace(
+                        config=types.SimpleNamespace(
+                            text_config=types.SimpleNamespace(hidden_size=1024,
+                                                              intermediate_size=3072),
+                            audio_config=types.SimpleNamespace(downsample_hidden_size=480,
+                                                               n_window=50),
+                            classify_num=5000),
+                        parameters=lambda: iter(())))
+                check("dimensions come from the checkpoint, not from the class defaults",
+                      align._dims() == d2, align._dims())
+                # 🔴 The shape the real checkpoint has: AutoModel loads the top-level
+                # config and the three fields hang off its thinker. The stub above was
+                # the flat shape, so the reader and its test agreed with each other and
+                # not with the model -- on the machine, _dims() answered None and the
+                # budget quietly fell back to doubling.
+                flat = align._state["model"].model.config
+                align._state["model"] = types.SimpleNamespace(
+                    model=types.SimpleNamespace(
+                        config=types.SimpleNamespace(thinker_config=flat),
+                        parameters=lambda: iter(())))
+                check("dimensions are found when the checkpoint nests them under thinker",
+                      align._dims() == d2, align._dims())
+
+                # 🔴 The grid is not where the other three are. Upstream reads
+                # `model.config.timestamp_segment_time` off the TOP-level config while
+                # these hang off the thinker, so a reader that only looks where
+                # `classify_num` is finds nothing on the real checkpoint -- and finding
+                # nothing is silent, because the ceiling then keeps its shipped value and
+                # every span under it behaves exactly as before.
+                nested = align._state["model"].model.config
+                nested.timestamp_segment_time = 80.0
+                check("the timestamp grid is read from the top-level config",
+                      (align._dims() or {}).get("grid_ms") == 80.0, align._dims())
+                del nested.timestamp_segment_time
+                flat.timestamp_segment_time = 40.0
+                check("and from the thinker when that is where it sits",
+                      (align._dims() or {}).get("grid_ms") == 40.0, align._dims())
+                del flat.timestamp_segment_time
+                check("and a checkpoint with neither reads None rather than failing",
+                      align._dims() == d2, align._dims())
+                # 🔴 Asked before the model is up, the encoder rate answers with a fallback
+                # 1.9x under this checkpoint's real figure. Caching that answer sets the
+                # price of every long span for the life of the process from one early call.
+                rate, align._encoder_rate = align._encoder_rate, None
+                model_stub, align._state["model"] = align._state["model"], None
+                try:
+                    fallback = align._encoder_positions_a_second()
+                    align._state["model"] = model_stub
+                    check("the encoder rate's fallback is not kept once the model can be read",
+                          align._encoder_positions_a_second() != fallback,
+                          (fallback, align._encoder_positions_a_second()))
+                finally:
+                    align._state["model"] = model_stub
+                    align._encoder_rate = rate
+                align._scale, align._scale_seen = 1.0, 0
+                for _ in range(align.SCALE_MEMORY * 3):
+                    align._observe(100, int(100 * perpos * 3))
+                check("a call costing three times its prediction pulls the correction to 3",
+                      2.5 < align._scale < 3.2, align._scale)
+
+                # 🔴 What the headroom is measured against, on a machine with no card:
+                # the three cases differ by which authority exists, and the wrong one is
+                # not a smaller number but somebody else's memory counted as ours.
+                fake = types.ModuleType("torch")
+                fake.cuda = types.SimpleNamespace(
+                    memory_reserved=lambda: 3 * 1024 ** 3,
+                    memory_allocated=lambda: 2 * 1024 ** 3,
+                    mem_get_info=lambda: (5 * 1024 ** 3, 13 * 1024 ** 3))
+                keep_torch = sys.modules.get("torch")
+                keep_env = (os.environ.get("CUDA_DEVICE_MEMORY_LIMIT_0"),
+                            os.environ.get("REQUIRED_GPU_MEMORY"))
+                sys.modules["torch"] = fake
+                try:
+                    os.environ.pop("REQUIRED_GPU_MEMORY", None)
+                    os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = "13312m"
+                    check("under an enforced limit the headroom is what HAMi will still "
+                          "give plus what the allocator already owns",
+                          align._headroom_bytes() == 6 * 1024 ** 3, align._headroom_bytes())
+                    # 🔴 A published limit whose counters were never rewritten: the device
+                    # still reports the whole card, so its free figure is somebody else's
+                    # memory. Told apart by the total, which the rewrite clamps to the
+                    # limit. The first version of this block asserted the rewritten case
+                    # against code that never read the total -- the same shape as the bug
+                    # these three commits started from.
+                    fake.cuda.mem_get_info = lambda: (30 * 1024 ** 3, 40 * 1024 ** 3)
+                    align._no_grant_logged = True
+                    check("a published limit with the card's own counters falls back to the "
+                          "limit, not to what the card calls free",
+                          align._headroom_bytes() == 11 * 1024 ** 3, align._headroom_bytes())
+                    fake.cuda.mem_get_info = lambda: (5 * 1024 ** 3, 13 * 1024 ** 3)
+                    os.environ["REQUIRED_GPU_MEMORY"] = "4Gi"
+                    check("an enforced limit outranks a declared one rather than being "
+                          "taken with it",
+                          align._headroom_bytes() == 6 * 1024 ** 3, align._headroom_bytes())
+                    # 🔴 HAMi's own parser is the authority for this variable, so these
+                    # cases are read off `get_limit_from_env`: last single character for
+                    # G/g, M/m, K/k, then a leading integer. Anything else is not a unit.
+                    # Reading `4Gi` as 4 GiB the way a Kubernetes table would is wrong by
+                    # 2^30 in the direction that over-sizes batches, and silently.
+                    for raw, want in (("4096m", 4 * 1024 ** 3), ("4g", 4 * 1024 ** 3),
+                                      ("500k", 500 * 1024), ("13312m", 13312 * 1024 ** 2),
+                                      ("4Gi", 4), ("4GiB", 4), ("4096MiB", 4096),
+                                      # 🔴 HAMi indexes the last character of the raw
+                                      # variable and its own file loader trims only a
+                                      # newline, so a trailing space survives and is not
+                                      # a unit. Stripping first reads this as 4 GiB: a
+                                      # factor of 2^20 the over-sizing way, silently.
+                                      ("4096m ", 4096), (" 4096m", 4 * 1024 ** 3),
+                                      ("-5g", 0), ("nonsense", 0), ("inf", 0)):
+                        os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = raw
+                        check("HAMi reads %r as %d bytes, and so does this" % (raw, want),
+                              align._hami_limit_bytes() == want,
+                              align._hami_limit_bytes())
+                    # 🔴 Zero is a value, not a failure: hami-core stores it and skips every
+                    # check against it, and one of this line's machines is set to `0m`. A
+                    # version that warned here sent whoever saw it hunting a typo that did
+                    # not exist.
+                    # 🔴 Tested through the log, not the return value. Zero and an
+                    # unreadable string both return zero -- that is the whole point of the
+                    # distinction -- so a check on the number passes either way, and did:
+                    # reverting this fix left all 886 checks green.
+                    for zero in ("0", "0m"):
+                        align._hami_unreadable_logged = False
+                        os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = zero
+                        with said() as heard:
+                            got = align._hami_limit_bytes()
+                        check("a limit of %r is HAMi's way of saying no limit, quietly"
+                              % zero,
+                              got == 0 and not heard.mentions("CUDA_DEVICE_MEMORY_LIMIT_0"),
+                              (got, heard.records))
+                    # 🔴 `str.isdigit()` is true for superscripts and for every other
+                    # script's digits, and `int()` refuses half of them: `"²m"` raised out
+                    # of a function every caller expects to return a number, which is an
+                    # invariant an earlier version wrote down and the rewrite dropped.
+                    for odd in ("\u00b2m", "\u0664\u0660\u0669\u0666m", "\u00bdg"):
+                        align._hami_unreadable_logged = False
+                        os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = odd
+                        check("a digit that is not 0-9 reads as no limit, and does not "
+                              "raise (%r)" % odd,
+                              align._hami_limit_bytes() == 0, odd)
+                    align._hami_unreadable_logged = False
+                    os.environ["CUDA_DEVICE_MEMORY_LIMIT_0"] = "nonsense"
+                    with said() as heard:
+                        got = align._hami_limit_bytes()
+                    check("and a string with no number in it is zero AND says so",
+                          got == 0 and heard.mentions("CUDA_DEVICE_MEMORY_LIMIT_0",
+                                                      "no number at all"),
+                          (got, heard.records))
+                    align._hami_unreadable_logged = False
+                    os.environ.pop("CUDA_DEVICE_MEMORY_LIMIT_0")
+                    check("with only a declared figure the headroom is that minus what is held",
+                          align._headroom_bytes() == 2 * 1024 ** 3, align._headroom_bytes())
+                    os.environ.pop("REQUIRED_GPU_MEMORY")
+                    # 🔴 None, not zero, and the difference decides whether batching
+                    # happens at all. Zero is an answer -- "a grant was read and it has
+                    # nothing left" -- so the solver returns 0.0, the caller takes it, and
+                    # the ramp that exists for exactly this machine never runs: every group
+                    # comes out one span closed by `memory` on a box where no memory
+                    # authority was ever found.
+                    check("with no authority at all the headroom is None, which is not the "
+                          "same answer as zero",
+                          align._headroom_bytes() is None, align._headroom_bytes())
+                    check("and the budget then solves to None, so the ramp takes over "
+                          "instead of the budget standing at zero",
+                          align._solve_budget() is None, align._solve_budget())
+                finally:
+                    if keep_torch is None:
+                        sys.modules.pop("torch", None)
+                    else:
+                        sys.modules["torch"] = keep_torch
+                    for name, value in zip(("CUDA_DEVICE_MEMORY_LIMIT_0",
+                                            "REQUIRED_GPU_MEMORY"), keep_env):
+                        if value is None:
+                            os.environ.pop(name, None)
+                        else:
+                            os.environ[name] = value
+
+                # 🔴 Two different zeros. Unreadable is None and hands back to the ramp;
+                # a readable grant with nothing left is 0.0 and must shrink the batch, not
+                # grow it. One value for both grew the batch when memory was tightest.
+                check("an unreadable grant is None, not zero",
+                      align._solve_budget() is None, align._solve_budget())
+                # 🔴 "There is no cost model" has to be audible wherever the budget came
+                # from. It used to be announced from the place that computes an opening
+                # budget, and ALIGN_FIXED_BUDGET returns before that -- so the one
+                # configuration a sweep runs in was the one where the model going dark
+                # printed nothing.
+                keep_dims, keep_flag = align._state.get("model"), align._dims_unreadable
+                keep_fixed2 = align.ALIGN_FIXED_BUDGET
+                try:
+                    # 🔴 A model that IS loaded and whose dimensions will not read, which is
+                    # the condition this warning is for. It used to be simulated with
+                    # `model = None`, and that state cannot occur after a load -- `_state`
+                    # takes the model once and nothing ever puts it back -- so None means
+                    # "not loaded yet", which is not a fault and is now not warned about.
+                    # The route at /v1/audio/align/telemetry has no readiness gate, so a
+                    # monitor scraping during startup would otherwise spend this one-shot
+                    # flag and the real condition would arrive to silence.
+                    align._state["model"] = object()
+                    align.ALIGN_FIXED_BUDGET, align._dims_unreadable = 8800.0, False
+                    with said() as heard:
+                        align._dims()
+                    check("an unreadable checkpoint says there is no cost model, even "
+                          "with the budget pinned",
+                          heard.mentions("no cost model"), heard.records)
+                    align._dims_unreadable = False
+                    with said() as heard2:
+                        align._dims()
+                        align._dims()
+                    check("and says it once, not once a call",
+                          len([m for m in heard2.records if "no cost model" in m]) <= 1,
+                          heard2.records)
+                finally:
+                    align._state["model"] = keep_dims
+                    align.ALIGN_FIXED_BUDGET = keep_fixed2
+                    align._dims_unreadable = keep_flag
+                spent, align._headroom_bytes = align._headroom_bytes, lambda: 0
+                try:
+                    check("a grant with nothing left solves to zero, which is not None",
+                          align._solve_budget() == 0.0, align._solve_budget())
+                finally:
+                    align._headroom_bytes = spent
+                grant, align._headroom_bytes = align._headroom_bytes, lambda: 4 * 1024 ** 3
+                try:
+                    align._scale, align._scale_seen = 1.0, 0
+                    one = align._solve_budget()
+                    align._scale = 2.0
+                    two = align._solve_budget()
+                    check("doubling the correction halves the budget it solves for",
+                          one > 0 and abs(two * 2 - one) < one * 0.02, (one, two))
+                    check("the solved budget is half the grant divided by a position",
+                          abs(one - align.BUDGET_HEADROOM * 4 * 1024 ** 3
+                              / align._bytes_a_position(d2)) < 1, one)
+                finally:
+                    align._headroom_bytes = grant
+                # 🔴 Tested against the rule, not against the counter: with no CUDA here
+                # the counter path returns zero whatever the rule says, so a version that
+                # had the comparison backwards passed this until it was split out.
+                check("a call that never rose above an older peak reports nothing",
+                      align._used(0, 500, 400) == 0, align._used(0, 500, 400))
+                check("a call that did rise reports what it added",
+                      align._used(100, 500, 900) == 800, align._used(100, 500, 900))
+            finally:
+                align._scale, align._scale_seen = keep
+                align._state["model"] = model
+
+            # ---- admission: two refusals that must not read alike ----------------------
+            align.MAX_SPAN_SEC = 1.5
+            over = c.post("/v1/audio/align", files=WAV,
+                          data={"segments": '[{"start":0,"end":1,"text":"hi"},'
+                                            '{"start":1,"end":4,"text":"yo"}]'}).json()
+            check("a span longer than the model aligns says so",
+                  "aligns at most" in ((over.get("results") or [{}, {}])[1].get("error") or ""),
+                  over.get("results"))
+            align.MAX_SPAN_SEC = was[2]
+            dense = ("[{\"start\":0,\"end\":1,\"text\":\"hi\"},"
+                     "{\"start\":1,\"end\":2,\"text\":\"%s\"}]"
+                     % ("\u4f60" * (int(align.MAX_UNITS_A_SECOND) + 5)))
+            got = c.post("/v1/audio/align", files=WAV, data={"segments": dense}).json()
+            res = got.get("results") or []
+            check("a transcript too long for its audio is ALIGNED, not refused",
+                  len(res) == 2 and not res[0].get("error") and not res[1].get("error"), res)
+            check("and both spans in that request come back with units",
+                  bool((res[0] or {}).get("units")) and bool((res[1] or {}).get("units")),
+                  res)
+    finally:
+        (align.BATCH, align._budget, align.MAX_SPAN_SEC) = was
 
 
 def t_whisper():
@@ -3580,7 +5423,8 @@ def main():
                            ("diar_speakrs models dir", t_diar_speakrs_models_dir, "speakrs"),
                            ("diar_speakrs openvino models dir",
                             t_diar_speakrs_openvino_models_dir, "speakrs"),
-                           ("diar_stream offline", t_diar_stream_offline, "nemo")):
+                           ("diar_stream offline", t_diar_stream_offline, "nemo"),
+                           ("align batching", t_align_batching, "qwen")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base
         try:

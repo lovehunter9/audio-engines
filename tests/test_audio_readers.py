@@ -108,7 +108,7 @@ class WhoMeasuresWhat(unittest.TestCase):
     """🔴 The half that keeps paying. The align capability read the narrow one for a day and"""
 
     DECLARED = {
-        "align": (("audioio.probe_seconds",), "passes through: ffprobe may be absent, and a clip "
+        "align": (("limits.duration",), "passes through: ffprobe may be absent, and a clip "
                                      "three readers cannot measure is one the engine fails "
                                      "on by itself"),
         "diar": (("Bounds",), "shared upload guard"),

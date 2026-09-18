@@ -100,6 +100,10 @@ _MOUNTS = {
     ],
     ("align", "align"): [
         ("POST", "/v1/audio/align", "Forced alignment (single / batch segments)", True),
+        # Advertised because it is mounted: the contract's rule is that the two never differ,
+        # and a diagnostic route is the easiest kind to mount and forget to describe.
+        ("GET", "/v1/audio/align/telemetry",
+         "What this engine has seen of the card and the container it shares", False),
     ],
     ("vad", "vad"): [
         ("POST", "/v1/audio/vad", "Voice activity detection (speech segments)", True),

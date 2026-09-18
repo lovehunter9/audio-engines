@@ -230,6 +230,62 @@ serves the first match and says so in the log.
 
 > Keep this table in sync whenever a base is added or its capabilities change.
 
+### Forced alignment: four flags, and what each one buys
+
+`align` runs its own instance — its own checkpoint, so it always does — and computes
+how many spans ride in one model call. What an operator may set is four flags, and
+each one is here because it has a direction a deployment can want:
+
+| flag | default | raising it |
+|---|---|---|
+| `--align-batch` | **on** | groups spans instead of sending one a call; a call holds more of the card. ⚠️ The output is NOT byte-identical: on the meeting corpus this branch measured its throughput against, 226 of 17550 timestamps moved (1.29%) -- median one 80 ms cell, largest 2240 ms -- with 0 spans differing in text or length. Grouping changes what a call is padded to, and the timestamps follow. Independent of `--no-kv-cache`: the cost factors follow that flag on their own, so either flag alone is priced correctly. With the cache on a position costs about five times as much, so the same grant buys a correspondingly smaller group. 🔴 **On by default as of this branch**, so a deployment that sets nothing gets grouping and the timestamp differences above; write `--align-batch off` for one span a call, which is what shipped before. |
+| `--no-kv-cache` | off | stops the checkpoint building a cache nothing reads: a position costs 28 kB instead of 138 kB. Six span shapes, every output digest unchanged. ⚠️ **That is a price a position, not a saving on every request.** It buys room where a call's peak is set by the language model -- a group of short spans, which is what `--align-batch` creates. A single long span is bounded by the encoder, which holds no cache, and there it saves nothing: measured on the shipped 4 GiB grant, a 30 s span occupied 238 MB with the cache and 238 MB without, because the count of positions rises by as much as their price falls |
+| `--gpu-budget-fraction` | `0.5` | the share of what the grant leaves that one call may reach for. Lower is slower; higher is faster and more likely to have a call refused by the card. A refusal is not a `503` — the engine splits the group and retries, and the caller is not told; it shows as an `ooms` count in the telemetry and a `WARNING` in the log |
+| `--max-span-seconds` | `300` | the longest span the model can answer for. The output head is 5000 classes on an 80 ms grid, so 400 s is the last timestamp it can express — past it the argmax saturates and the answer is wrong rather than missing |
+
+The batch response carries two booleans that answer different questions: `batch` means the request used the multi-segment form, which predates this flag and is true either way; `grouped` says whether `--align-batch` put several spans into one model call.
+
+#### What these four accept
+
+| flag | accepted | anything else |
+|---|---|---|
+| `--align-batch`, `--no-kv-cache` | `1`, `true`, `yes`, `on`. The bare flag counts as on, and so does `--align-batch=` with nothing after the `=` -- an unset chart value renders that way, and it means the flag was written, not that it was turned off | the default is used, and startup logs `is not on or off; using <default>`. ⚠️ This changed with the default: while every switch defaulted off a bad value landed on the default anyway, so nothing was said |
+| `--gpu-budget-fraction`, `--max-span-seconds` | a number | the default is used, and startup logs which flag could not be read and what it fell back to |
+
+⚠️ `off`, `0`, `no` and `false` all turn a switch off and are not a mistake, so they say
+nothing. It is the value in neither list -- `--align-batch enable` -- that falls back and warns.
+
+⚠️ This is how the shared `ENGINE_ARGS` parser reads any flag, not something `align` does
+differently; the table is here because these are the four flags this section is about.
+
+
+Everything else that moves a number is a constant. `--budget-positions` and
+`--group-slack-positions` exist so a sweep has one variable, and live in the bench
+chart's injected copy rather than here; the sweep found 20, 50 and 100 to be one
+result on the clock, so exposing the threshold would ask an operator to tune a
+number the measurement says is flat, in a unit nobody owns.
+
+**A group the card refuses is split and retried, and nothing is remembered.** Every
+member of it is innocent — the problem is how many rode together — so the group
+halves, both halves go again, and the request completes. The budget is not lowered
+and the next request is sized the same way. An earlier version remembered the failed
+cost as a ceiling that only ever fell, which recovered just as well and left the
+process at one span a call for its whole life, at about a tenth of the throughput,
+with a complete response and an error count of zero. **The splitting was never the
+problem; the memory was.**
+
+The caller is not told. A prediction that was wrong about this machine is ours to
+find, not theirs to handle — it is a `WARNING` in the log and an `ooms` count in the
+telemetry, and what it points at is `--gpu-budget-fraction` and the two factors. A
+group that fails for any other reason is one member the library could not read, so
+each member goes alone and only the bad one comes back an error. A group of one that
+fails is that span, which retrying cannot change.
+
+`GET /v1/audio/align/telemetry` is what this engine has seen of the card and the
+container it shares — read-only, a bounded ring of recent requests, and
+`gpu.outside` (free plus our own reserved pool) is the field that moves only when
+another container does.
+
 ### Per-base notes worth knowing before editing
 
 **`qwen`.** One CUDA-torch image. `qwen-asr` is a single PyPI package: ASR
