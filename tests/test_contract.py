@@ -2176,8 +2176,9 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("causal_attn_bias", kv)
         from wrapper.caps import firered
         fr_src = inspect.getsource(firered._install_firered_backbone)
-        self.assertIn(".ov-firered-v6", fr_src)
+        self.assertIn(".ov-firered-v7", fr_src)
         self.assertIn("patch_size", fr_src)
+        self.assertIn("dynamize_ranks", fr_src)
         self.assertIn("torch.triu", inspect.getsource(tts_ov.causal_attn_bias))
 
     def test_causal_attn_bias_prefill_and_patch_decode(self):

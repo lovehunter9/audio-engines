@@ -86,14 +86,21 @@ def kv_meta(config):
     return n_layers, n_kv, int(head_dim)
 
 
-def _dynamize_time(ov_model):
-    """Prefill embeds are [B,T,H]; cached K/V are [B,kv,T,D]. T must grow."""
+def _dynamize_time(ov_model, ranks=(2, 3, 4)):
+    """Prefill embeds are [B,T,H]; cached K/V are [B,kv,T,D]. T must grow.
+
+    FireRed decode is always q=patch_size (4). Dynamizing that axis freezes the
+    q×q causal tail into a Select that no longer matches at runtime. Leave rank
+    3 static there; still dynamize the mask (rank 2) and past K/V (rank 4).
+    """
     mapping = {}
     for inp in ov_model.inputs:
         shape = inp.get_partial_shape()
         if shape.rank.is_dynamic:
             continue
         rank = shape.rank.get_length()
+        if rank not in ranks:
+            continue
         if rank == 2 or rank == 3:
             shape[1] = -1
         elif rank == 4:
@@ -109,7 +116,7 @@ def _dynamize_time(ov_model):
     return ov_model
 
 
-def compile_causal(mod, example, xml, stamp, device):
+def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
     """Like compile_module, but dynamize the time axis before save."""
     import numpy as np
     import openvino as ov
@@ -122,7 +129,9 @@ def compile_causal(mod, example, xml, stamp, device):
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
         mod.eval()
         with torch.inference_mode():
-            ov_model = _dynamize_time(ov.convert_model(mod, example_input=example))
+            ov_model = _dynamize_time(
+                ov.convert_model(mod, example_input=example), dynamize_ranks
+            )
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
