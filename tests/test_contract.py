@@ -1169,5 +1169,36 @@ class NvmlFallbackIsOptIn(unittest.TestCase):
         self.assertIn("as NVML reports it", body)
 
 
+class OnnxPinTests(unittest.TestCase):
+    """The version the images install and the version CI tests against are one version.
+
+    bases/speakrs-ov/deps.Dockerfile says onnx decides whether the derived model is accepted
+    -- the derivation runs infer_shapes and the checker over a graph it edited -- and its
+    comment states the image and the test run against the same release. Nothing held that
+    claim up: the workflow installed onnx unpinned, so the two could differ for months with
+    every run green. This is the cheapest thing that holds it, because it compares the two
+    files as text and needs neither onnx installed nor a particular host.
+    """
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _pins(self, path, pattern):
+        with open(os.path.join(self.ROOT, path), encoding="utf-8") as fh:
+            return re.findall(pattern, fh.read())
+
+    def test_ci_installs_the_version_the_images_install(self):
+        ci = self._pins(".github/workflows/build-image.yml", r"onnx==([0-9][^\s\"']*)")
+        self.assertEqual(len(ci), 1, "expected exactly one onnx pin in build-image.yml")
+        images = []
+        for dockerfile in sorted(glob.glob(os.path.join(self.ROOT, "bases", "*",
+                                                        "deps.Dockerfile"))):
+            rel = os.path.relpath(dockerfile, self.ROOT)
+            images += [(rel, v) for v in self._pins(rel, r"onnx==([0-9][^\s\"']*)")]
+        self.assertTrue(images, "no base pins onnx; drop this test with the last one")
+        for rel, version in images:
+            self.assertEqual(version, ci[0],
+                             "%s installs onnx %s, CI tests against %s" % (rel, version, ci[0]))
+
+
 if __name__ == "__main__":
     unittest.main()

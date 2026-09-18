@@ -46,7 +46,13 @@ jobs:
         # onnx is here for the same reason ffmpeg is below: without it the OpenVINO
         # model-derivation case returns early and its assertions never run, while the
         # suite still prints that everything passed.
-        run: python -m pip install -q fastapi httpx numpy onnx python-multipart uvicorn
+        #
+        # 🔴 Pinned to the version bases/speakrs-ov/deps.Dockerfile installs, which is what
+        # that file's comment already claims ("the image and the check agree"). Unpinned they
+        # drift in silence and in either direction: a release that tightens infer_shapes or
+        # the checker fails this job against a version no image runs, or passes it on
+        # behaviour no image has. test_contract.py asserts the two stay equal.
+        run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart uvicorn
       - name: install ffmpeg
         # The tempo assertions for FireRed/Breeze long text shell out to ffmpeg, and skipped
         # themselves on every run without it -- on the one path where a wrong filter chain is
