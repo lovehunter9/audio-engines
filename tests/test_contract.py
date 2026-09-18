@@ -2190,6 +2190,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertNotIn("create_causal_mask", stack)
         self.assertIn("rotary_emb", stack)
         self.assertIn("unordered_map", stack)
+        self.assertIn("wdtype", stack)
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):
