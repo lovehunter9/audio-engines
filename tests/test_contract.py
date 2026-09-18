@@ -730,6 +730,37 @@ class EngineArgsTest(unittest.TestCase):
         self.assertTrue(any("given with no value" in line for line in log.lines), log.lines)
         self.assertFalse(any("<" in line for line in log.lines), log.lines)
 
+    def test_a_switch_value_in_neither_word_list_falls_back_and_says_so(self):
+        """🔴 It used to read as OFF in silence, while the same typo on a number-taking flag
+        was reported. That asymmetry cost nothing while every switch defaulted off -- a
+        misspelling landed on the default -- and stopped costing nothing the day one
+        defaulted ON: `--align-batch enable` turned the feature off and the log said nothing.
+        """
+        log = _CollectingLog()
+        args = contract.EngineArgs("--align-batch enable")
+        self.assertIs(args.switch("--align-batch", True), True,
+                      "an unrecognised value silently overrode a default of on")
+        args.warn_unclaimed(log)
+        self.assertTrue(any("--align-batch" in m and "enable" in m for m in log.lines),
+                        "nothing was said about a value the parser could not read: %r"
+                        % (log.lines,))
+
+    def test_the_words_that_do_read_are_still_silent(self):
+        # ⚠️ The other half. A warning on a value that IS understood would train operators
+        # to ignore the line, which is how the number readers' warning stays useful.
+        for raw, default, want in (("--align-batch off", True, False),
+                                   ("--align-batch 0", True, False),
+                                   ("--align-batch on", False, True),
+                                   ("--align-batch", False, True),
+                                   ("--align-batch=", False, True)):
+            log = _CollectingLog()
+            args = contract.EngineArgs(raw)
+            self.assertIs(args.switch("--align-batch", default), want, raw)
+            args.warn_unclaimed(log)
+            self.assertEqual([m for m in log.lines if "--align-batch" in m], [],
+                             "%r is a value this parser understands, so it must not warn"
+                             % raw)
+
     def test_given_separates_a_valueless_flag_from_an_absent_one(self):
         self.assertTrue(self._args("--repetition-fallback-tokens-per-sec").given(
             "--repetition-fallback-tokens-per-sec"))
