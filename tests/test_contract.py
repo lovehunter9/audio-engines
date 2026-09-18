@@ -2167,13 +2167,44 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 
         src = inspect.getsource(breeze._install_breeze_ov)
         self.assertNotIn("leaving official eager on CPU", src)
-        self.assertIn("breeze_backbone_full", src)
+        self.assertIn("breeze_backbone_decode", src)
         self.assertIn("compile_causal", src)
-        stack = inspect.getsource(tts_ov.causal_full_module)
-        self.assertNotIn("create_causal_mask", stack)
-        self.assertIn("rotary_emb", stack)
-        self.assertIn("unordered_map", stack)
-        self.assertIn("wdtype", stack)
+        kv = inspect.getsource(tts_ov.causal_kv_module)
+        self.assertNotIn("create_causal_mask", kv)
+        self.assertIn("self_attn", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("wdtype", kv)
+
+    def test_kv_runner_appends_cache(self):
+        try:
+            import numpy as np
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        def prefill(arr, mask):
+            t = arr.shape[1]
+            return [
+                np.ones((1, t, arr.shape[2]), dtype=np.float32),
+                np.zeros((1, 2, t, 8), dtype=np.float32),
+                np.ones((1, 2, t, 8), dtype=np.float32),
+            ]
+
+        def decode(arr, mask, *past):
+            t = past[0].shape[-2] + arr.shape[1]
+            return [
+                np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32),
+                np.zeros((1, 2, t, 8), dtype=np.float32),
+                np.ones((1, 2, t, 8), dtype=np.float32),
+            ]
+
+        runner = tts_ov.KvRunner(prefill, decode, 1)
+        first = runner.step(torch.zeros(1, 4, 3))
+        self.assertEqual(tuple(first.shape), (1, 4, 3))
+        self.assertEqual(runner.prefix_len, 4)
+        nxt = runner.step(torch.zeros(1, 1, 3))
+        self.assertEqual(tuple(nxt.shape), (1, 1, 3))
+        self.assertEqual(runner.prefix_len, 5)
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):

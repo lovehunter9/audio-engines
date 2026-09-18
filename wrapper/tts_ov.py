@@ -212,6 +212,156 @@ class FullSeqRunner:
         return hidden[:, -q:, :]
 
 
+def _rotate_half(x):
+    import torch
+
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rope(q, k, cos, sin):
+    cos = cos.unsqueeze(1)
+    sin = sin.unsqueeze(1)
+    return (q * cos) + (_rotate_half(q) * sin), (k * cos) + (_rotate_half(k) * sin)
+
+
+def _repeat_kv(x, n_rep):
+    if n_rep == 1:
+        return x
+    b, n_kv, slen, head_dim = x.shape
+    return (
+        x[:, :, None, :, :]
+        .expand(b, n_kv, n_rep, slen, head_dim)
+        .reshape(b, n_kv * n_rep, slen, head_dim)
+    )
+
+
+def causal_kv_module(inner, with_past):
+    """One transformer step with tensor K/V. Never calls official forward or Cache."""
+    import torch
+    import torch.nn as nn
+
+    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
+        raise RuntimeError("backbone missing layers/norm/rotary_emb for kv export")
+    cfg = getattr(inner, "config", None)
+    if cfg is not None:
+        cfg._attn_implementation = "eager"
+    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
+
+    class _Step(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask, *past):
+            wdtype = next(self.inner.parameters()).dtype
+            hidden = inputs_embeds.to(dtype=wdtype)
+            q_len = hidden.shape[1]
+            past_len = 0
+            if with_past:
+                past_len = past[0].shape[-2]
+            total = past_len + q_len
+            pos = torch.arange(
+                past_len, total, device=hidden.device
+            ).unsqueeze(0)
+            min_v = torch.finfo(hidden.dtype).min
+            attn = hidden.new_zeros(1, 1, q_len, total)
+            if not with_past:
+                causal = torch.triu(
+                    torch.ones(q_len, q_len, dtype=torch.bool, device=hidden.device), 1
+                )
+                attn = attn.masked_fill(causal, min_v)
+            keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, total)
+            attn = attn.masked_fill(~keep, min_v)
+            rope = self.inner.rotary_emb(hidden, pos)
+            present = []
+            for i, layer in enumerate(self.inner.layers[:n_layers]):
+                pk = pv = None
+                if with_past:
+                    pk = past[2 * i].to(dtype=wdtype)
+                    pv = past[2 * i + 1].to(dtype=wdtype)
+                hidden, nk, nv = _layer_kv(layer, hidden, rope, attn, pk, pv)
+                present.extend([nk, nv])
+            hidden = self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
+            out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
+            return (hidden, *out_kv)
+
+    return _Step()
+
+
+def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
+    """input_ln → qkv/rope/cat → eager attn → o_proj → mlp. Tensor cache only."""
+    import torch
+
+    attn = layer.self_attn
+    residual = hidden
+    h = layer.input_layernorm(hidden)
+    b, t, _ = h.shape
+    head_dim = int(attn.head_dim)
+    n_q = attn.q_proj.out_features // head_dim
+    n_kv = attn.k_proj.out_features // head_dim
+    q = attn.q_proj(h).view(b, t, n_q, head_dim)
+    k = attn.k_proj(h).view(b, t, n_kv, head_dim)
+    v = attn.v_proj(h).view(b, t, n_kv, head_dim)
+    if getattr(attn, "q_norm", None) is not None:
+        q = attn.q_norm(q)
+    if getattr(attn, "k_norm", None) is not None:
+        k = attn.k_norm(k)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    cos, sin = rope
+    q, k = _apply_rope(q, k, cos, sin)
+    if pk is not None:
+        k = torch.cat([pk, k], dim=2)
+        v = torch.cat([pv, v], dim=2)
+    n_rep = n_q // n_kv
+    k_rep = _repeat_kv(k, n_rep)
+    v_rep = _repeat_kv(v, n_rep)
+    scale = float(getattr(attn, "scaling", head_dim ** -0.5))
+    scores = torch.matmul(q, k_rep.transpose(2, 3)) * scale
+    scores = scores + attn_mask
+    probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
+    out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
+    h = residual + attn.o_proj(out)
+    h = h + layer.mlp(layer.post_attention_layernorm(h))
+    return h, k, v
+
+
+class KvRunner:
+    """Prefill once, then decode with tensor K/V. No full-seq rerun."""
+
+    def __init__(self, prefill, decode, n_layers):
+        self.prefill = prefill
+        self.decode = decode
+        self.n_layers = n_layers
+        self.kv = None
+
+    def reset(self):
+        self.kv = None
+
+    @property
+    def prefix_len(self):
+        if self.kv is None:
+            return 0
+        return int(self.kv[0].shape[-2])
+
+    def step(self, embeds):
+        import numpy as np
+        import torch
+
+        q = int(embeds.shape[1])
+        arr = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        if self.kv is None:
+            out = self.prefill(arr, mask_np(None, q, 0))
+        else:
+            out = self.decode(arr, mask_np(None, q, self.prefix_len), *self.kv)
+        hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
+        self.kv = [np.ascontiguousarray(out[i]) for i in range(1, 1 + 2 * self.n_layers)]
+        return hidden[:, -q:, :]
+
+
 def causal_step_module(inner, n_layers, with_past):
     """Kept for tests. Do not export this: DynamicCache does not trace."""
     import torch.nn as nn

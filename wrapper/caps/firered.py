@@ -544,11 +544,7 @@ def _install_firered_ov(instruct, path, device):
 
 
 def _install_firered_backbone(core, path, device):
-    """Replace _backbone_one_step: 1.7B Qwen3, one full-seq GPU IR.
-
-    Same DynamicCache tracing hole as Breeze intel3. Official generate only
-    threads the cache object back in; we stash prefix embeds ourselves.
-    """
+    """Replace _backbone_one_step: 1.7B Qwen3 prefill+decode with tensor K/V."""
     import torch
 
     from .. import tts_ov
@@ -557,17 +553,30 @@ def _install_firered_backbone(core, path, device):
     inner = getattr(llm, "model", None) if llm is not None else None
     if inner is None:
         raise RuntimeError("FireRed tts_core has no backbone_llm.model")
-    hidden = int(inner.config.hidden_size)
+    cfg = inner.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
     example_t = 16
-    embeds = torch.zeros(1, example_t, hidden, dtype=torch.float32)
-    mask = torch.ones(1, example_t, dtype=torch.long)
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
     src = str(path)
-    _, xml, stamp = tts_ov.ir_paths(src, "firered_llm_full", ".ov-firered-v3")
-    compiled = tts_ov.compile_causal(
-        tts_ov.causal_full_module(inner),
-        (embeds, mask), xml, stamp, device,
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v4")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v4")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
     )
-    runner = tts_ov.FullSeqRunner(compiled)
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+    runner = tts_ov.KvRunner(prefill, decode, n_layers)
 
     def _backbone_one_step(input_embeds, cache=None):
         if input_embeds.shape[0] != 1:
@@ -581,7 +590,7 @@ def _install_firered_backbone(core, path, device):
         return hidden, True
 
     core._backbone_one_step = _backbone_one_step
-    log.info("firered Qwen3 backbone full-seq on OpenVINO %s", device)
+    log.info("firered Qwen3 backbone prefill+decode kv on OpenVINO %s", device)
 
 
 def build_app(supports):
