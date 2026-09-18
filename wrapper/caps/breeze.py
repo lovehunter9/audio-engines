@@ -521,7 +521,9 @@ def _install_breeze_text_ov(model, path, device):
                 np.ascontiguousarray(attn.numpy()),
                 np.ascontiguousarray(pos_ids.numpy()),
             )[0]
-            hidden.append(torch.from_numpy(np.ascontiguousarray(out[0, :length])))
+            hidden.append(
+                torch.from_numpy(np.ascontiguousarray(out[0, :length])).to(dtype=seg.dtype)
+            )
         return hidden, []
 
     model._batched_text_encoder_forward = _batched_text_encoder_forward.__get__(
