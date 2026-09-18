@@ -562,15 +562,16 @@ def _install_firered_backbone(core, path, device):
     cfg = inner.config
     n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
+    q_dec = int(getattr(core, "patch_size", 4) or 4)
     example_t = 16
-    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
-    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    embeds_dec = torch.zeros(1, q_dec, hidden, dtype=torch.float32)
+    mask_dec = torch.ones(1, example_t + q_dec, dtype=torch.long)
     past = []
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
     src = str(path)
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v11")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v12")
     decode = tts_ov.compile_causal(
         tts_ov.causal_kv_module(inner, True),
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
@@ -615,6 +616,12 @@ def _install_firered_backbone(core, path, device):
             n_step["i"] = 1
             _log_step(input_embeds, hidden)
             return hidden, True
+        q = int(input_embeds.shape[1])
+        if q != q_dec:
+            raise RuntimeError(
+                "firered ov decode is compiled for q=%d (patch_size); got %d"
+                % (q_dec, q)
+            )
         t0 = time.perf_counter()
         hidden = runner.step(input_embeds)
         times["ar"] += time.perf_counter() - t0
@@ -624,7 +631,10 @@ def _install_firered_backbone(core, path, device):
         return hidden, True
 
     core._backbone_one_step = _backbone_one_step
-    log.info("firered official prefill + stateful decode q=1 on OpenVINO %s", device)
+    log.info(
+        "firered official prefill + stateful decode q=%d on OpenVINO %s",
+        q_dec, device,
+    )
 
 
 def build_app(supports):
