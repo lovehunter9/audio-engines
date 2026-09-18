@@ -488,7 +488,12 @@ def _load():
 
 
 def _install_firered_ov(instruct, path, device):
-    """Official generate() loop stays. AR backbone + DiT + patch_encoder on GPU IR."""
+    """Official generate() loop stays. DiT + patch_encoder on GPU IR.
+
+    intel12 put decode on OpenVINO but copied 28×2 K/V to host every token:
+    zh-m RTF 26 vs intel3 official-eager backbone RTF 16. Leave the 1.7B AR
+    on official eager until K/V can stay on the device.
+    """
     import torch
 
     from .. import tts_ov
@@ -496,7 +501,7 @@ def _install_firered_ov(instruct, path, device):
     core = getattr(instruct, "tts_core", None)
     if core is None:
         raise RuntimeError("FireRedTTS3Instruct has no tts_core")
-    _install_firered_backbone(core, path, device)
+    log.info("firered Qwen3 backbone official eager; DiT+patch on OpenVINO %s", device)
     dit = core.dit
     patch = core.patch_encoder
     hist = int(core.history_length)
