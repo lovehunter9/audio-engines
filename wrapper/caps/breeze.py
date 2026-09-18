@@ -706,9 +706,9 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
         ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
     src = str(path)
-    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-v7")
-    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-v7")
-    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-v7")
+    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-quant-v8")
+    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-pre-v8")
+    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-tail-v8")
     compiled_q = tts_ov.compile_static(_Quant(dec), example, q_xml, q_stamp, device)
     compiled_pre = tts_ov.compile_static(_Pre(dec), ex_q, p_xml, p_stamp, device)
     compiled_tail = tts_ov.compile_static(
