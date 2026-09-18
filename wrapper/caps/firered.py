@@ -544,8 +544,11 @@ def _install_firered_ov(instruct, path, device):
 
 
 def _install_firered_backbone(core, path, device):
-    """Replace _backbone_one_step: that is the 1.7B Qwen3 AR, every token."""
-    import numpy as np
+    """Replace _backbone_one_step: 1.7B Qwen3, one full-seq GPU IR.
+
+    Same DynamicCache tracing hole as Breeze intel3. Official generate only
+    threads the cache object back in; we stash prefix embeds ourselves.
+    """
     import torch
 
     from .. import tts_ov
@@ -554,59 +557,31 @@ def _install_firered_backbone(core, path, device):
     inner = getattr(llm, "model", None) if llm is not None else None
     if inner is None:
         raise RuntimeError("FireRed tts_core has no backbone_llm.model")
-    cfg = inner.config
-    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
-    hidden = int(cfg.hidden_size)
+    hidden = int(inner.config.hidden_size)
     example_t = 16
-    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
-    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
-    mask_pre = torch.ones(1, example_t, dtype=torch.long)
-    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
-    past = []
-    for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+    embeds = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    mask = torch.ones(1, example_t, dtype=torch.long)
     src = str(path)
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "firered_llm_prefill", ".ov-firered-v2")
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "firered_llm_decode", ".ov-firered-v2")
-    prefill = tts_ov.compile_causal(
-        tts_ov.causal_step_module(inner, n_layers, False),
-        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    _, xml, stamp = tts_ov.ir_paths(src, "firered_llm_full", ".ov-firered-v3")
+    compiled = tts_ov.compile_causal(
+        tts_ov.causal_full_module(inner),
+        (embeds, mask), xml, stamp, device,
     )
-    decode = tts_ov.compile_causal(
-        tts_ov.causal_step_module(inner, n_layers, True),
-        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
-    )
+    runner = tts_ov.FullSeqRunner(compiled)
 
     def _backbone_one_step(input_embeds, cache=None):
-        arr = np.ascontiguousarray(input_embeds.detach().float().cpu().numpy())
-        if arr.shape[0] != 1:
+        if input_embeds.shape[0] != 1:
             raise RuntimeError(
-                "firered ov backbone is compiled for batch=1; got %s" % (arr.shape,)
+                "firered ov backbone is compiled for batch=1; got %s"
+                % (tuple(input_embeds.shape),)
             )
         if cache is None:
-            out = prefill(arr, tts_ov.mask_np(None, arr.shape[1], 0))
-        else:
-            flat = [
-                np.ascontiguousarray(
-                    (t.detach() if hasattr(t, "detach") else torch.as_tensor(t))
-                    .float().cpu().numpy()
-                )
-                for t in tts_ov.flatten_kv(cache)
-            ]
-            out = decode(arr, tts_ov.mask_np(None, arr.shape[1], flat[0].shape[-2]), *flat)
-        hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
-        new_cache = tts_ov.unflatten_kv(
-            [torch.from_numpy(np.ascontiguousarray(out[i])) for i in range(1, len(out))],
-            n_layers,
-        )
-        return hidden, new_cache
+            runner.reset()
+        hidden = runner.step(input_embeds)
+        return hidden, True
 
     core._backbone_one_step = _backbone_one_step
-    log.info(
-        "firered Qwen3 backbone prefill+decode on OpenVINO %s layers=%d",
-        device, n_layers,
-    )
+    log.info("firered Qwen3 backbone full-seq on OpenVINO %s", device)
 
 
 def build_app(supports):
