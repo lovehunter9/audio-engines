@@ -631,27 +631,38 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     if audio_tokenizer is None or getattr(audio_tokenizer, "model", None) is None:
         raise RuntimeError("Breeze audio_tokenizer.model is required for codec OV")
     dec = audio_tokenizer.model.decoder
+    dec.eval()
+    for p in dec.parameters():
+        p.requires_grad_(False)
     n_q = int(getattr(dec.config, "num_quantizers", 16))
     ctx_frames = 25
     example_t = 32
 
     class _Codec(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
+            self.quantizer = decoder.quantizer
+            self.pre_conv = decoder.pre_conv
+            self.pre_transformer = decoder.pre_transformer
+            self.upsample = decoder.upsample
+            self.tail = decoder.decoder
+
         def forward(self, codes):
-            h = dec.quantizer.decode(codes)
-            h = dec.pre_conv(h).transpose(1, 2)
-            h = dec.pre_transformer(inputs_embeds=h).last_hidden_state
+            h = self.quantizer.decode(codes)
+            h = self.pre_conv(h).transpose(1, 2)
+            h = self.pre_transformer(inputs_embeds=h).last_hidden_state
             h = h.permute(0, 2, 1).contiguous()
-            for blocks in dec.upsample:
+            for blocks in self.upsample:
                 for block in blocks:
                     h = block(h)
             wav = h
-            for block in dec.decoder:
+            for block in self.tail:
                 wav = block(wav)
             return wav.clamp(min=-1, max=1)
 
     example = torch.zeros(1, n_q, example_t, dtype=torch.long)
     _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_codec", ".ov-breeze-codec-v3")
-    compiled = tts_ov.compile_module(_Codec(), example, xml, stamp, device)
+    compiled = tts_ov.compile_module(_Codec(dec), example, xml, stamp, device)
     upsample = int(getattr(dec, "total_upsample", 1) or 1)
 
     def run_step(self, codes_chunk, step_idx):

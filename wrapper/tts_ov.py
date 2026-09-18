@@ -36,13 +36,19 @@ def compile_module(mod, example, xml, stamp, device):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np."""
     import numpy as np
     import openvino as ov
+    import torch
 
     os.makedirs(os.path.dirname(xml), exist_ok=True)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
         if not isinstance(example, (tuple, list)):
             example = (example,)
+        if hasattr(mod, "eval"):
+            mod.eval()
+        for p in getattr(mod, "parameters", lambda: ())():
+            p.requires_grad_(False)
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
-        ov_model = ov.convert_model(mod, example_input=example)
+        with torch.inference_mode():
+            ov_model = ov.convert_model(mod, example_input=example)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
