@@ -1,19 +1,21 @@
 # dasheng CI: triggers only; the build is the shared build-image.yml.
 name: dasheng-ci
 
+# Parked: uncomment push / workflow_dispatch and drop workflow_call.
 on:
-  push:
-    tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      namespace:
-        description: 'Docker Hub namespace'
-        required: false
-        default: beclab
-      image_tag:
-        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
-        required: false
-        default: ''
+  # push:
+  #   tags: ['v*']
+  # workflow_dispatch:
+  #   inputs:
+  #     namespace:
+  #       description: 'Docker Hub namespace'
+  #       required: false
+  #       default: beclab
+  #     image_tag:
+  #       description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+  #       required: false
+  #       default: ''
+  workflow_call:
 
 permissions:
   contents: read

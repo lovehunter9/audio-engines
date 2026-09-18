@@ -9,6 +9,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/breeze/**'
+      - 'bases/runtime/**'
       - '.github/workflows/breeze-ci.yml'
       - '.github/workflows/build-image.yml'
   workflow_dispatch:

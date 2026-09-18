@@ -447,7 +447,7 @@ class RuntimeHelperTest(unittest.TestCase):
             },
             "stt_stream": {
                 "supports": ["stt", "stt_stream"],
-                "watchdog": "qwen-asr vLLM",
+                "watchdog": "qwen-asr",
                 "state": {"ready": False, "error": None, "asr": None},
                 "load_on_main": True,
                 "disable_ws_ping": True,
@@ -776,8 +776,7 @@ class UploadBoundsTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(HTTPException) as refused:
             await bounds.spill(upload)
         self.assertEqual(refused.exception.status_code, 413)
-        # Two reads: the one that fits and the one that crosses. The other 62 MiB never arrive,
-        # which is the difference between this and a size check on an already-read body.
+        # Two reads: the one that fits and the one that crosses. The other 62 MiB never arrive.
         self.assertEqual(upload.reads, 2)
 
     async def test_a_refused_upload_leaves_nothing_behind(self):
@@ -880,7 +879,7 @@ class EngineSurfaceTest(unittest.TestCase):
         self.ready = False
         self.env = mock.patch.dict(
             os.environ,
-            {"AUDIO_BASE": "qwen", "MODEL_SUPPORTS": "supports_stt,supports_align"},
+            {"AUDIO_BASE": "qwen", "MODEL_SUPPORTS": "supports_stt"},
             clear=False,
         )
         self.env.start()
@@ -916,7 +915,7 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertEqual(spec["base"], "qwen")
         self.assertEqual(spec["model"], "test-model")
         self.assertEqual(spec["implements"], ["stt", "stt_stream", "align"])
-        self.assertEqual(spec["declares"], ["stt", "align"])
+        self.assertEqual(spec["declares"], ["stt"])
         self.assertEqual(spec["serves"], ["stt"])
         self.assertIsInstance(spec["endpoints"], list)
         self.assertTrue(spec["endpoints"])
@@ -989,25 +988,14 @@ class RouteSpecAgreementTest(unittest.TestCase):
     service.
     """
 
-    # Mounted, and deliberately not advertised as available. Every entry is
-    # a decision that has to be re-made when the route moves, which is why
-    # this is a list of (module, capability, method, path) and not a
-    # loosened assertion.
+    # Mounted, and deliberately not advertised as available.
     MOUNTED_WITHOUT_ADVERTISING = frozenset({
-        # FireRedTTS3-Instruct and Breeze TTS 2 serve preset, clone and
-        # design off one weight, so the design routes are mounted whenever
-        # tts is. tts_design is what declares them, and an instance that
-        # declares only supports_tts leaves them mounted and unadvertised
-        # (wrapper/catalog.py, the firered entry). The gateway routes on
-        # what is advertised, so this is a route a caller cannot reach --
-        # deliberately, and only reachable by declaring the capability.
+        # FireRed / Breeze serve design on these routes but do not advertise tts_design here.
         ("firered", "tts_design", "POST", "/v1/text-to-voice"),
         ("firered", "tts_design", "POST", "/v1/text-to-voice/design"),
         ("breeze", "tts_design", "POST", "/v1/text-to-voice"),
         ("breeze", "tts_design", "POST", "/v1/text-to-voice/design"),
-        # Qwen3-TTS reads its preset library off the checkpoint, so
-        # voice.list is mounted always and available only for a checkpoint
-        # that has one. This is the endpoint_available callback working.
+        # Qwen3-TTS reads its preset library off the checkpoint, so voices is checkpoint-gated.
         ("tts", "tts", "GET", "/v1/audio/voices"),
     })
 
@@ -1034,8 +1022,7 @@ class RouteSpecAgreementTest(unittest.TestCase):
                 out.add(("WS", cls._placeholders(path)))
                 continue
             for method in getattr(route, "methods", None) or ():
-                # Starlette adds these for free; the catalog does not
-                # describe them and neither does the gateway route them.
+                # Starlette adds these for free; the catalog does not advertise them.
                 if method in ("HEAD", "OPTIONS"):
                     continue
                 out.add((method, cls._placeholders(path)))
@@ -1167,6 +1154,135 @@ class NvmlFallbackIsOptIn(unittest.TestCase):
         self.assertEqual(gauges["gpu_mem_used_bytes"], "7")
         self.assertEqual(gauges["gpu_mem_total_bytes"], "11")
         self.assertIn("as NVML reports it", body)
+
+
+class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
+    def test_family_does_not_install_cuda_torch(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/fasterwhisper/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertNotIn("FROM ${RUNTIME_IMAGE}", text)
+        self.assertNotIn("lovehunter9/audio-runtime", text)
+        self.assertNotIn("beclab/audio-runtime", text)
+        self.assertNotIn("strip_unused_cuda.sh", text)
+        self.assertNotIn("download.pytorch.org/whl/cu128", text)
+        self.assertNotIn("download.pytorch.org/whl/cu130", text)
+        self.assertIn("download.pytorch.org/whl/cpu", text)
+        self.assertIn("nvidia-ml-py", text)
+        self.assertIn("nvidia-cublas-cu12", text)
+        self.assertIn("nvidia-cudnn-cu12", text)
+        self.assertIn("collect_ct2_runtime.py", text)
+        self.assertNotIn("LD_LIBRARY_PATH=/opt/ct2-runtime/lib", text)
+        with open(os.path.join(os.path.dirname(__file__),
+                               "../bases/fasterwhisper/probe_ct2_cuda.py")) as fh:
+            probe = fh.read()
+        self.assertIn("libcublas.so.12", probe)
+        self.assertIn("libcublas.so.13", probe)
+        self.assertIn("libcudnn.so", probe)
+        with open(os.path.join(os.path.dirname(__file__),
+                               "../bases/fasterwhisper/collect_ct2_runtime.py")) as fh:
+            collect = fh.read()
+        self.assertIn("libcublas.so", collect)
+        self.assertIn("nvidia_wheel_libs", collect)
+        self.assertIn("system_cudnn_libs", collect)
+        self.assertIn("libcudnn*.so*", collect)
+        with open(os.path.join(os.path.dirname(__file__),
+                               "../wrapper/caps/whisper.py")) as fh:
+            whisper = fh.read()
+        self.assertIn("_ct2tf.torch = torch", whisper)
+        load = whisper.split("def _load():", 1)[1].split("\ndef ", 1)[0]
+        self.assertLess(load.find("import torch"),
+                        load.find("from faster_whisper import WhisperModel"))
+
+
+class SlimPyannoteRecipeTest(unittest.TestCase):
+    def test_four_x_cannot_upgrade_the_torch_already_installed(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/pyannote/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn('pyannote.audio>=4,<5', text)
+        self.assertIn("/tmp/torch.pin", text)
+        self.assertIn("-c /tmp/torch.pin", text)
+        self.assertNotIn("pyannote.audio>=3.3.0,<4", text)
+        torch = text.find("torch torchaudio --index-url")
+        pin = text.find("pip freeze | grep -E '^(torch|torchaudio)=='")
+        four = text.find('"pyannote.audio>=4,<5"')
+        self.assertGreater(pin, torch)
+        self.assertGreater(four, pin)
+        self.assertNotIn("pip uninstall", text)
+
+
+class SlimBreezeRecipeTest(unittest.TestCase):
+    def test_numpy_and_sox_are_present_before_qwen_tts(self):
+        path = os.path.join(os.path.dirname(__file__),
+                            "../bases/breeze/deps.Dockerfile")
+        with open(path) as fh:
+            text = fh.read()
+        self.assertIn("sox", text)
+        numpy = text.find("pip install --no-cache-dir numpy")
+        qwen = text.find('"qwen-tts==0.1.1"')
+        self.assertGreater(numpy, -1)
+        self.assertGreater(qwen, numpy)
+
+
+class SlimRuntimeRecipeTest(unittest.TestCase):
+    def _runtime_dir(self):
+        return os.path.join(os.path.dirname(__file__), "../bases/runtime")
+
+    def test_torch_install_and_cuda_strip_share_one_run(self):
+        root = os.path.join(os.path.dirname(__file__), "../bases")
+        for name in ("pyannote", "firered", "breeze", "qwen"):
+            path = os.path.join(root, name, "deps.Dockerfile")
+            with open(path) as fh:
+                text = fh.read()
+            self.assertNotIn("python3-venv", text, path)
+            run = text.split("RUN set -eux;", 1)[1]
+            pip = run.find("torch torchaudio")
+            strip = run.find("sh /tmp/strip_unused_cuda.sh;")
+            self.assertGreater(pip, -1, path)
+            self.assertGreater(strip, pip, path)
+            if name == "qwen":
+                # qwen-asr --no-deps: skip demo extras. numpy before the wheel.
+                self.assertIn("--no-deps", run, path)
+                self.assertGreater(run.find("qwen-asr"), run.find("numpy"), path)
+                self.assertIn("uninstall -y gradio gradio-client flask sox", run, path)
+                self.assertNotIn("sox;", text, path)
+
+    def test_strip_script_drops_solvers_keeps_cublas_cudnn(self):
+        with open(os.path.join(self._runtime_dir(), "strip_unused_cuda.sh")) as fh:
+            text = fh.read()
+        # Keep/drop follows ldd so a leftover CUDA 13 wheel cannot hide behind a shared soname.
+        self.assertIn("resolved_files", text)
+        self.assertIn("\ncd /\n", text)
+        self.assertIn("libnccl.so", text)
+        self.assertIn("keep-real", text)
+        self.assertIn("libnvshmem_host.so", text)
+        self.assertIn("nvidia-nvshmem", text)
+        m = re.search(r"grep -iE '([^']+)'", text)
+        self.assertIsNotNone(m)
+        posix = m.group(1)
+        py = posix.replace(r"[^[:space:]=]*", r"\S*")
+        freeze = (
+            "nvidia-cublas-cu12==12.8\n"
+            "nvidia-cudnn-cu12==9.1\n"
+            "nvidia-cublas==13.1\n"
+            "nvidia-nccl-cu12==2.21\n"
+            "nvidia-cusparselt-cu12==0.8\n"
+            "cuda-toolkit==13.0.3\n"
+            "triton==3.2.0\n"
+        )
+        candidates = [x.group(0).split("=")[0] for x in re.finditer(py, freeze, re.I | re.M)]
+        self.assertEqual(candidates, [
+            "nvidia-cublas-cu12",
+            "nvidia-cudnn-cu12",
+            "nvidia-cublas",
+            "nvidia-nccl-cu12",
+            "nvidia-cusparselt-cu12",
+            "cuda-toolkit",
+            "triton",
+        ])
 
 
 class OnnxPinTests(unittest.TestCase):

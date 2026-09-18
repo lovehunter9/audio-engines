@@ -12,7 +12,7 @@ from .. import hfgate
 from .. import tasks
 from ..audioio import wav_seconds
 from ..batch import parse_segments
-from ..gpu import mount_metrics, quota_mib
+from ..gpu import mount_metrics, quota_mib, cuda_visible
 from ..contract import register, EngineArgs
 from ..runtime import Runtime
 
@@ -76,7 +76,16 @@ def _ensure_ct2(src, quantization):
         log.info("using previously converted CT2 model at %s", out)
         return out
 
+    import huggingface_hub
+    import torch
+    import transformers
     from ctranslate2.converters import TransformersConverter
+    import ctranslate2.converters.transformers as _ct2tf
+    # v4.6 wraps hf/torch/transformers in one try; one ImportError leaves torch unbound.
+    if getattr(_ct2tf, "torch", None) is None:
+        _ct2tf.huggingface_hub = huggingface_hub
+        _ct2tf.torch = torch
+        _ct2tf.transformers = transformers
 
     log.info("%s is not CTranslate2; converting (this runs once, minutes)", MODEL_REPO)
     # Per-pid staging: two instances of one model can load at once and must not collide.
@@ -101,12 +110,13 @@ def _ensure_ct2(src, quantization):
 
 def _load():
     try:
-        import torch
+        # ARM: CT2 CUDA binds OpenBLAS first and CPU torch then dies on sbgemm_.
+        import torch  # noqa: F401
         from faster_whisper import WhisperModel
 
         dev = DEVICE
         if dev == "auto":
-            dev = "cuda" if torch.cuda.is_available() else "cpu"
+            dev = "cuda" if cuda_visible() else "cpu"
         ctype = COMPUTE_TYPE if dev == "cuda" else "int8"
         path = _ensure_ct2(_locate(), ctype)
         model = WhisperModel(path, device=dev, compute_type=ctype)
@@ -266,10 +276,7 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
                     out.append({"text": ""})
                     continue
                 sb = _ffmpeg_slice_wav(whole, a, b - a)
-                # The nested _run gets no ctx, so the slices are metered here instead of
-                # each one overwriting the last. The slice ffmpeg produced is what the
-                # model hears: a segment whose `end` runs past the recording asks for
-                # more than exists, and the request is not what was transcribed.
+                # The nested _run gets no ctx, so the slices are metered here.
                 ctx.meter(input_seconds=wav_seconds(sb) or (b - a))
                 res = _run("transcribe", sb, "seg.wav", language, "json",
                            temperature, prompt, False, False)
@@ -290,7 +297,7 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
 
 def build_app(supports):
     app = FastAPI(title="audio-whisper (faster-whisper)")
-    mount_metrics(app)
+    mount_metrics(app, nvml_fallback=True)
 
     register(app, model_name=MODEL_NAME, module="whisper", served=supports, repo=MODEL_REPO,
              model_format="ctranslate2", quantization=COMPUTE_TYPE,

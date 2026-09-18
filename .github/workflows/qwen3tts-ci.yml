@@ -1,26 +1,28 @@
 # qwen3tts CI: triggers only; the build is the shared build-image.yml.
 name: qwen3tts-ci
 
+# Parked: uncomment push / pull_request / workflow_dispatch and drop workflow_call.
 on:
-  push:
-    tags: ['v*']
-  pull_request:
-    paths:
-      - 'wrapper/**'
-      - 'tests/**'
-      - 'bases/qwen3tts/**'
-      - '.github/workflows/qwen3tts-ci.yml'
-      - '.github/workflows/build-image.yml'
-  workflow_dispatch:
-    inputs:
-      namespace:
-        description: 'Docker Hub namespace'
-        required: false
-        default: beclab
-      image_tag:
-        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
-        required: false
-        default: ''
+  # push:
+  #   tags: ['v*']
+  # pull_request:
+  #   paths:
+  #     - 'wrapper/**'
+  #     - 'tests/**'
+  #     - 'bases/qwen3tts/**'
+  #     - '.github/workflows/qwen3tts-ci.yml'
+  #     - '.github/workflows/build-image.yml'
+  # workflow_dispatch:
+  #   inputs:
+  #     namespace:
+  #       description: 'Docker Hub namespace'
+  #       required: false
+  #       default: beclab
+  #     image_tag:
+  #       description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+  #       required: false
+  #       default: ''
+  workflow_call:
 
 permissions:
   contents: read

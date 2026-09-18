@@ -18,6 +18,20 @@ def quota_mib():
     return _quota_bytes() // (2 ** 20)
 
 
+def cuda_visible():
+    """True when this process can see a CUDA device, without needing CUDA torch."""
+    if _nvml_stats() is not None:
+        return True
+    if os.path.exists("/dev/nvidia0"):
+        return True
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
+    except Exception:
+        return False
+
+
 def visible_memory_bytes():
     """What CUDA reports as this device's total, or 0 when there is no device to ask."""
     try:
@@ -88,13 +102,7 @@ def gpu_metrics_text(nvml_fallback=False):
     except Exception:
         present = 0
     if not present and nvml_fallback:
-        # torch is absent or saw no device; ask NVML before reporting zeros. Zeros would read as
-        # "a card is there and idle", which is the one answer that must not be guessed.
-        #
-        # The two paths do NOT measure the same thing, and the help text says so rather than
-        # pretending otherwise: torch goes through the CUDA driver, which is where memory
-        # virtualization intercepts, so it sees this container's slice. NVML is a different
-        # interface and may report the whole card, including memory other pods are using.
+        # torch is absent or saw no device; ask NVML before reporting zeros.
         stats = _nvml_stats()
         if stats is not None:
             present, slice_scoped = 1, False

@@ -1,29 +1,31 @@
 # crispasr CI: triggers only; the build is the shared build-image.yml.
 name: crispasr-ci
 
+# Parked: uncomment push / pull_request / workflow_dispatch and drop workflow_call.
 on:
   # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
-  push:
-    tags: ['v*']
+  # push:
+  #   tags: ['v*']
   # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
-  pull_request:
-    paths:
-      - 'wrapper/**'
-      - 'tests/**'
-      - 'bases/crispasr/**'
-      - '.github/workflows/crispasr-ci.yml'
-      - '.github/workflows/build-image.yml'
+  # pull_request:
+  #   paths:
+  #     - 'wrapper/**'
+  #     - 'tests/**'
+  #     - 'bases/crispasr/**'
+  #     - '.github/workflows/crispasr-ci.yml'
+  #     - '.github/workflows/build-image.yml'
   # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
-  workflow_dispatch:
-    inputs:
-      namespace:
-        description: 'Docker Hub namespace'
-        required: false
-        default: beclab
-      image_tag:
-        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
-        required: false
-        default: ''
+  # workflow_dispatch:
+  #   inputs:
+  #     namespace:
+  #       description: 'Docker Hub namespace'
+  #       required: false
+  #       default: beclab
+  #     image_tag:
+  #       description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+  #       required: false
+  #       default: ''
+  workflow_call:
 
 permissions:
   contents: read

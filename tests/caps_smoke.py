@@ -312,7 +312,6 @@ def t_diar():
               doc.get("exclusive") is False and doc["num_segments"] == 2, doc.get("exclusive"))
 
         # A cluster that produced no turn shifts every label after it, so the rows can no
-        # longer be named; and a NaN would leave the response unparseable to a strict client.
         for label, centroids in (("a centroid with no turns", ((0.1,), (0.2,), (0.3,))),
                                  ("a non-finite centroid", ((float("nan"), 0.2), (0.3, 0.4)))):
             pipe.out = Out(centroids=centroids)
@@ -589,7 +588,6 @@ def t_diar_speakrs_models_dir():
             os.makedirs(d)
             os.utime(d, (when, when))
         # llm-init writes the resolved path for engines that share its run directory. Guessing
-        # when we have been told is how the two answers drift apart.
         told_dir = tempfile.mkdtemp(prefix="rundir-")
         try:
             with open(os.path.join(told_dir, "model_path"), "w") as f:
@@ -605,7 +603,6 @@ def t_diar_speakrs_models_dir():
               ds._models_dir(repo) == os.path.join(snaps, "newer"), ds._models_dir(repo))
 
         # A re-download leaves the previous revision in place; the fresh one is the one llm-init
-        # signalled on, so picking the older would load weights nobody asked for.
         shutil.rmtree(snaps)
         flat = os.path.join(root, "models--avencera--speakrs-models")
         check("diar_speakrs falls back to the repo directory when there are no snapshots",
@@ -640,24 +637,20 @@ def t_diar_speakrs():
         check("diar_speakrs reports the device the engine ran on",
               body["device"] == "cuda", body["device"])
 
-        # The whole reason this engine cannot stand in for pyannote everywhere. Accepting the
-        # constraint and quietly ignoring it would leave a caller unable to tell that it was
-        # dropped, so the only honest answer is a 400 naming the parameters it refused.
+        # This engine cannot stand in for pyannote: speaker-count knobs must 400, not be ignored.
         for field in ("num_speakers", "min_speakers", "max_speakers"):
             r = c.post("/v1/audio/diarization", files=WAV, data={field: "3"})
             check("diar_speakrs refuses %s rather than ignoring it" % field,
                   r.status_code == 400 and field in r.json()["detail"],
                   (r.status_code, r.json()))
 
-        # Seconds on the wire, frames to the engine: every other engine in this repo states
-        # durations in seconds, and speakrs states them in frames.
+        # Seconds on the wire, frames to the engine.
         sent.clear()
         c.post("/v1/audio/diarization", files=WAV, data={"min_duration_off": "0.5"})
         check("diar_speakrs converts seconds to frames for the engine",
               sent[-1]["min_duration_off_frames"] == 30, sent[-1]["min_duration_off_frames"])
 
-        # 🔴 Unset and zero must stay different: speakrs' fast modes default this filter to 3
-        # frames, so sending 0 for "the caller said nothing" would silently switch it off.
+        # Unset and zero must stay different: speakrs' fast modes default this filter to 3.
         sent.clear()
         c.post("/v1/audio/diarization", files=WAV)
         check("diar_speakrs sends null, not 0, for a knob nobody set",
@@ -668,8 +661,6 @@ def t_diar_speakrs():
               sent[-1]["min_duration_off_frames"] == 0, sent[-1]["min_duration_off_frames"])
 
         # The engine holds the whole clip decoded, so an unbounded upload is an OOM kill, which
-        # reaches the caller as a dropped connection rather than as something it can act on. The
-        # bound lives in wrapper/limits.py now; every cap that holds a whole clip shares it.
         from wrapper import limits
 
         ds.BOUNDS.seconds = 1.0
@@ -683,8 +674,6 @@ def t_diar_speakrs():
         ds.BOUNDS.seconds = 14400.0
 
         # A container the header readers cannot parse may still be one the engine decodes, and it
-        # is exactly the file that would slip past the length check. ffprobe shares ffmpeg's
-        # demuxers, so it measures what the engine can read.
         real_probe, real_sub = limits.probe_seconds, limits.subprocess
         limits.probe_seconds = lambda _p: None
         limits.subprocess = types.SimpleNamespace(
@@ -696,8 +685,7 @@ def t_diar_speakrs():
               r.status_code == 413 and "7200s" in r.json()["detail"],
               (r.status_code, r.json()))
 
-        # ffprobe absent or unable: unknown stays a real answer rather than a refusal, because a
-        # file nothing can measure is one the engine will fail on cheaply, before spending memory.
+        # ffprobe absent or unable: unknown stays a real answer rather than a refusal.
         limits.subprocess = types.SimpleNamespace(
             run=lambda *a, **k: types.SimpleNamespace(returncode=1, stdout="", stderr="bad"),
             SubprocessError=real_sub.SubprocessError)
@@ -707,8 +695,7 @@ def t_diar_speakrs():
         limits.probe_seconds, limits.subprocess = real_probe, real_sub
         ds.BOUNDS.seconds = 14400.0
 
-        # An upload too big to hold is refused while it is still arriving; the seconds bound
-        # cannot help here, because nothing has been written to measure yet.
+        # An upload too big to hold is refused while it is still arriving.
         ds.BOUNDS.megabytes = 0.001  # ~1 KiB
         big = {"file": ("big.wav", b"RIFF" + b"\0" * 4096, "audio/wav")}
         r = c.post("/v1/audio/diarization", files=big)
@@ -723,8 +710,7 @@ def t_diar_speakrs():
               sent[-1]["exclusive"] is True and doc["exclusive"] is True,
               (sent[-1]["exclusive"], doc["exclusive"]))
 
-        # A dead child must read as "not ready", never as an empty result: zero segments is a
-        # legitimate answer for silent audio, so it can never double as an error.
+        # A dead child must read as "not ready", never as an empty result.
         def dead(_payload):
             raise RuntimeError("engine process exited with code 1")
 
@@ -741,9 +727,7 @@ def t_diar_speakrs():
               r.status_code == 503 and "load" in r.json()["detail"],
               (r.status_code, r.json()))
 
-    # Everything this container serves lives in that child, so a pod that outlives it is an
-    # endpoint answering 503 to everyone until somebody notices and deletes it. The load
-    # watchdog does not cover this: it only fires while a model is still loading.
+    # Everything this container serves lives in that child; a pod that outlives it is a leak.
     from wrapper import watchdog
 
     exits, real_exit, real_grace = [], ds._exit, ds._EXIT_GRACE_S
@@ -776,7 +760,6 @@ def t_diar_stream_offline():
     from wrapper.caps import diar_stream
 
     # The image carries torch and NeMo; a test box does not, and the point here is which branch
-    # _load takes before it ever touches a model.
     fetched = []
     mods = {
         "torch": {"cuda": types.SimpleNamespace(is_available=lambda: False)},
@@ -872,9 +855,7 @@ def t_align():
         check("align single bills the whole file it was handed",
               (single or {}).get("input_duration_seconds") == 4.0,
               (single or {}).get("input_duration_seconds"))
-        # The upload decodes to four seconds and the segments ask for two of
-        # them. Billing the file here would charge for audio nothing aligned,
-        # and a real caller sends an hour with a handful of seconds in it.
+        # The upload decodes to four seconds and the segments ask for two of them.
         batch = both_ways(c, "/v1/audio/align", WAV,
                           {"segments":
                            '[{"start":0,"end":1,"text":"hi"},{"start":1,"end":2,"text":"yo"}]'},
@@ -900,9 +881,7 @@ def t_whisper():
 
     whisper._state.update(ready=True, model=types.SimpleNamespace(transcribe=transcribe),
                           pipeline=None, device="cpu", compute="int8")
-    # A real WAV of the length ffmpeg would actually have produced: the
-    # recording is two seconds long, so a segment asking for more gets what
-    # exists, and billing has to follow the slice rather than the request.
+    # A real WAV of the length ffmpeg would actually have produced.
     whisper._ffmpeg_slice_wav = lambda src, start, dur: wav_of(
         max(0.0, min(float(dur), 2.0 - float(start))))
     with TestClient(whisper.build_app(["stt"])) as c:
@@ -939,12 +918,10 @@ def t_qwen():
 
     q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
     # One result per clip, saying how many samples that clip carried. The real engine
-    # answers per clip; a stub that answers once hides a group handed back short.
     calls = []
 
     def fake_transcribe(audio=None, language=None, return_time_stamps=None):
         # Two shapes reach here: the serial path hands one (clip, sr) tuple, the batched
-        # path a list of them.
         clips = audio if isinstance(audio, list) else [audio]
         calls.append(len(clips))
         return [types.SimpleNamespace(text=str(len(c))) for c, _sr in clips]
@@ -957,9 +934,9 @@ def t_qwen():
         check("the WS stream endpoint is still advertised",
               ("WS", "/v1/audio/stream") in mounted(c))
         spec = c.get("/api/engine-spec").json()
-        check("align shows up as implemented but not served",
-              [e for e in spec["endpoints"]
-               if e.get("capability") == "align" and not e["available"]])
+        align_eps = [e for e in spec["endpoints"] if e.get("capability") == "align"]
+        check("align is on qwen but not served without MODEL_SUPPORTS",
+              bool(align_eps) and all(not e.get("available") for e in align_eps))
         both_ways(c, "/v1/audio/transcriptions", WAV, {}, "qwen stt", meters=("input",))
         both_ways(c, "/v1/audio/transcriptions", WAV,
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
@@ -996,7 +973,6 @@ def one_bad_span_does_not_sink_its_group(c, q, calls):
     try:
         del calls[:]
         # index 2 is 8 samples long: hi > lo so it is handed to the engine, and a real one
-        # refuses it -- 0.5 ms is not enough audio to build mel features from.
         spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.2005), (0.4, 0.5), (0.5, 0.6)]
         body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
         r = c.post("/v1/audio/transcriptions", files=WAV,
@@ -1077,8 +1053,7 @@ def repetition_request_spellings(q):
         ("--repetition-detection false",            False, ""),
         ("--repetition-detection 0",                False, ""),
         ("--repetition-detection off",              False, ""),
-        # 🔴 Words nobody listed. These are the ones a word list lets through, and each of
-        # them used to read as "on" -- the same bug as `false`, one spelling further out.
+        # Words nobody listed: a word list would let these through, and each must still mean off.
         ("--repetition-detection disabled",         False, ""),
         ("--repetition-detection none",             False, ""),
         ("--repetition-detection never",            False, ""),
@@ -1137,10 +1112,7 @@ def repetition_fallback(q):
         check("asking for nothing leaves the budget alone",
               q._token_budget(10.0) == stock, q._token_budget(10.0))
 
-        # And it must not go looking for the detector either. Probing warns when the class is
-        # missing, so probing unasked puts a warning about an unused feature in front of every
-        # deployment on the older vLLM. Caught on a real engine, not here, which is why it is
-        # pinned here: the empty list stays empty only if nothing probed.
+        # And it must not go looking for the detector either.
         del q._repdet_class[:]
         del q._repdet_said[:]
         q._say_repetition_once()
@@ -2446,11 +2418,6 @@ def t_breeze_pace():
           (len(streamed), len(paced)))
 
     # A separate stream, because this one is about latency rather than samples:
-    # audio has to come back out while the request is still being spoken, not
-    # only once the whole utterance has been synthesized. Each write drains for
-    # ten milliseconds, which a loaded machine can lose every time, so keep
-    # feeding until something comes back or the deadline says the filter really
-    # is holding everything to the end.
     live = TempoStream(24000, 2.0)
     live_chunks = 0
     deadline = time.time() + 10.0
