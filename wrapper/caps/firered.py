@@ -488,12 +488,7 @@ def _load():
 
 
 def _install_firered_ov(instruct, path, device):
-    """Official generate() loop stays. DiT + patch_encoder on GPU IR.
-
-    intel12 put decode on OpenVINO but copied 28×2 K/V to host every token:
-    zh-m RTF 26 vs intel3 official-eager backbone RTF 16. Leave the 1.7B AR
-    on official eager until K/V can stay on the device.
-    """
+    """Official generate() loop stays. DiT + patch on GPU; AR decode via device KV."""
     import torch
 
     from .. import tts_ov
@@ -501,7 +496,7 @@ def _install_firered_ov(instruct, path, device):
     core = getattr(instruct, "tts_core", None)
     if core is None:
         raise RuntimeError("FireRedTTS3Instruct has no tts_core")
-    log.info("firered Qwen3 backbone official eager; DiT+patch on OpenVINO %s", device)
+    log.info("firered Qwen3 official prefill + device-KV decode; DiT+patch on OpenVINO %s", device)
     dit = core.dit
     patch = core.patch_encoder
     hist = int(core.history_length)
@@ -546,6 +541,7 @@ def _install_firered_ov(instruct, path, device):
 
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
+    _install_firered_backbone(core, path, device)
 
 
 def _install_firered_backbone(core, path, device):
@@ -575,7 +571,7 @@ def _install_firered_backbone(core, path, device):
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
         dynamize_ranks=(2, 4),
     )
-    runner = tts_ov.KvRunner(None, decode, n_layers)
+    runner = tts_ov.DeviceKvRunner(decode, n_layers)
     n_step = {"i": 0}
 
     def _log_step(embeds, hidden):
@@ -608,7 +604,7 @@ def _install_firered_backbone(core, path, device):
         return hidden, True
 
     core._backbone_one_step = _backbone_one_step
-    log.info("firered Qwen3 official prefill + ov decode q=1 on OpenVINO %s", device)
+    log.info("firered Qwen3 official prefill + device-KV decode q=1 on OpenVINO %s", device)
 
 
 def build_app(supports):
