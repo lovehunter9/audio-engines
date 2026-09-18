@@ -135,8 +135,10 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4)):
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
-    compiled = core.compile_model(xml, device)
-    log.info("compiled %s on %s", xml, device)
+    compiled = core.compile_model(
+        xml, device, {"INFERENCE_PRECISION_HINT": "f32"}
+    )
+    log.info("compiled %s on %s inference_precision=f32", xml, device)
 
     def run(*arrays):
         feed = {}

@@ -2185,6 +2185,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("prefill=prefill", bb)
         self.assertNotIn("tts_ov.KvRunner", bb)
         self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("INFERENCE_PRECISION_HINT", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("official eager + seed_kv", bb)
         self.assertIn("create_infer_request", inspect.getsource(tts_ov.DeviceKvRunner))
         self.assertIn("set_input_tensor", inspect.getsource(tts_ov.DeviceKvRunner))
         self.assertIn("torch.triu", inspect.getsource(tts_ov.causal_attn_bias))

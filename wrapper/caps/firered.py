@@ -488,7 +488,7 @@ def _load():
 
 
 def _install_firered_ov(instruct, path, device):
-    """Official generate() loop stays. DiT + patch on GPU; AR decode via device KV."""
+    """Official generate() loop stays. DiT + patch + AR prefill/decode on GPU."""
     import torch
 
     from .. import tts_ov
@@ -579,11 +579,16 @@ def _install_firered_backbone(core, path, device):
         dynamize_ranks=(2, 4),
     )
     runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
+    orig = core._backbone_one_step
     n_step = {"i": 0}
 
     def _log_step(embeds, hidden):
-        score = float(torch.sigmoid(core.stop_head(hidden[:, -1].float())).item())
-        std = float(hidden.float().std())
+        last = hidden[:, -1].float()
+        score = float("nan")
+        std = float("nan")
+        if torch.isfinite(last).all():
+            score = float(torch.sigmoid(core.stop_head(last)).item())
+            std = float(hidden.float().std())
         log.info(
             "firered ov step=%d q=%d prefix=%d stop=%.4f hidden_std=%.4f",
             n_step["i"], int(embeds.shape[1]), runner.prefix_len, score, std,
@@ -599,6 +604,11 @@ def _install_firered_backbone(core, path, device):
             runner.reset()
             n_step["i"] = 0
         hidden = runner.step(input_embeds)
+        if n_step["i"] == 0 and not torch.isfinite(hidden).all():
+            log.error("firered ov prefill non-finite; official eager + seed_kv")
+            hidden, hf_cache = orig(input_embeds, cache=None)
+            runner.reset()
+            runner.seed_kv(hf_cache)
         n_step["i"] += 1
         if n_step["i"] == 1 or n_step["i"] % 20 == 0:
             _log_step(input_embeds, hidden)
