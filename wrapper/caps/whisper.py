@@ -4,6 +4,7 @@ import logging
 import shutil
 import subprocess
 import tempfile
+import time
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -260,6 +261,9 @@ def _ffmpeg_slice_wav(src, start, dur):
 
 def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX):
     # One {text}|{error} per segment, so a single bad segment cannot fail the batch.
+    started = time.monotonic()
+    speech_seconds = 0.0
+    inference_calls = 0
     suffix = os.path.splitext(fn or "a.wav")[1] or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as wf:
         wf.write(data)
@@ -277,7 +281,10 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
                     continue
                 sb = _ffmpeg_slice_wav(whole, a, b - a)
                 # The nested _run gets no ctx, so the slices are metered here.
-                ctx.meter(input_seconds=wav_seconds(sb) or (b - a))
+                seconds = wav_seconds(sb) or (b - a)
+                speech_seconds += seconds
+                ctx.meter(input_seconds=seconds)
+                inference_calls += 1
                 res = _run("transcribe", sb, "seg.wav", language, "json",
                            temperature, prompt, False, False)
                 out.append({"text": res.get("text", "") if isinstance(res, dict) else ""})
@@ -292,6 +299,12 @@ def _stt_batch(data, fn, segs, language, temperature, prompt, ctx=tasks.NULL_CTX
             os.unlink(whole)
         except Exception:
             pass
+    log.info(
+        "stt multi-span complete model=%s spans=%d speech_seconds=%.3f "
+        "inference_calls=%d split_retries=0 failed=%d max_batch_spans=1 "
+        "duration_seconds=%.3f",
+        MODEL_NAME, len(segs), speech_seconds, inference_calls,
+        sum(1 for item in out if item.get("error")), time.monotonic() - started)
     return out
 
 

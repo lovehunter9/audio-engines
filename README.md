@@ -160,6 +160,14 @@ Batching is unrelated and unchanged: `segments`, pyannote's batch sizes and
 faster-whisper's `BatchedInferencePipeline` are throughput and quality levers,
 while `async=1` only decides who waits.
 
+Every engine that advertises `stt` accepts the optional multipart `segments`
+array. It is the stable Olares multi-span transport contract: callers can
+upload one audio chunk once and receive one ordered result per span. Qwen may
+run several spans in one model invocation; Faster Whisper may process them
+serially inside the same task. The engine log names both the request span count
+and the internal inference-call count so those two meanings of “batch” are not
+confused.
+
 What tasks deliberately do NOT do: survive a restart (they live in memory, and a
 poll after a pod restart is a `404` the caller should treat as "resubmit"),
 outlive 1800 s (after which results are reclaimed), or queue without bound

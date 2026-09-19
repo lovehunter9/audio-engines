@@ -1371,6 +1371,7 @@ def build_app(supports):
                 segs = parse_segments(segments)
 
                 def _work_batch(ctx):
+                    started = time.monotonic()
                     ctx.progress(stage="transcribe", done=0, total=len(segs))
                     if GROUPING:
                         # Slice every span first, then hand them over in groups.
@@ -1459,8 +1460,17 @@ def build_app(supports):
                         _p(_batching_report(first_how, len(spans), planned, calls,
                                             splits, refusals, replans, replanned_how))
                         ctx.progress(done=len(segs), total=len(segs))
+                        log.info(
+                            "stt multi-span complete model=%s spans=%d speech_seconds=%.3f "
+                            "inference_calls=%d split_retries=%d failed=%d "
+                            "duration_seconds=%.3f",
+                            MODEL_NAME, len(segs), sum(s for _, _, s in spans), calls, splits,
+                            sum(1 for item in out if item and item.get("error")),
+                            time.monotonic() - started)
                         return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
                     out = []
+                    speech_seconds = 0.0
+                    inference_calls = 0
                     for i, seg in enumerate(segs, 1):
                         ctx.checkpoint()
                         try:
@@ -1469,7 +1479,10 @@ def build_app(supports):
                             if hi <= lo:
                                 out.append({"text": "", "language": ""})
                             else:
-                                ctx.meter(input_seconds=(hi - lo) / 16000.0)
+                                seconds = (hi - lo) / 16000.0
+                                speech_seconds += seconds
+                                ctx.meter(input_seconds=seconds)
+                                inference_calls += 1
                                 t, lang = _offline_transcribe(audio[lo:hi], language=forced)
                                 out.append({"text": t, "language": lang})
                         except tasks.Cancelled:
@@ -1478,6 +1491,12 @@ def build_app(supports):
                             out.append({"error": "stt failed: %s" % e})
                         finally:
                             ctx.progress(done=i, total=len(segs))
+                    log.info(
+                        "stt multi-span complete model=%s spans=%d speech_seconds=%.3f "
+                        "inference_calls=%d split_retries=0 failed=%d max_batch_spans=1 "
+                        "duration_seconds=%.3f",
+                        MODEL_NAME, len(segs), speech_seconds, inference_calls,
+                        sum(1 for item in out if item.get("error")), time.monotonic() - started)
                     return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
 
                 return await tasks.dispatch(async_, "stt", MODEL_NAME, _work_batch,
