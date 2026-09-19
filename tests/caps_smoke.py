@@ -2790,6 +2790,213 @@ def t_qwen():
         the_report_does_not_need_a_request(q)
         malformed_span_is_isolated(c, q, calls)
         one_bad_span_does_not_sink_its_group(c, q, calls)
+        the_sizing_says_what_it_did(c, q, calls)
+        the_card_refusing_lowers_the_budget(c, q, calls)
+        a_refusal_reshapes_the_rest_of_the_request(c, q, calls)
+        the_language_field_reaches_the_model(c, q)
+        every_span_says_what_language_it_is(c, q)
+
+
+class batch_mode:
+    """Turn the batch path on the way a deployment does, for one check.
+
+    🔴 Three attributes, not one. Grouping, the ceiling and the measurement are separate,
+    and setting the ceiling alone leaves the engine serial -- which every assertion below
+    would still pass, having tested nothing.
+    """
+
+    def __init__(self, q, ceiling=None, budget=None):
+        self.q, self.ceiling, self.budget = q, ceiling, budget
+
+    def __enter__(self):
+        q = self.q
+        self.was = (q.GROUPING, q.MAX_SPANS, q.grouping.SPAN_FLOOR_SECONDS,
+                    q._headroom_bytes)
+        # 🔴 The per-span floor is stood down for these checks, and only for these. It is one
+        # second, while this file's fixtures are tenths of a second because the test audio is --
+        # so with it in force every fixture is one span a call and nothing about the wiring gets
+        # exercised. What the floor itself does is pinned in tests/test_grouping.py against
+        # numbers that mean something; these checks are about what reaches the handler.
+        q.grouping.SPAN_FLOOR_SECONDS = 0.0
+        q.GROUPING = True
+        q.MAX_SPANS = self.ceiling
+        # 🔴 A count no longer forms groups on its own, it only bounds them, and there is no
+        # flag that sets a size by hand any more. Forcing a shape therefore means stubbing the
+        # measurement, which is the only thing that builds a group.
+        want = self.budget if self.budget is not None else 1e9
+        q._headroom_bytes = lambda: want * q._bytes_a_padded_second() / q.BUDGET_FRACTION
+        return q
+
+    def __exit__(self, *exc):
+        q = self.q
+        (q.GROUPING, q.MAX_SPANS, q.grouping.SPAN_FLOOR_SECONDS,
+         q._headroom_bytes) = self.was
+        return False
+
+
+def span_mode(q, spans):
+    return batch_mode(q, ceiling=spans)
+
+
+def the_card_refusing_lowers_the_budget(c, q, calls):
+    """An out-of-memory is the one reading the cost model cannot take for itself.
+
+    🔴 A call the card refuses allocated nothing to measure, so the size it was refused at
+    is the only evidence the prediction was too high. Everything else that fails a call --
+    a malformed span, a short answer -- says nothing about size, and the check above this
+    one holds that those do NOT move the budget.
+    """
+    spans = [(0.0, 0.2), (0.2, 0.4), (0.4, 0.6), (0.6, 0.8)]
+    body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+    real, said, real_p = q._offline_transcribe_many, [], q._p
+
+    def refusing(clips, language=None):
+        if len(clips) > 1:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return real(clips, language=language)
+
+    was = q._refused_above
+    # 🔴 This scenario CAUSES a refusal, so it is the one that leaves `_refusal_streak` behind.
+    # Fixing the scenario downstream was fixing the victim: a polluter that does not clean up
+    # just moves the problem to whoever runs next. Reset on the way in and restore on the way
+    # out, the same as everything else this stubs.
+    was_streak, was_target = q._refusal_streak, q._streak_target
+    q._refusal_streak, q._streak_target = 0, None
+    q._offline_transcribe_many, q._p = refusing, said.append
+    try:
+        with batch_mode(q, budget=1.0):
+            del calls[:]
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": "[" + body + "]"})
+            doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q._offline_transcribe_many, q._p = real, real_p
+        refused, q._refused_above = q._refused_above, was
+        q._refusal_streak, q._streak_target = was_streak, was_target
+    got = doc.get("results") or []
+    check("every span still comes back after the card refused",
+          len(got) == 4 and all("text" in x for x in got), got)
+    # 0.4, not the 0.8 the first attempt was refused at: the group was halved and the half
+    # was refused too, so the smallest size the card has said no to is the honest ceiling.
+    check("the SMALLEST size the card refused becomes the ceiling", refused == 0.4, refused)
+    line = [x for x in said if x.startswith("batching:")]
+    check("the report says the card refused, not just that a group was split",
+          bool(line) and "the card refused 2 calls" in line[0], line)
+    # 🔴 A configured number is a ceiling now, re-solved like auto, so a refusal lowers it
+    # and the rest of the request is re-planned under it rather than bisected.
+    check("a configured number is re-planned under the refusal, not bisected",
+          bool(line) and "re-planned 2 times" in line[0]
+          and "groups split and retried" not in line[0], line)
+    check("and the report says the size the next call will be, unrounded",
+          bool(line) and "the next call is sized at 0.2 padded seconds" in line[0], line)
+    check("and says that the ceiling lifts, because it does",
+          bool(line) and "lifts 60s after the refusal" in line[0]
+          and "fixed by configuration" not in line[0], line)
+
+
+def a_refusal_reshapes_the_rest_of_the_request(c, q, calls):
+    """Under `auto`, the card refusing one call makes the WHOLE request smaller.
+
+    🔴 The refusal is about size, so it applies to every group still outstanding. Halving
+    only the group that failed leaves the rest of the request queued at the size that just
+    failed -- each of them then finds the same wall on its own, and a request with ten
+    groups pays ten refused calls to learn one thing.
+    """
+    spans = [(i * 0.1, i * 0.1 + 0.1) for i in range(8)]
+    body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+    real, said, real_p = q._offline_transcribe_many, [], q._p
+
+    def refusing(clips, language=None):
+        # A card that will not take more than two clips at a time, whatever it is told.
+        if len(clips) > 2:
+            raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
+        return real(clips, language=language)
+
+    was_refused, was_headroom = q._refused_above, q._headroom_bytes
+    was_drop, dropped = q._drop_cache, []
+    # 🔴 The streak and its target are module state too, and a scenario that leaves one
+    # behind changes what the NEXT scenario's report line says -- the wait doubles, and the
+    # sentence about when the ceiling lifts is asserted as a literal below. Saving only
+    # `_refused_above` meant the order these run in decided whether that literal held.
+    was_streak, was_target = q._refusal_streak, q._streak_target
+    q._offline_transcribe_many, q._p = refusing, said.append
+    q._headroom_bytes = lambda: 8 * (2 ** 30)
+    q._refused_above, q._drop_cache = None, lambda: dropped.append(True)
+    q._refusal_streak, q._streak_target = 0, None
+    try:
+        with batch_mode(q):
+            del calls[:]
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": "[" + body + "]"})
+            doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q._offline_transcribe_many, q._p = real, real_p
+        q._headroom_bytes, q._refused_above = was_headroom, was_refused
+        q._refusal_streak, q._streak_target = was_streak, was_target
+        q._drop_cache = was_drop
+    got = doc.get("results") or []
+    check("every span comes back after the request was reshaped",
+          len(got) == 8 and all("text" in x for x in got), got)
+    line = [x for x in said if x.startswith("batching:")]
+    # 🔴 The exact count. One per refusal is the design: the ceiling halves, so eight spans
+    # against a card that takes two go 8 -> 4 -> 2, not one group at a time.
+    check("the rest of the request was re-planned once per refusal, not halved",
+          bool(line) and "re-planned 2 times" in line[0], line)
+    # 🔴 Dropped once per refusal, from the handler: on a shared card the blocks torch
+    # caches are blocks the neighbours cannot have.
+    check("the allocator's cache goes back to the card on every refusal",
+          len(dropped) == 2, dropped)
+    # 🔴 The size prints as the number it is: 0.2 rounded to "0" reads as a process with
+    # nothing left, which is a different situation with a different cause.
+    check("auto says the size of the next call, unrounded",
+          bool(line) and "the next call is sized at 0.2 padded seconds" in line[0], line)
+    # 🔴 And says it is temporary. A ceiling that never lifted meant one refusal caused by
+    # a neighbour's minute left this process smaller for the rest of its life.
+    check("the ceiling says when it lifts, because it does",
+          bool(line) and "lifts 60s after the refusal" in line[0], line)
+    check("refusals track how wrong the guess was, not how many groups there are",
+          bool(line) and "the card refused 2 calls" in line[0]
+          and "6 calls made" in line[0], line)
+
+
+def the_sizing_says_what_it_did(c, q, calls):
+    """A seconds budget groups by what a call costs, and one line says what happened.
+
+    🔴 The report is the only thing that distinguishes "grouped as asked" from "grouped
+    and then split three times because the card refused" -- both answer 200 with every
+    span present, and the second is the one worth knowing about.
+    """
+    # Four 0.1 s spans and one 0.6 s one. A 0.6 s budget takes six of the short ones or one
+    # long one, so the long span must come back alone and the short ones together.
+    spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.8), (0.8, 0.9), (0.9, 1.0)]
+    body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+    said, real_p = [], q._p
+    q._p = said.append
+    try:
+        with batch_mode(q, budget=0.6):
+            del calls[:]
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": "[" + body + "]"})
+            doc = r.json() if r.status_code == 200 else {}
+    finally:
+        q._p = real_p
+    got = doc.get("results") or []
+    check("a seconds budget answers 200 with every span", len(got) == len(spans), len(got))
+    check("the long span was not padded onto the short ones",
+          sorted(calls) == [1, 4], calls)
+    line = [x for x in said if x.startswith("batching:")]
+    check("the request says what the sizing did", len(line) == 1, said)
+    if line:
+    # 🔴 The numbers, not the words. A report whose counters never move still carries
+    # every phrase, and every assertion about the phrases passes.
+        check("it counts the spans it was given", "5 spans planned" in line[0], line[0])
+        check("it says the budget it used, not a rounded one",
+              "0.6 padded seconds" in line[0], line[0])
+        check("it counts the calls it planned", "into 2 calls" in line[0], line[0])
+        check("it counts the calls it made", "2 calls made" in line[0], line[0])
+        check("nothing was split, and it does not say one was",
+              "split" not in line[0], line[0])
+        check("it says what the correction is", "cost model 1.00x" in line[0], line[0])
 
 
 def one_bad_span_does_not_sink_its_group(c, q, calls):
@@ -2800,34 +3007,49 @@ def one_bad_span_does_not_sink_its_group(c, q, calls):
     cannot help either: grouping is by index, so the retry rebuilds the same group around
     the same span. Halving a failed group ends the search on the span responsible.
     """
-    was = q.MAX_BATCH_SPANS
-    q.MAX_BATCH_SPANS = 8
     bad = {"n": 0}
     real = q._offline_transcribe_many
 
-    def refusing(clips):
+    def refusing(clips, language=None):
         # The engine refuses any call that carries the pathological clip, as a real one does.
         bad["n"] += 1
         if any(len(cl) == 8 for cl in clips):
             raise RuntimeError("engine refused this batch")
-        return real(clips)
+        return real(clips, language=language)
 
     q._offline_transcribe_many = refusing
+    said, real_p = [], q._p
+    q._p = said.append
     try:
-        del calls[:]
-        # index 2 is 8 samples long: hi > lo so it is handed to the engine, and a real one
-        spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.2005), (0.4, 0.5), (0.5, 0.6)]
-        body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
-        r = c.post("/v1/audio/transcriptions", files=WAV,
-                   data={"segments": "[" + body + "]"})
-        doc = r.json() if r.status_code == 200 else {}
+        with span_mode(q, 8):
+            del calls[:]
+            # index 2 is 8 samples long: hi > lo so it is handed to the engine, and a real one
+            spans = [(0.0, 0.1), (0.1, 0.2), (0.2, 0.2005), (0.4, 0.5), (0.5, 0.6)]
+            body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": "[" + body + "]"})
+            doc = r.json() if r.status_code == 200 else {}
     finally:
         q._offline_transcribe_many = real
-        q.MAX_BATCH_SPANS = was
+        q._p = real_p
     got = doc.get("results") or []
     errs = [i for i, e in enumerate(got) if "error" in e]
     check("a refused span still leaves one entry per request entry", len(got) == 5, len(got))
     check("only the span the engine refused carries the error", errs == [2], errs)
+    # 🔴 Planned and made differ here and nowhere else: one group planned, seven calls run.
+    # Quoting only the plan would say "5 spans in 1 call" for a request that split three times.
+    #
+    # ⚠️ Five calls and two splits while groups kept the caller's order. Packing longest first
+    # moves the 0.5 ms span from the middle of the group to its end, and halving finds a span at
+    # the end in more steps. Same outcome, more steps: nothing orders a group by where a bad
+    # span is likely to be, and there is nothing to order it by.
+    line = [x for x in said if x.startswith("batching:")]
+    check("the report separates the plan from what ran",
+          bool(line) and "into 1 calls" in line[0] and "7 calls made" in line[0], line)
+    check("and counts the splits that got it there",
+          bool(line) and "3 groups split and retried" in line[0], line)
+    check("a refusal that was not the card does not move the budget",
+          q._refused_above is None, q._refused_above)
     check("its neighbours keep their transcripts",
           len(got) == 5 and all("text" in got[i] for i in (0, 1, 3, 4)), got)
 
@@ -2840,17 +3062,17 @@ def malformed_span_is_isolated(c, q, calls):
     array, so anything at all can arrive as an element -- and the batched path has to keep
     the same promise, that the reply carries one entry per request entry, in order.
     """
-    was = q.MAX_BATCH_SPANS
-    q.MAX_BATCH_SPANS = 8
-    try:
+    # 🔴 span_mode, not a bare count. The gate is `GROUPING`, so setting the count alone
+    # leaves this on the SERIAL path, where every assertion below still passes.
+    with span_mode(q, 8):
         del calls[:]
         r = c.post("/v1/audio/transcriptions", files=WAV,
                    data={"segments": '[{"start":0,"end":0.2},"oops",'
                                      '{"start":"n/a","end":1},{"start":0.3,"end":0.5}]'})
         doc = r.json() if r.status_code == 200 else {}
-    finally:
-        q.MAX_BATCH_SPANS = was
     got = doc.get("results") or []
+    check("the malformed-span check ran on the batched path, not the serial one",
+          len(calls) > 0 and max(calls) > 1, calls)
     check("a malformed span does not 500 the whole request", r.status_code == 200,
           r.status_code)
     check("every requested span still gets an entry, in order", len(got) == 4, got)
@@ -2980,15 +3202,11 @@ def batch_over_cap(c, q, calls):
     want = [str(int(round(e * SR)) - int(round(s * SR))) for s, e in spans]
     body = ",".join('{"start":%s,"end":%s}' % (s, e) for s, e in spans)
 
-    was = q.MAX_BATCH_SPANS
-    q.MAX_BATCH_SPANS = 3
-    try:
+    with span_mode(q, 3):
         del calls[:]
         r = c.post("/v1/audio/transcriptions", files=WAV,
                    data={"segments": "[" + body + "]"})
         doc = r.json()
-    finally:
-        q.MAX_BATCH_SPANS = was
 
     check("over-cap batch answers 200", r.status_code == 200, r.status_code)
     got = doc.get("results") or []
@@ -2996,7 +3214,9 @@ def batch_over_cap(c, q, calls):
     check("no span is left unanswered", all(x is not None for x in got), got)
     check("spans keep the order they were sent in",
           [x.get("text") for x in got] == want, [x.get("text") for x in got])
-    check("the request was split at the cap, not sent whole", calls == [3, 3, 1], calls)
+    # 🔴 Three calls, and the sizes are what costs least at three: [2, 2, 3] pads to 2.3 s
+    # where filling to the cap first ([3, 3, 1]) pads to 2.5 s for the same three calls.
+    check("the request was split at the cap, not sent whole", calls == [2, 2, 3], calls)
 
 
 class FakeTTS:
@@ -5436,6 +5656,88 @@ def main():
             check("%s raised" % name, False, e)
     print("\n" + ("FAILURES: %s" % FAILED if FAILED else "all capability wiring checks passed"))
     return 1 if FAILED else 0
+
+
+def the_language_field_reaches_the_model(c, q):
+    """`language` was declared on the endpoint, parsed by FastAPI -- and then dropped.
+
+    Both offline paths passed a literal None to transcribe(), so forcing a language and
+    not forcing one produced byte-identical output. That is the one kind of wrong answer
+    a caller cannot see: the transcript looks fine, it is simply in whatever language the
+    model guessed. The reply now also carries the language, which is what makes the
+    difference observable from outside at all.
+    """
+    seen = []
+    asr = q._state["asr"]
+    real = asr.transcribe
+
+    def watching(audio=None, language=None, return_time_stamps=None):
+        seen.append(language)
+        clips = audio if isinstance(audio, list) else [audio]
+        return [types.SimpleNamespace(text="hi", language=language or "English")
+                for _c, _sr in clips]
+
+    asr.transcribe = watching
+    try:
+        r = c.post("/v1/audio/transcriptions", files=WAV, data={"language": "zh"})
+        forced = r.json() if r.status_code == 200 else {}
+        auto = c.post("/v1/audio/transcriptions", files=WAV, data={})
+        detected = auto.json() if auto.status_code == 200 else {}
+        bad = c.post("/v1/audio/transcriptions", files=WAV, data={"language": "klingon"})
+        region = c.post("/v1/audio/transcriptions", files=WAV, data={"language": "zh-CN"})
+    finally:
+        asr.transcribe = real
+    # Four requests, four reached the model. The unservable one arrives as None -- the
+    # same thing sending no language at all produces -- and is told apart from a silent
+    # no-op only by the language the reply carries back.
+    check("the model saw exactly what each request asked for",
+          seen == ["Chinese", None, None, "Chinese"], seen)
+    check("the reply says which language the transcript is in",
+          forced.get("language") == "Chinese", forced)
+    check("and says what the model detected when nothing was forced",
+          detected.get("language") == "English", detected)
+    check("a language this model cannot serve falls back instead of failing the request",
+          bad.status_code == 200, bad.status_code)
+    check("and the reply is what tells the caller the hint was not honoured",
+          bad.json().get("language") == "English", bad.json())
+    check("a region subtag is accepted and answered like the bare code",
+          region.status_code == 200 and region.json().get("language") == "Chinese",
+          (region.status_code, region.json()))
+
+
+def every_span_says_what_language_it_is(c, q):
+    """Batch mode answers per span, so the language has to be per span too.
+
+    A caller that batches spans is the one most likely to need this -- it is holding a
+    list of transcripts with nothing on them saying which language each is in, which is
+    exactly the gap that made the caller go vote on it downstream.
+    """
+    asr = q._state["asr"]
+    real = asr.transcribe
+    seen = []
+
+    def answering(audio=None, language=None, return_time_stamps=None):
+        clips = audio if isinstance(audio, list) else [audio]
+        seen.append(len(clips))
+        return [types.SimpleNamespace(text=str(len(cl)), language=language or "English")
+                for cl, _sr in clips]
+
+    asr.transcribe = answering
+    try:
+        # 🔴 span_mode, as above: the serial path also answers a per-span language, so a
+        # bare count leaves this passing while testing the one path it is not about.
+        with span_mode(q, 8):
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": '[{"start":0,"end":1},{"start":1,"end":2}]',
+                             "language": "ja"})
+            doc = r.json() if r.status_code == 200 else {}
+    finally:
+        asr.transcribe = real
+    got = doc.get("results") or []
+    check("the language check ran on the batched path, not the serial one",
+          seen == [2], seen)
+    check("every span in a batch carries its language",
+          len(got) == 2 and all(e.get("language") == "Japanese" for e in got), got)
 
 
 if __name__ == "__main__":

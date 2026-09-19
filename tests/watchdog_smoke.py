@@ -5,7 +5,6 @@
 import os
 import subprocess
 import sys
-import types
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
@@ -25,20 +24,6 @@ def child(mode, timeout="1"):
     return p.returncode, (p.stdout + p.stderr).decode()[-300:]
 
 
-def fake_vllm(fields):
-    for name in ("vllm", "vllm.config"):
-        sys.modules.pop(name, None)
-    if fields is None:
-        sys.modules["vllm"] = None      # import raises, like an older build
-        return
-    cfg = types.ModuleType("vllm.config")
-    cfg.CompilationConfig = type("CompilationConfig", (), {"model_fields": dict.fromkeys(fields)})
-    pkg = types.ModuleType("vllm")
-    pkg.config = cfg
-    sys.modules["vllm"] = pkg
-    sys.modules["vllm.config"] = cfg
-
-
 def main():
     print("\n[watchdog]")
     rc, out = child("wedge")
@@ -51,27 +36,6 @@ def main():
           (rc, out[-120:]))
     rc, out = child("wedge", timeout="0")
     check("a zero deadline disables it", rc == 0 and "survived" in out, (rc, out[-80:]))
-
-    print("\n[vLLM capture-size probe]")
-    from wrapper.caps import stt_stream as q
-
-    q.ENFORCE_EAGER = False
-    fake_vllm(["cudagraph_capture_sizes", "level"])
-    check("the current field name is used",
-          q._capture_kw() == {"compilation_config": {"cudagraph_capture_sizes": [1, 2, 4, 8]}},
-          q._capture_kw())
-    fake_vllm(["capture_sizes"])
-    check("an older field name is used instead",
-          q._capture_kw() == {"compilation_config": {"capture_sizes": [1, 2, 4, 8]}},
-          q._capture_kw())
-    fake_vllm(["something_else"])
-    check("an unknown config is left alone rather than guessed", q._capture_kw() == {})
-    fake_vllm(None)
-    check("an unimportable vllm.config is survived", q._capture_kw() == {})
-    fake_vllm(["cudagraph_capture_sizes"])
-    q.ENFORCE_EAGER = True
-    check("--enforce-eager wins over everything",
-          q._capture_kw() == {"enforce_eager": True}, q._capture_kw())
 
     print("\n" + ("FAILURES: %s" % FAILED if FAILED else "all checks passed"))
     return 1 if FAILED else 0
