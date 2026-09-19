@@ -327,6 +327,12 @@ def _modalities(operation_id):
 
 def _parameters(module, operation_id):
     params = []
+    # `segments` is the protocol-level batching signal consumed by clients.
+    # Keep it tied to the implementations that actually accept the multipart
+    # field: a future single-clip recogniser must not inherit the claim merely
+    # because it also exposes audio.transcribe.
+    if operation_id == "audio.transcribe" and module in ("stt_stream", "whisper"):
+        params.append({"name": "segments", "type": "array"})
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
         if module in ("firered", "breeze"):
             params.append({"name": "output_format", "type": "string", "default": "mp3_44100_128",

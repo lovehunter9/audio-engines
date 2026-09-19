@@ -116,6 +116,20 @@ TASK_PATHS = {
 
 
 class CatalogContractTest(unittest.TestCase):
+    def test_only_multi_span_transcribers_advertise_segments(self):
+        for module in ("stt_stream", "whisper"):
+            endpoint = catalog.describe_endpoint(
+                module, "stt", "POST", "/v1/audio/transcriptions", True
+            )
+            self.assertIn(
+                {"name": "segments", "type": "array"}, endpoint["parameters"]
+            )
+
+        single = catalog.describe_endpoint(
+            "future_single_stt", "stt", "POST", "/v1/audio/transcriptions", True
+        )
+        self.assertNotIn("segments", {p["name"] for p in single["parameters"]})
+
     def test_shared_paths_keep_model_specific_operation_semantics(self):
         self.assertEqual(
             catalog.describe_endpoint("tts_dialogue", "tts_dialogue", "POST", "/v1/audio/speech", True)["operation_id"],
@@ -980,6 +994,9 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertTrue(transcription["async_supported"])
         self.assertEqual(transcription["operation_id"], "audio.transcribe")
         self.assertEqual(transcription["protocol"], "openai.audio.v1")
+        self.assertIn(
+            {"name": "segments", "type": "array"}, transcription["parameters"]
+        )
         self.assertTrue(all("max_input_seconds" not in endpoint for endpoint in spec["endpoints"]))
 
     def test_engine_capacity_reports_the_single_inference_worker(self):
