@@ -306,6 +306,139 @@ on `model.generate`. Chart `ENGINE_ARGS` that named vLLM flags are still parsed
 so they do not show up as leftovers. `qwen-asr` is installed `--no-deps`;
 gradio / flask / sox stay out.
 
+**Batching is on with nothing set**, and how much one `generate()` carries is
+measured on this machine rather than configured. It degrades to one span a call
+by itself, out loud, wherever it cannot be sized -- no counter, no declared
+grant, a card already spent, a container at its cgroup limit -- so the failure
+of the default is the behaviour that used to be the default.
+
+**One flag.** `--batch-max-spans N` is how many spans one call may carry, and
+`1` is one span a call. With nothing set there is no ceiling and the size comes
+entirely from what this machine measures.
+
+| `ENGINE_ARGS` | grouping | span ceiling |
+| --- | --- | --- |
+| *(nothing)* | on, sized by measurement | none |
+| `--batch-max-spans 32` | on, sized by measurement | 32 |
+| `--batch-max-spans 1` | **off** -- one span a call | 1 |
+| `--batch-max-spans 32x` | on, and a `WARN` naming the value | none |
+
+🔴 **There is no flag that sets a size by hand, on purpose.** How much memory a
+call may take is declared once at install as `REQUIRED_GPU_MEMORY`, which is
+also what tells the platform to reserve it; a flag repeating it would be a
+second place for the same fact to be wrong, and a private ceiling would leave
+the quota reserved and unused. A deployment that wants this engine to take less
+lowers the declaration.
+
+What is left is the one question an operator is better placed to answer than
+the engine: how many spans a call may carry, as a backstop for when the sizing
+is wrong. ⚠️ **A count is not a memory bound** -- 32 spans is 64 padded seconds
+or 57,600, depending on how long they are -- which is why it has no default and
+why it cannot build a call, only limit one. Splitting a group never costs more
+than leaving it whole, so a count can make a plan smaller and never larger.
+
+**Backing out, cheapest first**: `--batch-max-spans N` when calls carry more
+spans than this machine turns out to like, and `--batch-max-spans 1` when
+grouping itself is suspect, which is what an engine with no batching flag did
+before this feature. 🔴 **Pick N from your own telemetry**: the `batching:` line
+prints the shape every request planned, and a ceiling one step below the largest
+that has been running cleanly is a number the machine gave you.
+
+🔴 **It is also the one lever over how much of a shared card this engine ever
+holds**, which is a reason to set it deliberately rather than only in an
+incident. The allocator does not return what it has taken, so the largest call a
+process ever makes is the floor of what it keeps: measured on one card, the same
+620 padded seconds of work peaked at 4,580 MiB as `[4x30s x5]` and 7,254 MiB as
+one `[20x30s]` -- 2.7 GB of permanent footprint, for identical total work. On an
+oversubscribed card that difference is what the neighbours cannot have.
+⚠️ **It caps the count, so it has no purchase on one long span**: a single
+300-second clip is its own call whatever the ceiling says.
+
+🔴 **No flag makes it faster.** They are all ceilings, so if throughput is below
+what you expected, the answer is in the startup line rather than in a flag. The
+engine degrades to one span a call in four situations and names which:
+
+| the line says | what it means | what fixes it |
+| --- | --- | --- |
+| `no per-process memory counter` | no CUDA device this engine can read | not a flag; a different machine, or accept serial |
+| `declares no GPU quota (REQUIRED_GPU_MEMORY)` | the platform granted nothing to size against | add the quota to the chart |
+| `the grant is readable and already spent` | the card is full right now | wait; it lifts when the holder lets go |
+| `the container is at its memory limit` | the cgroup is full right now | wait, or raise the container's limit |
+
+The first two are permanent for the life of the process; the last two clear by
+themselves on the next request.
+
+🔴 **One span longer than the budget is not on that list, and it does not
+degrade -- it goes out whole.** A group is never smaller than one span, so a
+span that costs more than a call may carry is handed to the card as it is.
+Before it goes, the allocator's cache is handed back, which is what keeps the
+failure catchable: the request answers 200 with an error on that span alone
+rather than the container being OOMKilled. ⚠️ That is the repeatable case, not
+every case -- nothing here bounds how large a single span may be, and a large
+enough one can still reach the cgroup first. **The caller is what fixes it**:
+cap segment length upstream rather than relying on this.
+
+⚠️ **A count no longer replaces the memory bound.** Before this branch `--batch
+32` grouped by arrival with no seconds budget at all, so thirty-two five-minute
+spans went as one 9,600-second call and only the container's account trimmed it
+-- a flag that made a call *bigger*, by turning a bound off. A count now bounds
+the count and nothing else. For a deployment already running one this changes
+the work only where the old behaviour was about to be dangerous, and the arrival
+order that mode exists for is untouched.
+
+🔴 **The container's account may only lower, never stand in.** A call is sized
+*from* the budget, so a container reading can lower that budget or take it to
+zero, but it cannot supply one where the GPU grant could not be read -- standing
+in sizes a batch on a card this engine has no authority over. ⚠️ Before this
+branch the count mode fixed the size before either account was consulted, and
+there the container bounded alone, which is what kept the previous runtime's
+container alive when somebody set a count too high. There is no such mode now:
+the ceiling applies to a size the measurement built.
+
+The unit is
+padded seconds because the processor pads a group up to its longest member, so
+a call carries `len(group) x longest` seconds however short the rest are, plus
+one second a span whatever its length -- its logits are `[N, vocab]` and the KV
+for the prompt in front of its audio is the same size for every span, which is
+arithmetic off the checkpoint's config rather than anything measured. At 30 s a
+span that is 2% and at 2 s it is a third, and the diarizer upstream has no
+minimum segment length. Under
+The engine calibrates that cost on a throwaway call before it reports ready and
+corrects it on every call after. One line per batched request says
+which sizing ran, the shape it planned as `count x longest` and what that costs
+in padded seconds, how many calls it planned against how many it made, the
+correction, and the peak this process has held (`unmeasured` where there is no
+counter -- nothing else publishes it, since `/metrics` reports what the card has
+free, which on a shared card is mostly somebody else's).
+
+When the card refuses a call, HALF that size becomes the ceiling: the rest of the
+request is re-planned under it, and it **lifts sixty seconds after the refusal**,
+after which the next call is sized from the arithmetic again. The window is
+policy -- nobody measured how long a neighbour holds a card -- and it is there
+because the alternative was worse: a ceiling that never lifted meant one refusal
+caused by somebody else's minute left the process smaller for the rest of its
+life. Being wrong costs one refused call, which this engine already handles
+without failing the request, and the report counts them.
+
+**A ceiling that does not survive its own recovery doubles the next wait**, to a
+cap of thirty-two minutes, and a call at or above the refused size going through
+puts it back to sixty seconds. This is the one thing that tells the two causes
+apart. A refusal never reaches the correction -- a call that died allocated
+nothing to measure -- so a cost model that is wrong about *this* machine cannot
+learn from being refused: the ceiling lifts, the same wrong budget comes back,
+and the next request is refused again. On a fixed timer that is two or three
+wasted calls a minute for the life of the process. A neighbour's minute, by
+contrast, is gone before the first retry, so the wait never grows.
+
+One call reaches for half of the readable headroom, and that share is a constant
+rather than a flag. The margin covers what the cost model does not price -- the
+decode KV, the allocator's fragmentation, and neighbours on the same card. It
+was a flag for one round: it is the only number that can size a batch ABOVE the
+grant this container was given, which from downstream is indistinguishable from
+a cost model that is simply wrong. A deployment that wants to be more careful
+says so by declaring a smaller `REQUIRED_GPU_MEMORY`; one that really does
+own more of the card says so through the platform's grant.
+
 **`fasterwhisper`.** Arch-selected deps (`base-amd64` / `base-arm64`):
 
 - **amd64** keeps `harveyff-whisper-webui` and its three traps in that stage's

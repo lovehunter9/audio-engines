@@ -71,23 +71,11 @@ jobs:
         run: python -m compileall -q wrapper tests
       - name: contract tests
         run: python -m unittest tests/test_contract.py
-      - name: align out-of-memory regression tests
-        # Named so they run whichever branch lands first. ⚠️ feat/stt-seconds-cap adds
-        # `unittest discover -s tests` to this same job, for a reason this branch has no
-        # answer to -- it found 82 tests that CI had never run. Once that lands, discover
-        # is a superset and these named steps are a few redundant seconds, not a competing
-        # policy: keep discover and drop them.
-        run: python -m unittest tests/test_align_oom.py
-      # One ENGINE_ARGS string reaches every capability in an image, so a command-line
-      # argument read as a switch in one and as a value in another turns that feature off
-      # in silence. Same note as above about discover.
-      - name: flag registry
-        run: python -m unittest tests/test_flag_registry.py
-      # 🔴 After the ffmpeg step above, and that is not incidental: this one generates real
-      # containers rather than stubbing the reader, because the gap it pins is between two
-      # libraries and a stub has neither of them.
-      - name: audio duration readers
-        run: python -m unittest tests/test_audio_readers.py
+      # 🔴 Until here CI ran no unit tests at all. A branch could add a hundred of them, go
+      # green, and have none of them guarding anything. discover is a superset of the contract
+      # step above, kept separate so a contract failure keeps its own name in the checks list.
+      - name: unit tests
+        run: python -m unittest discover -s tests
       - name: capability smoke tests
         run: python tests/caps_smoke.py
       - name: watchdog smoke tests
