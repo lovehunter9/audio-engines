@@ -2761,12 +2761,13 @@ def t_qwen():
 
     q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
     # One result per clip, saying how many samples that clip carried. The real engine
-    calls = []
+    calls, requests = [], []
 
-    def fake_transcribe(audio=None, language=None, return_time_stamps=None):
+    def fake_transcribe(audio=None, context=None, language=None, return_time_stamps=None):
         # Two shapes reach here: the serial path hands one (clip, sr) tuple, the batched
         clips = audio if isinstance(audio, list) else [audio]
         calls.append(len(clips))
+        requests.append({"clips": len(clips), "context": context, "language": language})
         return [types.SimpleNamespace(text=str(len(c))) for c, _sr in clips]
 
     q._state.update(ready=True, asr=types.SimpleNamespace(
@@ -2784,6 +2785,7 @@ def t_qwen():
         both_ways(c, "/v1/audio/transcriptions", WAV,
                   {"segments": '[{"start":0,"end":1},{"start":1,"end":2}]'}, "qwen batch",
                   meters=("input",))
+        the_prompt_reaches_every_qwen_path(c, q, requests)
         batch_over_cap(c, q, calls)
         repetition_fallback(q)
         repetition_request_spellings(q)
@@ -2838,6 +2840,61 @@ def span_mode(q, spans):
     return batch_mode(q, ceiling=spans)
 
 
+def the_prompt_reaches_every_qwen_path(c, q, requests):
+    """The OpenAI-compatible prompt is Qwen's context on every execution path."""
+    prompt = "Use these canonical spellings for vocabulary and names: \u5c0f\u73fa"
+
+    del requests[:]
+    both_ways(c, "/v1/audio/transcriptions", WAV, {"prompt": prompt},
+              "qwen prompt single", meters=("input",))
+    check("single sync and async calls pass prompt as context",
+          len(requests) == 2 and all(x["context"] == prompt for x in requests), requests)
+
+    body = '[{"start":0,"end":0.1},{"start":0.1,"end":0.2},' \
+           '{"start":0.2,"end":0.3},{"start":0.3,"end":0.4}]'
+    del requests[:]
+    with batch_mode(q, budget=0.2):
+        both_ways(c, "/v1/audio/transcriptions", WAV,
+                  {"segments": body, "prompt": prompt}, "qwen prompt grouped",
+                  meters=("input",))
+    check("multi-group sync and async calls keep one context for every group",
+          len(requests) == 4 and all(x["context"] == prompt for x in requests)
+          and all(x["clips"] == 2 for x in requests), requests)
+
+    was_grouping = q.GROUPING
+    q.GROUPING = False
+    del requests[:]
+    try:
+        both_ways(c, "/v1/audio/transcriptions", WAV,
+                  {"segments": body, "prompt": prompt}, "qwen prompt serial",
+                  meters=("input",))
+    finally:
+        q.GROUPING = was_grouping
+    check("serial batch sync and async calls keep context on every span",
+          len(requests) == 8 and all(x["context"] == prompt for x in requests)
+          and all(x["clips"] == 1 for x in requests), requests)
+
+    real = q._offline_transcribe_many
+    attempts = []
+
+    def refusing(clips, language=None, context=""):
+        attempts.append((len(clips), context))
+        if len(clips) > 1:
+            raise RuntimeError("engine refused this batch")
+        return real(clips, language=language, context=context)
+
+    q._offline_transcribe_many = refusing
+    try:
+        with span_mode(q, 8):
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": body, "prompt": prompt})
+    finally:
+        q._offline_transcribe_many = real
+    check("binary retries keep the same context while splitting groups",
+          r.status_code == 200 and len(attempts) > 1
+          and all(context == prompt for _size, context in attempts), attempts)
+
+
 def the_card_refusing_lowers_the_budget(c, q, calls):
     """An out-of-memory is the one reading the cost model cannot take for itself.
 
@@ -2850,10 +2907,13 @@ def the_card_refusing_lowers_the_budget(c, q, calls):
     body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
     real, said, real_p = q._offline_transcribe_many, [], q._p
 
-    def refusing(clips, language=None):
+    contexts = []
+
+    def refusing(clips, language=None, context=""):
+        contexts.append(context)
         if len(clips) > 1:
             raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
-        return real(clips, language=language)
+        return real(clips, language=language, context=context)
 
     was = q._refused_above
     # 🔴 This scenario CAUSES a refusal, so it is the one that leaves `_refusal_streak` behind.
@@ -2867,7 +2927,7 @@ def the_card_refusing_lowers_the_budget(c, q, calls):
         with batch_mode(q, budget=1.0):
             del calls[:]
             r = c.post("/v1/audio/transcriptions", files=WAV,
-                       data={"segments": "[" + body + "]"})
+                       data={"segments": "[" + body + "]", "prompt": "\u5c0f\u73fa"})
             doc = r.json() if r.status_code == 200 else {}
     finally:
         q._offline_transcribe_many, q._p = real, real_p
@@ -2876,6 +2936,8 @@ def the_card_refusing_lowers_the_budget(c, q, calls):
     got = doc.get("results") or []
     check("every span still comes back after the card refused",
           len(got) == 4 and all("text" in x for x in got), got)
+    check("OOM re-planning keeps context on every attempted call",
+          bool(contexts) and all(x == "\u5c0f\u73fa" for x in contexts), contexts)
     # 0.4, not the 0.8 the first attempt was refused at: the group was halved and the half
     # was refused too, so the smallest size the card has said no to is the honest ceiling.
     check("the SMALLEST size the card refused becomes the ceiling", refused == 0.4, refused)
@@ -2906,11 +2968,11 @@ def a_refusal_reshapes_the_rest_of_the_request(c, q, calls):
     body = ",".join('{"start":%s,"end":%s}' % (a, b) for a, b in spans)
     real, said, real_p = q._offline_transcribe_many, [], q._p
 
-    def refusing(clips, language=None):
+    def refusing(clips, language=None, context=""):
         # A card that will not take more than two clips at a time, whatever it is told.
         if len(clips) > 2:
             raise RuntimeError("CUDA out of memory. Tried to allocate 2.00 GiB")
-        return real(clips, language=language)
+        return real(clips, language=language, context=context)
 
     was_refused, was_headroom = q._refused_above, q._headroom_bytes
     was_drop, dropped = q._drop_cache, []
@@ -3010,12 +3072,12 @@ def one_bad_span_does_not_sink_its_group(c, q, calls):
     bad = {"n": 0}
     real = q._offline_transcribe_many
 
-    def refusing(clips, language=None):
+    def refusing(clips, language=None, context=""):
         # The engine refuses any call that carries the pathological clip, as a real one does.
         bad["n"] += 1
         if any(len(cl) == 8 for cl in clips):
             raise RuntimeError("engine refused this batch")
-        return real(clips, language=language)
+        return real(clips, language=language, context=context)
 
     q._offline_transcribe_many = refusing
     said, real_p = [], q._p
@@ -5671,7 +5733,7 @@ def the_language_field_reaches_the_model(c, q):
     asr = q._state["asr"]
     real = asr.transcribe
 
-    def watching(audio=None, language=None, return_time_stamps=None):
+    def watching(audio=None, context=None, language=None, return_time_stamps=None):
         seen.append(language)
         clips = audio if isinstance(audio, list) else [audio]
         return [types.SimpleNamespace(text="hi", language=language or "English")
@@ -5716,7 +5778,7 @@ def every_span_says_what_language_it_is(c, q):
     real = asr.transcribe
     seen = []
 
-    def answering(audio=None, language=None, return_time_stamps=None):
+    def answering(audio=None, context=None, language=None, return_time_stamps=None):
         clips = audio if isinstance(audio, list) else [audio]
         seen.append(len(clips))
         return [types.SimpleNamespace(text=str(len(cl)), language=language or "English")
