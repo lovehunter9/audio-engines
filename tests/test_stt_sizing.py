@@ -953,7 +953,9 @@ class CallGroupTest(unittest.TestCase):
         readings = [(0, 0), (0, used)]
         seq = list(readings)
         m._memory_reading = lambda: seq.pop(0) if len(seq) > 1 else seq[0]
-        m._offline_transcribe_many = lambda clips, language=None: [("", "")] * len(clips)
+        m._offline_transcribe_many = lambda clips, language=None, context="": [
+            ("", "")
+        ] * len(clips)
         return m
 
     def test_a_call_measures_what_its_padded_seconds_cost(self):

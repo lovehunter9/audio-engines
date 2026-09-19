@@ -1064,7 +1064,7 @@ def _text_and_language(r):
     return (t or "").strip(), (lang or "").strip()
 
 
-def _offline_transcribe(audio, language=None):
+def _offline_transcribe(audio, language=None, context=""):
     # Native offline transcription on the same load; max_tokens is raised then restored.
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
@@ -1078,7 +1078,7 @@ def _offline_transcribe(audio, language=None):
             restore_rep = _apply_repetition(sp)
         if old_n is not _MISSING:
             asr.max_new_tokens = budget
-        results = asr.transcribe(audio=(audio, 16000), language=language,
+        results = asr.transcribe(audio=(audio, 16000), context=context or "", language=language,
                                  return_time_stamps=False)
     finally:
         if old_n is not _MISSING:
@@ -1097,7 +1097,7 @@ def _offline_transcribe(audio, language=None):
     return _text_and_language(results[0] if results else None)
 
 
-def _offline_transcribe_many(clips, language=None):
+def _offline_transcribe_many(clips, language=None, context=""):
     # qwen-asr's transcribe() takes a list and hands the whole list to the engine in one generate().
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
@@ -1112,7 +1112,7 @@ def _offline_transcribe_many(clips, language=None):
             restore_rep = _apply_repetition(sp)
         if old_n is not _MISSING:
             asr.max_new_tokens = budget
-        results = asr.transcribe(audio=[(c, 16000) for c in clips],
+        results = asr.transcribe(audio=[(c, 16000) for c in clips], context=context or "",
                                  language=language, return_time_stamps=False)
     finally:
         if old_n is not _MISSING:
@@ -1245,10 +1245,11 @@ def _is_oom(e):
     return "out of memory" in msg or "cuda oom" in msg
 
 
-def _call_group(group, language=None):
+def _call_group(group, language=None, context=""):
     """One generate() for a whole group, and the measurement that sizes the next one."""
     reading = _memory_reading()
-    pairs = _offline_transcribe_many([c for _i, c, _s in group], language=language)
+    pairs = _offline_transcribe_many([c for _i, c, _s in group], language=language,
+                                     context=context)
     padded = grouping.padded_seconds([s for _i, _c, s in group])
     # 🔴 Before the measurement and not inside it: a machine with no counter still has to be able
     # to clear a streak, or its ceiling doubles away from a card that is perfectly healthy.
@@ -1356,6 +1357,7 @@ def build_app(supports):
         async def transcriptions(file: UploadFile = File(...),
                                  model: str = Form(None),
                                  language: str = Form(None),
+                                 prompt: str = Form(None),
                                  response_format: str = Form("json"),
                                  segments: str = Form(None),
                                  async_: str = Form(None, alias="async")):
@@ -1413,7 +1415,7 @@ def build_app(supports):
                                     ctx.meter(input_seconds=_secs)
                             try:
                                 calls += 1
-                                pairs = _call_group(group, language=forced)
+                                pairs = _call_group(group, language=forced, context=prompt)
                                 # zip stops at the shorter side, so a short answer would silently drop spans.
                                 if len(pairs) != len(group):
                                     raise RuntimeError(
@@ -1483,7 +1485,8 @@ def build_app(supports):
                                 speech_seconds += seconds
                                 ctx.meter(input_seconds=seconds)
                                 inference_calls += 1
-                                t, lang = _offline_transcribe(audio[lo:hi], language=forced)
+                                t, lang = _offline_transcribe(audio[lo:hi], language=forced,
+                                                              context=prompt)
                                 out.append({"text": t, "language": lang})
                         except tasks.Cancelled:
                             raise
@@ -1506,7 +1509,7 @@ def build_app(supports):
             def _work(ctx):
                 ctx.meter(input_seconds=len(audio) / 16000.0)
                 ctx.progress(ratio=0.0, stage="transcribe")
-                text, lang = _offline_transcribe(audio, language=forced)
+                text, lang = _offline_transcribe(audio, language=forced, context=prompt)
                 ctx.progress(ratio=1.0, stage="done")
                 if response_format in ("text", "srt", "vtt"):
                     return Response(content=text, media_type="text/plain")
