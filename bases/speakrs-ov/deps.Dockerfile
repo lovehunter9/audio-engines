@@ -18,7 +18,7 @@
 #
 # A digest, not a tag: it is what puts the engine's identity inside this hashed file, so the deps
 # tag moves when the engine does.
-ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:b6cf5375dba55482ec4bed7c923e74e6ff0ce789e28a9b21ad442942fbddba92
+ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:ffe0d9d77f40815e04b7fe0f11fa9d8355ed1fc538683b9ef1f31c228432bb66
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM ubuntu:24.04
