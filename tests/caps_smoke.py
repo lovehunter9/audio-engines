@@ -692,6 +692,16 @@ def t_diar_speakrs():
         if payload["exclusive"]:
             reply["nonexclusive_segments"] = [
                 [0.0, 2.0, "SPEAKER_00"], [1.5, 3.0, "SPEAKER_01"]]
+            if payload.get("exclusive_method") == "score_aware_v1":
+                reply["exclusive_evidence"] = {
+                    "method": "score_aware_v1", "frame_step_ms": 16.875,
+                    "segments": [{"ordinal": 0, "start": 0.0004, "end": 1.5004,
+                                  "speaker": "SPEAKER_00", "support_sum": 12.0,
+                                  "runner_up_support_sum": 3.0,
+                                  "unique_support_frames": 80,
+                                  "tie_continuity_frames": 9,
+                                  "deterministic_fallback_frames": 0,
+                                  "decision": "tie_continuity"}]}
         return reply
 
     ds._child.run = fake_run
@@ -778,8 +788,11 @@ def t_diar_speakrs():
         sent.clear()
         doc = c.post("/v1/audio/diarization", files=WAV, data={"exclusive": "1"}).json()
         check("diar_speakrs passes exclusive through and echoes what ran",
-              sent[-1]["exclusive"] is True and doc["exclusive"] is True,
-              (sent[-1]["exclusive"], doc["exclusive"]))
+              sent[-1]["exclusive"] is True
+              and sent[-1]["exclusive_method"] == "legacy_binary_v1"
+              and doc["exclusive"] is True
+              and doc["exclusive_method"] == "legacy_binary_v1",
+              (sent[-1], doc))
         check("diar_speakrs preserves the engine's ordinary evidence timeline",
               doc["segments"][0]["end"] == 1.5
               and doc["nonexclusive_segments"][0]["end"] == 2.0,
@@ -790,6 +803,36 @@ def t_diar_speakrs():
         check("diar_speakrs preserves ordinary evidence in async results",
               async_doc["result"]["nonexclusive_segments"] == doc["nonexclusive_segments"],
               async_doc.get("result"))
+
+        score_doc = c.post("/v1/audio/diarization", files=WAV,
+                           data={"exclusive": "1",
+                                 "exclusive_method": "score_aware_v1"}).json()
+        check("diar_speakrs passes score-aware selection and evidence through",
+              sent[-1]["exclusive_method"] == "score_aware_v1"
+              and score_doc["exclusive_method"] == "score_aware_v1"
+              and score_doc["exclusive_evidence"]["method"] == "score_aware_v1"
+              and score_doc["exclusive_evidence"]["segments"][0]["ordinal"] == 0
+              and score_doc["exclusive_evidence"]["segments"][0]["start"] == 0.0
+              and score_doc["exclusive_evidence"]["segments"][0]["end"] == 1.5,
+              score_doc)
+        queued = c.post("/v1/audio/diarization", files=WAV,
+                        data={"exclusive": "1", "exclusive_method": "score_aware_v1",
+                              "async": "1"}).json()
+        async_score_doc = poll(c, queued["task"]["id"])
+        check("score-aware evidence survives async task storage",
+              async_score_doc["result"]["exclusive_evidence"]
+              == score_doc["exclusive_evidence"], async_score_doc.get("result"))
+
+        r = c.post("/v1/audio/diarization", files=WAV,
+                   data={"exclusive_method": "score_aware_v1"})
+        check("diar_speakrs refuses an exclusive method without exclusive output",
+              r.status_code == 400 and "exclusive=1" in r.json()["detail"],
+              (r.status_code, r.json()))
+        r = c.post("/v1/audio/diarization", files=WAV,
+                   data={"exclusive": "1", "exclusive_method": "guess"})
+        check("diar_speakrs refuses an unknown exclusive method",
+              r.status_code == 400 and "score_aware_v1" in r.json()["detail"],
+              (r.status_code, r.json()))
 
         # A dead child must read as "not ready", never as an empty result.
         def dead(_payload):

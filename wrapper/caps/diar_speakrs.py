@@ -305,11 +305,13 @@ class _Child:
       child -> us, once at startup:  {"ready": true, "device": "cuda", "load_seconds": 12.3}
                    or on failure:    {"ready": false, "error": "..."}
       us -> child, per job:          {"id": "...", "path": "/tmp/upload-x.wav", "exclusive": false,
+                                      "exclusive_method": "score_aware_v1",
                                       "min_duration_off_frames": 178, ...}
       child -> us, per job:          {"id": "...", "ok": true, "device": "cuda",
                                       "segments": [[0.5, 3.2, "SPEAKER_00"], ...],
                                       "nonexclusive_segments": [[0.5, 3.4,
-                                                                  "SPEAKER_00"], ...]}
+                                                                  "SPEAKER_00"], ...],
+                                      "exclusive_evidence": {...}}
                    or:               {"id": "...", "ok": false, "error": "..."}
 
     stdout carries the protocol and nothing else; the child logs to stderr. A stray print on the
@@ -453,6 +455,17 @@ def _effective(overrides):
     return out
 
 
+def _exclusive_evidence(raw):
+    """Align evidence boundaries to the same millisecond wire clock as segments."""
+    evidence = dict(raw)
+    evidence["segments"] = [
+        dict(segment, start=round(float(segment["start"]), 3),
+             end=round(float(segment["end"]), 3))
+        for segment in raw.get("segments") or []
+    ]
+    return evidence
+
+
 def _load():
     try:
         _seed()
@@ -487,6 +500,7 @@ def build_app(supports):
                       min_speakers: str = Form(default=None),
                       max_speakers: str = Form(default=None),
                       exclusive: str = Form(default=None),
+                      exclusive_method: str = Form(default=None),
                       min_duration_off: str = Form(default=None),
                       min_duration_on: str = Form(default=None),
                       clustering_threshold: str = Form(default=None),
@@ -503,6 +517,14 @@ def build_app(supports):
                                 detail="%s: this engine derives the speaker count from clustering "
                                        "and cannot be constrained to one" % ", ".join(asked))
         want_exclusive = EXCLUSIVE if exclusive is None else tasks.truthy(exclusive)
+        method = (exclusive_method or "legacy_binary_v1").strip()
+        if exclusive_method not in (None, "") and not want_exclusive:
+            raise HTTPException(status_code=400,
+                                detail="exclusive_method requires exclusive=1")
+        if method not in ("legacy_binary_v1", "score_aware_v1"):
+            raise HTTPException(status_code=400,
+                                detail="exclusive_method must be legacy_binary_v1 or "
+                                       "score_aware_v1")
         tuning = _tunables({"min_duration_off": min_duration_off,
                             "min_duration_on": min_duration_on,
                             "clustering_threshold": clustering_threshold})
@@ -518,6 +540,8 @@ def build_app(supports):
             ctx.progress(ratio=0.0, stage="inference")
             ctx.checkpoint()
             payload = {"path": path, "exclusive": want_exclusive}
+            if want_exclusive:
+                payload["exclusive_method"] = method
             for name, (field, cast) in TUNABLES.items():
                 merged = _effective(tuning)
                 payload[field] = cast(merged[name]) if name in merged else None
@@ -532,12 +556,16 @@ def build_app(supports):
                     "num_speakers": len(speakers), "speakers": speakers,
                     "num_segments": len(segs), "segments": segs,
                     "exclusive": bool(want_exclusive)}
+            if want_exclusive:
+                body["exclusive_method"] = method
             if "nonexclusive_segments" in reply and reply["nonexclusive_segments"] is not None:
                 body["nonexclusive_segments"] = [
                     {"start": round(float(s), 3), "end": round(float(e), 3),
                      "speaker": str(spk)}
                     for s, e, spk in reply["nonexclusive_segments"]
                 ]
+            if "exclusive_evidence" in reply and reply["exclusive_evidence"] is not None:
+                body["exclusive_evidence"] = _exclusive_evidence(reply["exclusive_evidence"])
             body.update(_effective(tuning))
             return body
 
