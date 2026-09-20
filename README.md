@@ -471,7 +471,11 @@ GPU idle in between — hence `--segmentation-batch-size` / `--embedding-batch-s
 depends on what the caller does with it. `exclusive=1` returns pyannote 4's
 non-overlapping diarization: a caller who cuts the audio along these turns and
 transcribes each piece otherwise sends the overlapping seconds twice and gets the
-same words back twice. `min_duration_off` (a pause shorter than this is filled
+same words back twice. When the engine has both timelines, the response also carries
+`nonexclusive_segments`: the ordinary overlapping result from the same inference and
+clustering run. The existing `segments` field remains the exclusive result, so existing
+callers do not change behavior and downstream consumers can use the ordinary turns only
+as evidence. `min_duration_off` (a pause shorter than this is filled
 rather than ending the turn) and `clustering_threshold` (higher clusters less
 eagerly, so fewer speakers) are hyper-parameters the pipeline reads off itself
 mid-run, so they are set on it for the length of one job and put back after —

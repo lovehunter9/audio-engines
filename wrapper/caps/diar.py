@@ -259,6 +259,12 @@ def _annotation(out, exclusive):
     return getattr(out, "speaker_diarization", out), False
 
 
+def _segments(ann):
+    return [{"start": round(float(t.start), 3), "end": round(float(t.end), 3),
+             "speaker": str(spk)}
+            for t, _, spk in ann.itertracks(yield_label=True)]
+
+
 def _centroids(out, speakers):
     """The clustering's per-speaker centroid, when its rows line up with the speakers found.
 
@@ -332,15 +338,18 @@ def build_app(supports):
             log.info("diarized %.1fs of audio in %.1fs", dur, time.time() - t0)
             # pyannote 4 wraps the Annotation in .speaker_diarization; v3 returned it directly.
             ann, exclusive_used = _annotation(out, want_exclusive)
-            segs = [{"start": round(float(t.start), 3), "end": round(float(t.end), 3),
-                     "speaker": str(spk)}
-                    for t, _, spk in ann.itertracks(yield_label=True)]
+            segs = _segments(ann)
             speakers = sorted({s["speaker"] for s in segs})
             ctx.progress(ratio=1.0, stage="done")
             body = {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
                     "num_speakers": len(speakers), "speakers": speakers,
                     "num_segments": len(segs), "segments": segs,
                     "exclusive": exclusive_used}
+            if exclusive_used:
+                # Both annotations are products of this one pipeline invocation and therefore
+                # share its clustering labels. Keep `segments` exclusive for compatibility;
+                # the ordinary timeline is evidence for downstream overlap-residual handling.
+                body["nonexclusive_segments"] = _segments(out.speaker_diarization)
             body.update(_effective(tuning))
             centroids = _centroids(out, speakers)
             if centroids is not None:

@@ -307,7 +307,9 @@ class _Child:
       us -> child, per job:          {"id": "...", "path": "/tmp/upload-x.wav", "exclusive": false,
                                       "min_duration_off_frames": 178, ...}
       child -> us, per job:          {"id": "...", "ok": true, "device": "cuda",
-                                      "segments": [[0.5, 3.2, "SPEAKER_00"], ...]}
+                                      "segments": [[0.5, 3.2, "SPEAKER_00"], ...],
+                                      "nonexclusive_segments": [[0.5, 3.4,
+                                                                  "SPEAKER_00"], ...]}
                    or:               {"id": "...", "ok": false, "error": "..."}
 
     stdout carries the protocol and nothing else; the child logs to stderr. A stray print on the
@@ -530,6 +532,12 @@ def build_app(supports):
                     "num_speakers": len(speakers), "speakers": speakers,
                     "num_segments": len(segs), "segments": segs,
                     "exclusive": bool(want_exclusive)}
+            if "nonexclusive_segments" in reply and reply["nonexclusive_segments"] is not None:
+                body["nonexclusive_segments"] = [
+                    {"start": round(float(s), 3), "end": round(float(e), 3),
+                     "speaker": str(spk)}
+                    for s, e, spk in reply["nonexclusive_segments"]
+                ]
             body.update(_effective(tuning))
             return body
 
