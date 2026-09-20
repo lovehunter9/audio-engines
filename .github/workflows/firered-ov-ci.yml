@@ -1,16 +1,17 @@
 # FireRedTTS3-Instruct Intel OpenVINO CI (image audio-firered-ov). Triggers only; build is build-image.yml.
+# Parked 2026-09-20: Intel TTS 适配暂跳过。代码保留；自动触发关掉，只留手动。
 name: firered-ov-ci
 
 on:
-  push:
-    tags: ['v*']
-  pull_request:
-    paths:
-      - 'wrapper/**'
-      - 'tests/**'
-      - 'bases/fireredov/**'
-      - '.github/workflows/firered-ov-ci.yml'
-      - '.github/workflows/build-image.yml'
+  # push:
+  #   tags: ['v*']
+  # pull_request:
+  #   paths:
+  #     - 'wrapper/**'
+  #     - 'tests/**'
+  #     - 'bases/fireredov/**'
+  #     - '.github/workflows/firered-ov-ci.yml'
+  #     - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
       namespace:
