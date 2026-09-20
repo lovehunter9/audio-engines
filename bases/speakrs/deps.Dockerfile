@@ -26,8 +26,8 @@
 # engine image by digest puts the engine's identity inside the hashed file, so rebuilding the
 # engine forces a new line here, which forces a new deps tag. The chain holds without anyone
 # remembering to bump anything.
-# Built from beclab/speakrs-diarization 267bdaa (tag pr6-267bdaa).
-ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:9ae0de9d2616677bb0f553ab0417f002a0f06632414873934eeb21ebad24c023
+# Built from beclab/speakrs-diarization 7e5f81f (tag evidence-v2-7e5f81f).
+ARG ENGINE_IMAGE=docker.io/beclab/speakrs-engine@sha256:e8580f8f36a4e3f69f7ce720b70e33b05b9607fe273aefa6e39631d3ffe1f3ca
 FROM ${ENGINE_IMAGE} AS engine
 
 FROM nvidia/cuda:13.0.1-runtime-ubuntu24.04
