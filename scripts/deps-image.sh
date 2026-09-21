@@ -11,13 +11,21 @@ dir="$root/bases/$BASE"
 file="$dir/deps.Dockerfile"
 [ -f "$file" ] || { echo "no $file" >&2; exit 1; }
 
-# Hash deps.Dockerfile plus anything it COPY's so the tag moves when a copied file changes.
+# Hash deps.Dockerfile plus anything it COPY's (including ov patches/*) so the tag moves when those change.
 hash_inputs="$file"
 for f in "$dir"/probe_*.py "$dir"/collect_*.py \
          "$root/bases/runtime/strip_unused_cuda.sh"; do
     [ -f "$f" ] || continue
     hash_inputs="$hash_inputs $f"
 done
+if [ -f "$dir/vendor.Dockerfile" ]; then
+    hash_inputs="$hash_inputs $dir/vendor.Dockerfile"
+fi
+if [ -d "$dir/patches" ]; then
+    while IFS= read -r f; do
+        hash_inputs="$hash_inputs $f"
+    done < <(find "$dir/patches" -name '*.py' -type f | sort)
+fi
 
 if command -v sha256sum >/dev/null; then
     h=$(cat $hash_inputs | sha256sum | cut -c1-12)

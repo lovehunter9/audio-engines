@@ -1320,6 +1320,20 @@ class BothAccountsInOnePlaceTest(unittest.TestCase):
                                         "available": None, "reclaimable": 0}):
             self.assertIsNone(m._budget_now())
 
+    def test_ov_unified_memory_lets_the_host_stand_in(self):
+        env = {"AUDIO_BASE": "ov", "MODEL_SUPPORTS": "stt,stt_stream", "ENGINE_ARGS": ""}
+        with mock.patch.dict(os.environ, env, clear=False):
+            m = importlib.reload(importlib.import_module("wrapper.caps.stt_stream"))
+            self.addCleanup(lambda: _stt())
+            m._resting_bytes = 0
+            m._headroom_bytes = lambda: None
+            with mock.patch.object(m.cgroup, "read",
+                                   lambda: {"current": 0, "max": 8 * (2 ** 30),
+                                            "available": None, "reclaimable": 0}):
+                said = m._budget_now()
+        self.assertIsNotNone(said)
+        self.assertGreater(said, 0)
+
 
 class SmallerPlanLooksAtTheLargestGroupTest(unittest.TestCase):
     """🔴 `pack` sorts longest-span-first, so the FIRST group is headed by the longest span and
