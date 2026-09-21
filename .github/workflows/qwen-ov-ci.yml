@@ -42,6 +42,6 @@ jobs:
       repo: audio-qwen-ov
       # Intel GPU (iGPU and Arc) is x86_64; there is no arm64 OpenVINO GPU plugin we would ship.
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
-      namespace: ${{ inputs.namespace || 'beclab' }}
+      namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit
