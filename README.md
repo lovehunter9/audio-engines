@@ -237,6 +237,8 @@ passes. For the same reason the build's final import check must go **through**
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
 | `firered` | `beclab/audio-firered` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
 | `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
+| `breezeov` | `beclab/audio-breeze-ov` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 → OpenVINO GPU (amd64) | in progress |
+| `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
