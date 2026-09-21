@@ -48,6 +48,6 @@ jobs:
       # originates further up than that -- ort supports the OpenVINO provider on x86_64 Linux and
       # Windows and nowhere else.
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
-      namespace: ${{ inputs.namespace || 'beclab' }}
+      namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

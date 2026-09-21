@@ -10,6 +10,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 
 from .. import hfgate
 from .. import tasks
+from .. import ovutil
+from .. import cgroup
 from ..batch import parse_segments
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs
@@ -77,6 +79,135 @@ def _say_config():
              ("pinned at %d positions" % ALIGN_FIXED_BUDGET) if ALIGN_FIXED_BUDGET
              else "computed", 100.0 * BUDGET_HEADROOM, ALIGN_GROUP_SLACK, MAX_SPAN_SEC,
              MAX_UPLOAD_BYTES // (1 << 20))
+
+
+def _p(msg):
+    print("[align] " + msg, flush=True)
+
+
+def _resolve_hf_dir(repo):
+    if os.path.isdir(repo):
+        return repo
+    from huggingface_hub import snapshot_download
+
+    kw = {"repo_id": repo, "local_files_only": True}
+    if HF_TOKEN:
+        kw["token"] = HF_TOKEN
+    return snapshot_download(**kw)
+
+
+def _xml_has_input(path, name, limit=1048576):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(limit)
+    except OSError:
+        return False
+    return name.encode("ascii") in head
+
+
+def _looks_like_ov_ir(path):
+    """One-shot align IR from the 0.6B snapshot: encoder+decoder, no beam_idx."""
+    if not path or not os.path.isdir(path):
+        return False
+    enc = os.path.join(path, "openvino_encoder_model.xml")
+    dec = os.path.join(path, "openvino_decoder_model.xml")
+    if not (os.path.isfile(enc) and os.path.isfile(dec)):
+        return False
+    return not _xml_has_input(dec, "beam_idx")
+
+
+def _ov_export_cmd(src, dest):
+    # Same 0.6B snapshot as NVIDIA; one thinker forward, not ASR generate or *-hf.
+    return [
+        "optimum-cli", "export", "openvino",
+        "--model", src,
+        "--task", "automatic-speech-recognition",
+        "--disable-stateful",
+        "--disable-convert-tokenizer",
+        "--weight-format", "fp16",
+        "--trust-remote-code",
+        dest,
+    ]
+
+
+def _ensure_ov_ir(src):
+    nested = os.path.join(src, "openvino")
+    if _looks_like_ov_ir(src):
+        return src
+    if _looks_like_ov_ir(nested):
+        return nested
+    dest = nested
+    if os.path.isdir(dest) and not _looks_like_ov_ir(dest):
+        import shutil
+        _p("removing unusable export dir %s" % dest)
+        shutil.rmtree(dest)
+    _p("no OpenVINO align IR in %s; exporting to %s (first start is slow)" % (src, dest))
+    os.makedirs(dest, exist_ok=True)
+    import subprocess
+
+    cmd = _ov_export_cmd(src, dest)
+    _p("running: %s" % " ".join(cmd))
+    subprocess.check_call(cmd)
+    if not _looks_like_ov_ir(dest):
+        raise RuntimeError(
+            "align export finished but %s is not a one-shot align IR "
+            "(need encoder+decoder xml without beam_idx)"
+            % dest
+        )
+    return dest
+
+
+def _register_qwen3_asr():
+    from qwen_asr.core.transformers_backend import Qwen3ASRConfig, Qwen3ASRProcessor
+    from transformers import AutoConfig, AutoProcessor
+
+    AutoConfig.register("qwen3_asr", Qwen3ASRConfig)
+    AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
+
+
+def _load_ov():
+    from optimum.intel import OVModelForSpeechSeq2Seq
+    from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
+    from transformers import AutoProcessor
+    import json
+
+    _say_config()
+    src = _resolve_hf_dir(MODEL_REPO)
+    model_dir = _ensure_ov_ir(src)
+    device = ovutil.device()
+    _p("loading OpenVINO forced aligner src=%s ir=%s device=%s" % (src, model_dir, device))
+    _register_qwen3_asr()
+    kw = dict(device=device)
+    if HF_TOKEN:
+        kw["token"] = HF_TOKEN
+    model = OVModelForSpeechSeq2Seq.from_pretrained(model_dir, **kw)
+    processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
+    cfg = getattr(model, "config", None)
+    ts_id = int(getattr(cfg, "timestamp_token_id", 0) or 0)
+    ts_seg = float(getattr(cfg, "timestamp_segment_time", 0) or 0)
+    raw = {}
+    cfg_path = os.path.join(src, "config.json")
+    if os.path.isfile(cfg_path):
+        with open(cfg_path) as f:
+            raw = json.load(f)
+        ts_id = ts_id or int(raw.get("timestamp_token_id") or 0)
+        ts_seg = ts_seg or float(raw.get("timestamp_segment_time") or 0)
+    _state.update(
+        model=model,
+        processor=processor,
+        aligner_processor=Qwen3ForceAlignProcessor(),
+        timestamp_token_id=ts_id,
+        timestamp_segment_time=ts_seg,
+        hf_config=raw,
+        device=device,
+        backend="openvino",
+    )
+    _d = _dims()
+    _rebind_span_limit(_d)
+    _reset_peak()
+    _calibrate()
+    _state["ready"] = True
+    log.info("Qwen3-ForcedAligner %s loaded (openvino %s)", MODEL_REPO, device)
 
 
 def _load():
@@ -192,6 +323,27 @@ def _units(res):
              "end": _field(u, "end_time", "end")} for u in (res[0] if res else [])]
 
 
+def _ov_logits(model, inputs):
+    # Split encoder/decoder like official ForcedAligner.forward; thinker(**inputs) double-binds input_ids.
+    payload = dict(inputs)
+    encoder = getattr(model, "encoder", None)
+    decoder = getattr(model, "decoder", None)
+    feats = payload.get("input_features")
+    if encoder is None or decoder is None or feats is None:
+        raise TypeError("align IR has no encoder/decoder/input_features")
+    enc = encoder(
+        input_features=feats,
+        attention_mask=payload.get("input_features_mask"),
+    )
+    hidden = enc.last_hidden_state if hasattr(enc, "last_hidden_state") else enc[0]
+    dec = decoder(
+        input_ids=payload.get("input_ids"),
+        encoder_hidden_states=hidden,
+        attention_mask=payload.get("attention_mask"),
+    )
+    return dec.logits
+
+
 def _align(path, text, language):
     """Every model call goes through here, so the counter it leaves behind stays honest.
 
@@ -212,7 +364,99 @@ def _align(path, text, language):
         raise
 
 
+def _to_16k(clip, sr=16000):
+    import numpy as np
+
+    arr = np.asarray(clip, dtype=np.float32).reshape(-1)
+    if not sr or int(sr) == 16000:
+        return arr
+    from ..audioio import resample_linear
+
+    return resample_linear(arr, int(sr), 16000)
+
+
+def _align_ov_inputs(audio, text, language):
+    """Same shapes `_call` hands CUDA: a list of clips, or one path for calibrate."""
+    import numpy as np
+
+    texts = list(text) if isinstance(text, (list, tuple)) else [text]
+    if isinstance(language, (list, tuple)):
+        langs = list(language)
+    else:
+        langs = [language] * len(texts)
+    if len(langs) != len(texts):
+        raise RuntimeError("align ov got %d languages for %d texts" % (len(langs), len(texts)))
+
+    def _load_path(path):
+        import librosa
+
+        return librosa.load(path, sr=16000, mono=True)[0]
+
+    wavs = []
+    if isinstance(audio, (list, tuple)):
+        for item in audio:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                wavs.append(_to_16k(item[0], item[1]))
+            elif isinstance(item, str):
+                wavs.append(_load_path(item))
+            else:
+                wavs.append(np.asarray(item, dtype=np.float32).reshape(-1))
+    elif isinstance(audio, str):
+        wavs.append(_load_path(audio))
+    else:
+        wavs.append(np.asarray(audio, dtype=np.float32).reshape(-1))
+    if len(wavs) != len(texts):
+        raise RuntimeError("align ov got %d clips for %d texts" % (len(wavs), len(texts)))
+    return wavs, texts, langs
+
+
+def _align_ov(audio, text, language):
+    import numpy as np
+
+    wavs, texts, langs = _align_ov_inputs(audio, text, language)
+    word_lists, prompts = [], []
+    for one, lang in zip(texts, langs):
+        wl, prompt = _state["aligner_processor"].encode_timestamp(one, ovutil.language(lang))
+        word_lists.append(wl)
+        prompts.append(prompt)
+    inputs = _state["processor"](
+        text=prompts,
+        audio=wavs,
+        return_tensors="pt",
+        padding=True,
+    )
+    logits = _ov_logits(_state["model"], inputs)
+    ts_id = _state["timestamp_token_id"]
+    ts_seg = _state["timestamp_segment_time"]
+    if hasattr(logits, "argmax") and hasattr(logits, "detach"):
+        output_ids = logits.argmax(dim=-1).detach().cpu().numpy()
+        input_ids = inputs["input_ids"]
+        if hasattr(input_ids, "detach"):
+            input_ids = input_ids.detach().cpu().numpy()
+        else:
+            input_ids = np.asarray(input_ids)
+    else:
+        output_ids = np.argmax(np.asarray(logits), axis=-1)
+        input_ids = np.asarray(inputs["input_ids"])
+    if output_ids.ndim == 1:
+        output_ids = output_ids.reshape(1, -1)
+    if input_ids.ndim == 1:
+        input_ids = input_ids.reshape(1, -1)
+    out = []
+    for i, word_list in enumerate(word_lists):
+        masked = output_ids[i][input_ids[i] == ts_id]
+        timestamp_ms = np.asarray(masked, dtype=np.float64) * ts_seg
+        items = _state["aligner_processor"].parse_timestamp(word_list, timestamp_ms)
+        for it in items:
+            it["start_time"] = round(it["start_time"] / 1000.0, 3)
+            it["end_time"] = round(it["end_time"] / 1000.0, 3)
+        out.append(items)
+    return out
+
+
 def _align_raw(path, text, language):
+    if _state.get("backend") == "openvino":
+        return _align_ov(path, text, language)
     try:
         return _state["model"].align(audio=path, text=text, language=language)
     except TypeError:
@@ -315,6 +559,9 @@ def _dims():
                 "downsample": int(audio.downsample_hidden_size),
                 "window": int(audio.n_window)}
     except Exception:
+        from_hf = _dims_from_hf(_state.get("hf_config"))
+        if from_hf:
+            return from_hf
         global _dims_unreadable
         if _state.get("model") is not None and not _dims_unreadable:
             _dims_unreadable = True
@@ -322,6 +569,26 @@ def _dims():
                         "no cost model: batches are not priced, and the check that compares "
                         "the model against what calls actually cost never runs. Every figure "
                         "it would have produced is absent, not wrong", exc_info=True)
+        return None
+
+
+def _dims_from_hf(raw):
+    """OpenVINO's OVModel does not keep thinker_config; the snapshot json still does."""
+    if not raw:
+        return None
+    try:
+        cfg = raw.get("thinker_config") or raw
+        text = cfg.get("text_config") or cfg
+        audio = cfg.get("audio_config") or {}
+        grid = cfg.get("timestamp_segment_time") or raw.get("timestamp_segment_time")
+        return {"hidden": int(text.get("hidden_size") or cfg.get("hidden_size")),
+                "ffn": int(text.get("intermediate_size") or cfg.get("intermediate_size") or 0),
+                "classes": int(cfg.get("classify_num") or raw.get("classify_num")),
+                "width": 2,
+                "grid_ms": float(grid) if grid is not None else None,
+                "downsample": int(audio.get("downsample_hidden_size") or 0),
+                "window": int(audio.get("n_window") or 0)}
+    except Exception:
         return None
 
 
@@ -406,12 +673,19 @@ def _headroom_bytes():
 
     Returns None, not 0, when no authority can be read: a quota that is spoken for is a
     real zero, and the two need different answers downstream.
+
+    OpenVINO has no CUDA counter: unified memory is the container account.
+    REQUIRED_GPU_MEMORY is a scheduler tag there, not an isolated heap. Mixing
+    that tag with cgroup current (grant minus held) priced JFK×8 as eight
+    singleton calls. Same account as ASR: the container's own headroom.
     """
+    global _no_grant_logged
+    if ovutil.is_ov():
+        return cgroup.headroom(cgroup.read())
     import torch
 
     from .. import gpu
 
-    global _no_grant_logged
     cache = max(0, torch.cuda.memory_reserved() - torch.cuda.memory_allocated())
     hami = _hami_limit_bytes()
     if hami:
@@ -638,12 +912,10 @@ def _used(before, peak_before, peak_after):
 
 def _used_bytes(before, peak_before):
     """`_used` against the live counter."""
-    try:
-        import torch
-
-        return _used(before, peak_before, torch.cuda.max_memory_allocated())
-    except Exception:
+    peak = _peak_bytes()
+    if not peak:
         return 0
+    return _used(before, peak_before, peak)
 
 
 def _solve_budget():
@@ -709,6 +981,7 @@ _groups = []
 TELEMETRY_KEEP = 64
 _telemetry = collections.deque(maxlen=TELEMETRY_KEEP)
 _peak_at_failure = [None]
+_cgroup_peak = [0]
 
 _oom_count = [0]
 _last_request_ended = None
@@ -975,14 +1248,26 @@ def _call(ctx, group, sr, out):
         _bill(ctx, m)
 
 
+def _cgroup_reading():
+    """(current, peak) from the container account, or None when cgroup is unreadable."""
+    cur = cgroup.read().get("current")
+    if cur is None:
+        return None
+    _cgroup_peak[0] = max(_cgroup_peak[0] or 0, int(cur))
+    return int(cur), _cgroup_peak[0]
+
+
 def _peak_bytes():
     """The process's all-time high right now, or 0 when there is no card to ask."""
     try:
         import torch
 
-        return int(torch.cuda.max_memory_allocated())
+        if torch.cuda.is_available():
+            return int(torch.cuda.max_memory_allocated())
     except Exception:
-        return 0
+        pass
+    reading = _cgroup_reading()
+    return 0 if reading is None else reading[1]
 
 
 def _reset_peak():
@@ -990,9 +1275,14 @@ def _reset_peak():
     try:
         import torch
 
-        torch.cuda.reset_peak_memory_stats()
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
+            return
     except Exception:
         pass
+    reading = _cgroup_reading()
+    if reading is not None:
+        _cgroup_peak[0] = reading[0]
 
 
 def _memory_now():
@@ -1003,9 +1293,11 @@ def _memory_now():
     try:
         import torch
 
-        return torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated()
+        if torch.cuda.is_available():
+            return torch.cuda.memory_allocated(), torch.cuda.max_memory_allocated()
     except Exception:
-        return None
+        pass
+    return _cgroup_reading()
 
 
 def _bill(ctx, span):
@@ -1027,7 +1319,9 @@ def _is_oom(e):
             return True
     except Exception:
         pass
-    return "out of memory" in str(e).lower()
+    msg = str(e).lower()
+    return ("out of memory" in msg or "cuda oom" in msg
+            or "cl_out_of_resources" in msg or "out of resources" in msg)
 
 
 def _drop_cache():
@@ -1301,4 +1595,21 @@ def build_app(supports):
 
 
 def run(supports):
-    _runtime.serve(supports, _load, build_app, "Qwen3-ForcedAligner")
+    ov = ovutil.is_ov()
+
+    def load():
+        try:
+            (_load_ov if ov else _load)()
+        except Exception as e:
+            _state["error"] = hfgate.explain(MODEL_REPO, e)
+            _p("engine load FAILED: %s" % e)
+            log.exception("forced-aligner load failed: %s", e)
+
+    _runtime.serve(
+        supports,
+        load,
+        build_app,
+        "openvino-genai forced aligner" if ov else "Qwen3-ForcedAligner",
+        load_on_main=ov,
+        **({"timeout_s": 5400} if ov else {}),
+    )

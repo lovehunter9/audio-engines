@@ -30,6 +30,6 @@ jobs:
     with:
       base: soulx
       repo: audio-soulx
-      namespace: ${{ inputs.namespace || 'beclab' }}
+      namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

@@ -1,8 +1,8 @@
-# pyannote CI: triggers only; the build is the shared build-image.yml.
-name: pyannote-ci
+# Qwen OpenVINO CI (image audio-qwen-ov). Triggers only; build is build-image.yml.
+name: qwen-ov-ci
 
 on:
-  # Publishes are deliberate: a v* tag publishes this listing base, or dispatch.
+  # Publishes are deliberate: a v* tag builds every base (no path filter can skip it), or dispatch.
   push:
     tags: ['v*']
   # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
@@ -10,9 +10,10 @@ on:
     paths:
       - 'wrapper/**'
       - 'tests/**'
-      - 'bases/pyannote/**'
-      - 'bases/runtime/**'
-      - '.github/workflows/pyannote-ci.yml'
+      - 'bases/ov/**'
+      - 'scripts/deps-image.sh'
+      - 'scripts/vendor-image.sh'
+      - '.github/workflows/qwen-ov-ci.yml'
       - '.github/workflows/build-image.yml'
   # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
   workflow_dispatch:
@@ -30,15 +31,17 @@ permissions:
   contents: read
 
 concurrency:
-  group: pyannote-ci-${{ github.ref }}
+  group: qwen-ov-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     uses: ./.github/workflows/build-image.yml
     with:
-      base: pyannote
-      repo: audio-pyannote
+      base: ov
+      repo: audio-qwen-ov
+      # Intel GPU (iGPU and Arc) is x86_64; there is no arm64 OpenVINO GPU plugin we would ship.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

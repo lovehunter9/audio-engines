@@ -40,6 +40,6 @@ jobs:
     with:
       base: nemo
       repo: audio-nemo
-      namespace: ${{ inputs.namespace || 'beclab' }}
+      namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

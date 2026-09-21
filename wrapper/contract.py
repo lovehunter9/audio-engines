@@ -50,6 +50,16 @@ def base_name():
     return (os.environ.get("AUDIO_BASE") or "").strip()
 
 
+# Display family only; ov is the Intel build of the same qwen routes. Dispatch still keys on AUDIO_BASE.
+_SPEC_BASE = {"ov": "qwen"}
+
+
+def spec_base():
+    """Family name /api/engine-spec reports. ov answers as qwen so Model Console matches NVIDIA."""
+    base = base_name()
+    return _SPEC_BASE.get(base, base)
+
+
 _NUMBER = re.compile(r"^-\d")
 
 
@@ -330,7 +340,7 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
     capabilities = [COARSE_CAPABILITY] + list(served)
     spec = {
         "schema_version": 2,
-        "base": base,
+        "base": spec_base(),
         "model": model_name,
         "implements": catalog.implements(base),
         "declares": declared,

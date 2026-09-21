@@ -42,6 +42,6 @@ jobs:
       repo: audio-crispasr
       # CrispASR ships CUDA for x86_64 only; an arm64 image would install cleanly and then be CPU.
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
-      namespace: ${{ inputs.namespace || 'beclab' }}
+      namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit
