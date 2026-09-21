@@ -2130,7 +2130,7 @@ class QwenOvPublishTest(unittest.TestCase):
         ci = open(os.path.join(root, ".github/workflows/qwen-ov-ci.yml")).read()
         self.assertIn("uses: ./.github/workflows/build-image.yml", ci)
         self.assertIn("default: beclab", ci)
-        self.assertIn("namespace: ${{ inputs.namespace || 'beclab' }}", ci)
+        self.assertIn("namespace: ${{ inputs.namespace || github.repository_owner }}", ci)
         whisper = open(os.path.join(root, ".github/workflows/whisper-ov-ci.yml")).read()
         self.assertIn("default: beclab", whisper)
         build = open(os.path.join(root, ".github/workflows/build-image.yml")).read()
