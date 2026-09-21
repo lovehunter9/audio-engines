@@ -74,6 +74,14 @@ BASES = {
     "breeze": [
         (("tts", "tts_clone", "tts_design"), "breeze"),
     ],
+    # Intel Breeze: OpenVINO one-step, official loop + codec. Same HTTP as breeze.
+    "breezeov": [
+        (("tts", "tts_clone", "tts_design"), "breeze"),
+    ],
+    # Intel FireRed: OpenVINO DiT / patch step, official loop + RedAE. Same HTTP as firered.
+    "fireredov": [
+        (("tts", "tts_clone", "tts_design"), "firered"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 

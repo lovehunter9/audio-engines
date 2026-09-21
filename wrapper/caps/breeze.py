@@ -323,6 +323,12 @@ class BreezeBackend:
         return audio, sr, {}
 
 
+def _is_ov():
+    from .. import tts_ov
+
+    return tts_ov.is_breeze_ov()
+
+
 def _load():
     attn = tts_el.ATTN or "eager"
     _rewrite_flash_attn(attn)
@@ -330,10 +336,21 @@ def _load():
     from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
 
     path = Path(tts_el.model_path())
-    log.info("loading Breeze TTS 2 from %s (attn=%s)", path, attn)
-    tokenizer, model, audio_tokenizer = load_runtime(
-        path, device=resolve_device(), attn_implementation=attn,
-    )
+    if _is_ov():
+        from .. import tts_ov
+
+        device = tts_ov.require_gpu()
+        tts_ov.allow_breeze_fast_on_cpu()
+        log.info("loading Breeze TTS 2 OpenVINO from %s (attn=%s, ov=%s)", path, attn, device)
+        tokenizer, model, audio_tokenizer = load_runtime(
+            path, device="cpu", attn_implementation=attn,
+        )
+        _install_breeze_ov(model, path, device, audio_tokenizer)
+    else:
+        log.info("loading Breeze TTS 2 from %s (attn=%s)", path, attn)
+        tokenizer, model, audio_tokenizer = load_runtime(
+            path, device=resolve_device(), attn_implementation=attn,
+        )
     update_generation_config_for_breeze(model)
     config = FastStreamingConfig(
         max_new_tokens=int(tts_el.MAX_NEW_TOKENS),
@@ -344,6 +361,409 @@ def _load():
     runtime = FastBreezeStreamingRuntime(model, audio_tokenizer, config, tokenizer=tokenizer)
     tts_long.vram(log, "loaded")
     return BreezeBackend(runtime, tokenizer, audio_tokenizer, model)
+
+
+def _install_breeze_ov(model, path, device, audio_tokenizer=None):
+    """Official five stages all go to OpenVINO: text, backbone prefill/decode, depth, codec."""
+    import torch
+
+    from models.cudagraph.backbone_graph import BackboneGraph
+
+    from .. import tts_ov
+
+    backbone = getattr(model, "backbone_model", None)
+    if backbone is None:
+        raise RuntimeError("Breeze model has no backbone_model to export")
+    cfg = getattr(backbone, "config", None) or model.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    src = str(path)
+    example_t = 16
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v4")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v4")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(backbone, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    )
+    import gc
+    gc.collect()
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(backbone, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+    runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
+    orig_bb = backbone.forward
+
+    def bb_forward(*args, **kwargs):
+        embeds = kwargs.get("inputs_embeds")
+        if embeds is None and args:
+            embeds = args[0]
+        past_in = kwargs.get("past_key_values")
+        if embeds is None:
+            return orig_bb(*args, **kwargs)
+        if embeds.shape[0] != 1:
+            raise RuntimeError(
+                "breeze ov backbone is compiled for batch=1 (cfg_scale=1); got %s"
+                % (tuple(embeds.shape),)
+            )
+        if past_in is None:
+            runner.reset()
+        hidden = runner.step(embeds)
+        return type("BBOut", (), {
+            "last_hidden_state": hidden,
+            "past_key_values": past_in,
+        })()
+
+    backbone.forward = bb_forward
+
+    def prefill_kv(self, past_key_values):
+        seq_len = runner.prefix_len
+        if seq_len <= 0:
+            raise RuntimeError("breeze ov prefill_kv before a kv prefill")
+        if seq_len > self.max_seq_len:
+            raise RuntimeError(
+                "Input too long: prefill has %d tokens but max_seq_len=%d."
+                % (seq_len, self.max_seq_len)
+            )
+        self._prefill_len = seq_len
+        return seq_len
+
+    def decode_step(self):
+        if self.batch_size != 1:
+            raise RuntimeError(
+                "breeze ov BackboneGraph is compiled for batch=1; got %d" % self.batch_size
+            )
+        inputs_embeds = self.embed_tokens(self.input_ids_buf)
+        out = self.model(
+            inputs_embeds=inputs_embeds,
+            attention_mask=self.attn_mask,
+            past_key_values=self.static_cache,
+            position_ids=self.position_ids,
+            cache_position=self.cache_position,
+            use_cache=True,
+        )
+        self.hidden_buf.copy_(out.last_hidden_state.to(self.hidden_buf.dtype))
+        logits = self.lm_head(self.hidden_buf[:, -1, :].float())
+        self.logits_buf.copy_(logits)
+        self.cfg_logits_buf.copy_(self.logits_buf[: self.half])
+
+    prefill_kv._ov = True
+    decode_step._ov = True
+    BackboneGraph.prefill_kv = prefill_kv
+    BackboneGraph._decode_step = decode_step
+    log.info(
+        "breeze backbone prefill+decode device-KV on OpenVINO %s layers=%d",
+        device, n_layers,
+    )
+    _install_breeze_text_ov(model, path, device)
+    _install_breeze_depth_ov(model, path, device)
+    _install_breeze_codec_ov(audio_tokenizer, path, device)
+
+
+def _install_breeze_text_ov(model, path, device):
+    """Official stage 1: TextEncoderGraphCache is CUDA-only. Same call site, OV IR."""
+    import numpy as np
+    import torch
+    import torch.nn as nn
+
+    from .. import tts_ov
+
+    enc = getattr(model, "text_encoder", None)
+    if enc is None:
+        raise RuntimeError("Breeze model has no text_encoder")
+    t_fixed = 256
+
+    class _Text(nn.Module):
+        def forward(self, input_ids, attention_mask, position_ids):
+            return enc(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                output_hidden_states=False,
+            ).last_hidden_state
+
+    ids = torch.zeros(1, t_fixed, dtype=torch.long)
+    mask = torch.ones(1, t_fixed, dtype=torch.long)
+    pos = torch.arange(t_fixed, dtype=torch.long).unsqueeze(0)
+    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v1")
+    compiled = tts_ov.compile_module(_Text(), (ids, mask, pos), xml, stamp, device)
+    orig = model._batched_text_encoder_forward
+    proj = getattr(model, "text_encoder_proj", None)
+    if proj is not None and hasattr(proj, "parameters"):
+        wdtype = next(proj.parameters()).dtype
+    else:
+        wdtype = next(enc.parameters()).dtype
+
+    def _batched_text_encoder_forward(self, segments, output_hidden_states=False):
+        if output_hidden_states or not segments:
+            return orig(segments, output_hidden_states=output_hidden_states)
+        hidden = []
+        for seg in segments:
+            length = int(seg.shape[0])
+            if length <= 0:
+                raise RuntimeError("breeze ov text encoder got an empty segment")
+            if length > t_fixed:
+                raise RuntimeError(
+                    "breeze ov text encoder is compiled for T=%d; got %d"
+                    % (t_fixed, length)
+                )
+            pad = torch.zeros(1, t_fixed, dtype=seg.dtype)
+            attn = torch.zeros(1, t_fixed, dtype=torch.long)
+            pos_ids = torch.zeros(1, t_fixed, dtype=torch.long)
+            pad[0, :length] = seg.detach().cpu()
+            attn[0, :length] = 1
+            pos_ids[0, :length] = torch.arange(length)
+            out = compiled(
+                np.ascontiguousarray(pad.numpy()),
+                np.ascontiguousarray(attn.numpy()),
+                np.ascontiguousarray(pos_ids.numpy()),
+            )[0]
+            hidden.append(
+                torch.from_numpy(np.ascontiguousarray(out[0, :length])).to(dtype=wdtype)
+            )
+        return hidden, []
+
+    model._batched_text_encoder_forward = _batched_text_encoder_forward.__get__(
+        model, type(model)
+    )
+    log.info("breeze text encoder on OpenVINO %s static_t=%d", device, t_fixed)
+
+
+def _install_breeze_depth_ov(model, path, device):
+    """Official DepthDecoderGraph loop stays; layer stack runs on GPU like backbone."""
+    import torch
+
+    from models.cudagraph.depth_decoder_graph import DepthDecoderGraph
+
+    from .. import tts_ov
+
+    depth = getattr(model, "depth_decoder", None)
+    inner = getattr(depth, "model", None) if depth is not None else None
+    if inner is None:
+        raise RuntimeError("Breeze model has no depth_decoder.model")
+    cfg = getattr(model.config, "depth_decoder_config", None) or inner.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    src = str(path)
+    embeds_pre = torch.zeros(1, 2, hidden, dtype=torch.float32)
+    embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, 2, dtype=torch.long)
+    mask_dec = torch.ones(1, 3, dtype=torch.long)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_depth_prefill", ".ov-breeze-depth-v1")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_depth_decode", ".ov-breeze-depth-v1")
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+    )
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, True),
+        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+    )
+    runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
+
+    def _full_loop(self):
+        if int(getattr(self, "batch_size", 1)) != 1:
+            raise RuntimeError(
+                "breeze ov depth is compiled for batch=1; got %s" % self.batch_size
+            )
+        self.prefill_input_ids[:, 0] = 0
+        self.prefill_input_ids[:, 1] = self.first_cb_token_buf
+        prefill_embeds = self.embed_tokens(self.prefill_input_ids)
+        backbone_h = self.backbone_hidden_buf
+        if self.backbone_hidden_state_projector is not None:
+            backbone_h = self.backbone_hidden_state_projector(backbone_h)
+        prefill_embeds[:, 0] = backbone_h
+        prefill_embeds = self.inputs_embeds_projector(prefill_embeds)
+        runner.reset()
+        hidden_states = runner.step(prefill_embeds)
+        first_logits = self.codebooks_head(
+            hidden_states[:, 1:, :].float(),
+            cache_position=self.head_prefill_pos,
+        )
+        if self.debug_logits is not None:
+            self.debug_logits[0].copy_(first_logits[:, 0, :])
+        self._cfg_sample(first_logits)
+        self._tok_buf.clamp_(0, self.vocab_size - 1)
+        self.output_tokens[:, 0] = self._tok_buf
+        for cb_idx in range(1, self.num_decode_codebooks):
+            offset_tok = self._tok_buf + self.codebook_offsets[cb_idx]
+            emb = self.embed_tokens(
+                offset_tok.unsqueeze(1).clamp_(
+                    0, self.num_codebooks * self.vocab_size - 1
+                )
+            )
+            emb = self.inputs_embeds_projector(emb)
+            hidden_states = runner.step(emb)
+            cache_pos = self.decode_cache_positions[cb_idx - 1]
+            logits = self.codebooks_head(hidden_states.float(), cache_position=cache_pos)
+            if self.debug_logits is not None:
+                self.debug_logits[cb_idx].copy_(logits[:, 0, :])
+            self._cfg_sample(logits)
+            self._tok_buf.clamp_(0, self.vocab_size - 1)
+            self.output_tokens[:, cb_idx] = self._tok_buf
+
+    DepthDecoderGraph._full_loop = _full_loop
+    log.info("breeze depth prefill+decode device-KV on OpenVINO %s layers=%d", device, n_layers)
+    import gc
+    gc.collect()
+
+
+def _install_breeze_codec_ov(audio_tokenizer, path, device):
+    """Official codec stage is codes→wav (quantizer, pre_conv, pre_transformer, tail).
+
+    intel11 dynamized T=2 and Add died. intel13 only compiled the conv tail, leaving
+    pre_transformer on CPU. intel22 froze T=32 and re-ran the pad every 2-frame chunk.
+    Official chunk is T=2; freeze that and stop left-padding to 32.
+    """
+    import time
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    import torch.nn.functional as F
+
+    from models.stream_runtime.stream.lane import ExecutionLane
+
+    from .. import tts_ov
+
+    if audio_tokenizer is None or getattr(audio_tokenizer, "model", None) is None:
+        raise RuntimeError("Breeze audio_tokenizer.model is required for codec OV")
+    dec = audio_tokenizer.model.decoder
+    dec.eval()
+    for p in dec.parameters():
+        p.requires_grad_(False)
+    pt = dec.pre_transformer
+    if hasattr(pt, "config"):
+        pt.config.use_cache = False
+        pt.config._attn_implementation = "eager"
+    n_q = int(getattr(dec.config, "num_quantizers", 16))
+    example_t = 2
+
+    class _Quant(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
+            self.quantizer = decoder.quantizer
+
+        def forward(self, codes):
+            return self.quantizer.decode(codes)
+
+    class _Pre(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
+            self.pre_conv = decoder.pre_conv
+            self.pre_transformer = decoder.pre_transformer
+
+        def forward(self, h):
+            import torch
+
+            h = self.pre_conv(h).transpose(1, 2)
+            pt = self.pre_transformer
+            h = pt.input_proj(h)
+            t_len = int(h.shape[1])
+            pos = torch.arange(t_len, device=h.device).unsqueeze(0)
+            rope = pt.rotary_emb(h, pos)
+            attn = tts_ov.causal_attn_bias(h, t_len, 0)
+            for layer in pt.layers:
+                h = layer(
+                    h,
+                    attention_mask=attn,
+                    position_ids=pos,
+                    past_key_values=None,
+                    use_cache=False,
+                    cache_position=pos.squeeze(0),
+                    position_embeddings=rope,
+                )
+            return pt.output_proj(pt.norm(h))
+
+    class _Tail(nn.Module):
+        def __init__(self, decoder):
+            super().__init__()
+            self.upsample = decoder.upsample
+            self.tail = decoder.decoder
+
+        def forward(self, h):
+            for blocks in self.upsample:
+                for block in blocks:
+                    h = block(h)
+            wav = h
+            for block in self.tail:
+                wav = block(wav)
+            return wav.clamp(min=-1, max=1)
+
+    example = torch.zeros(1, n_q, example_t, dtype=torch.long)
+    with torch.inference_mode():
+        ex_q = dec.quantizer.decode(example)
+        ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
+        ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
+    src = str(path)
+    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-quant-v9")
+    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-pre-v9")
+    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-tail-v9")
+    compiled_q = tts_ov.compile_static(_Quant(dec), example, q_xml, q_stamp, device)
+    compiled_pre = tts_ov.compile_static(_Pre(dec), ex_q, p_xml, p_stamp, device)
+    compiled_tail = tts_ov.compile_static(
+        _Tail(dec), ex_h.permute(0, 2, 1).contiguous(), t_xml, t_stamp, device
+    )
+    upsample = int(getattr(dec, "total_upsample", 1) or 1)
+    times = {"quant": 0.0, "pre": 0.0, "tail": 0.0, "n": 0}
+
+    def run_step(self, codes_chunk, step_idx):
+        codes = codes_chunk.detach()
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)
+        t = int(codes.shape[-1])
+        if t < example_t:
+            padded = F.pad(codes, (example_t - t, 0))
+        else:
+            padded = codes[..., -example_t:]
+        codes_np = np.ascontiguousarray(padded.detach().cpu().numpy())
+        t0 = time.perf_counter()
+        try:
+            h = compiled_q(codes_np)[0]
+        except Exception:
+            log.exception("codec quant in=%s", getattr(codes_np, "shape", None))
+            raise
+        times["quant"] += time.perf_counter() - t0
+        t0 = time.perf_counter()
+        try:
+            h = compiled_pre(np.ascontiguousarray(h))[0]
+        except Exception:
+            log.exception("codec pre in=%s", getattr(h, "shape", None))
+            raise
+        times["pre"] += time.perf_counter() - t0
+        h = np.ascontiguousarray(np.transpose(h, (0, 2, 1)))
+        t0 = time.perf_counter()
+        try:
+            wav = torch.from_numpy(np.ascontiguousarray(compiled_tail(h)[0]))
+        except Exception:
+            log.exception("codec tail in=%s", getattr(h, "shape", None))
+            raise
+        times["tail"] += time.perf_counter() - t0
+        times["n"] += 1
+        if times["n"] == 1 or times["n"] % 5 == 0:
+            log.info(
+                "breeze codec step=%d n=%d quant=%.3fs pre=%.3fs tail=%.3fs",
+                int(step_idx), times["n"], times["quant"], times["pre"], times["tail"],
+            )
+        keep = int(codes.shape[-1]) * upsample
+        return wav[..., -keep:].to(dtype=torch.float32)
+
+    ExecutionLane.run_step = run_step
+    log.info(
+        "breeze codec codes-to-wav on OpenVINO %s upsample=%d static_t=%d n_q=%d",
+        device, upsample, example_t, n_q,
+    )
 
 
 def build_app(supports):
