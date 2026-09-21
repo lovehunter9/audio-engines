@@ -453,18 +453,243 @@ class FireRedBackend:
         return None
 
 
+def _is_ov():
+    from .. import tts_ov
+
+    return tts_ov.is_firered_ov()
+
+
 def _load():
     from fireredtts3.core import FireRedTTS3Instruct
 
     patch_backend_tts_triplet()
     tts_el.rewrite_flash_attn(tts_el.ATTN or "eager")
     path = tts_el.model_path()
-    log.info("loading FireRedTTS3-Instruct from %s", path)
-    instruct = FireRedTTS3Instruct(
-        path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
-    )
+    if _is_ov():
+        from .. import tts_ov
+
+        device = tts_ov.require_gpu()
+        restore = tts_ov.force_cpu_torch_device()
+        try:
+            log.info("loading FireRedTTS3-Instruct OpenVINO from %s (ov=%s)", path, device)
+            instruct = FireRedTTS3Instruct(
+                path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
+            )
+        finally:
+            restore()
+        _install_firered_ov(instruct, path, device)
+    else:
+        log.info("loading FireRedTTS3-Instruct from %s", path)
+        instruct = FireRedTTS3Instruct(
+            path, use_wetext=tts_el.USE_WETEXT, use_llm_tn=tts_el.USE_LLM_TN,
+        )
     tts_long.vram(log, "loaded")
     return FireRedBackend(instruct)
+
+
+def _install_firered_ov(instruct, path, device):
+    """Official generate() loop stays. DiT + patch + AR prefill/decode on GPU."""
+    import torch
+
+    from .. import tts_ov
+
+    core = getattr(instruct, "tts_core", None)
+    if core is None:
+        raise RuntimeError("FireRedTTS3Instruct has no tts_core")
+    log.info("firered OV prefill + device-KV decode; DiT+patch on OpenVINO %s", device)
+    dit = core.dit
+    patch = core.patch_encoder
+    hist = int(core.history_length)
+    psize = int(core.patch_size)
+    redae = int(core.redae_dim)
+    hidden = int(core.config.dit_hidden_size)
+    t_len = hist + psize
+    x = torch.zeros(2, t_len, redae + hidden, dtype=torch.float32)
+    t = torch.zeros(2, 1, 1, dtype=torch.float32)
+    _, dit_xml, dit_stamp = tts_ov.ir_paths(path, "firered_dit", ".ov-firered-v1")
+    compiled_dit = tts_ov.compile_module(dit, (x, t), dit_xml, dit_stamp, device)
+    orig_dit = dit.forward
+    times = {"prefill": 0.0, "ar": 0.0, "dit": 0.0}
+    core._ov_times = times
+
+    def dit_forward(x_in=None, t_in=None, **kwargs):
+        import time
+        import numpy as np
+
+        if x_in is None:
+            x_in = kwargs.get("x")
+        if t_in is None:
+            t_in = kwargs.get("t")
+        if x_in is None or t_in is None:
+            return orig_dit(x=x_in, t=t_in, **kwargs)
+        t0 = time.perf_counter()
+        xa = np.ascontiguousarray(x_in.detach().float().cpu().numpy())
+        ta = np.ascontiguousarray(t_in.detach().float().cpu().numpy())
+        out = compiled_dit(xa, ta)[0]
+        times["dit"] += time.perf_counter() - t0
+        return torch.from_numpy(np.ascontiguousarray(out)).to(x_in.device)
+
+    dit.forward = dit_forward
+    lat = torch.zeros(1, psize, redae, dtype=torch.float32)
+    _, pe_xml, pe_stamp = tts_ov.ir_paths(path, "firered_patch", ".ov-firered-v1")
+    compiled_pe = tts_ov.compile_module(patch, lat, pe_xml, pe_stamp, device)
+    orig_pe = patch.forward
+
+    def pe_forward(latents, *args, **kwargs):
+        import numpy as np
+
+        if not hasattr(latents, "detach"):
+            return orig_pe(latents, *args, **kwargs)
+        arr = np.ascontiguousarray(latents.detach().float().cpu().numpy())
+        out = compiled_pe(arr)[0]
+        return torch.from_numpy(np.ascontiguousarray(out)).to(latents.device)
+
+    patch.forward = pe_forward
+    log.info("firered DiT + patch_encoder on OpenVINO %s", device)
+    _install_firered_backbone(core, path, device)
+    _install_firered_redae_cache(instruct, times)
+
+
+def _install_firered_redae_cache(instruct, times):
+    """Same reference wav must not pay RedAE encode again on the warm speak."""
+    import hashlib
+    import time
+
+    import numpy as np
+
+    orig_tok = getattr(instruct, "_tokenize_audio", None)
+    if orig_tok is None:
+        raise RuntimeError("FireRedTTS3Instruct has no _tokenize_audio to cache")
+    cache = {}
+    times["redae"] = 0.0
+    times["redae_hits"] = 0
+
+    def _tokenize_audio(audio, audio_sr):
+        t0 = time.perf_counter()
+        if hasattr(audio, "detach"):
+            arr = np.ascontiguousarray(audio.detach().cpu().float().numpy())
+        else:
+            arr = np.ascontiguousarray(np.asarray(audio, dtype="float32"))
+        key = (int(audio_sr), tuple(int(x) for x in arr.shape),
+               hashlib.sha1(arr.tobytes()).hexdigest())
+        hit = key in cache
+        if hit:
+            latents = cache[key].clone()
+            times["redae_hits"] += 1
+        else:
+            latents = orig_tok(audio, audio_sr)
+            cache[key] = latents.detach()
+        dt = time.perf_counter() - t0
+        times["redae"] += dt
+        log.info(
+            "firered redae %s t=%.3fs total=%.3fs hits=%d",
+            "hit" if hit else "miss", dt, times["redae"], times["redae_hits"],
+        )
+        return latents
+
+    instruct._tokenize_audio = _tokenize_audio
+    log.info("firered prompt RedAE encode cached on %s", type(instruct).__name__)
+
+
+def _install_firered_backbone(core, path, device):
+    """Replace _backbone_one_step: OV prefill seeds stateful decode (same KV layout)."""
+    import torch
+
+    from .. import tts_ov
+
+    llm = getattr(core, "backbone_llm", None)
+    inner = getattr(llm, "model", None) if llm is not None else None
+    if inner is None:
+        raise RuntimeError("FireRed tts_core has no backbone_llm.model")
+    cfg = inner.config
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    hidden = int(cfg.hidden_size)
+    q_patch = int(getattr(core, "patch_size", 4) or 4)
+    example_t = 16
+    src = str(path)
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
+
+    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(
+        src, "firered_llm_prefill", ".ov-firered-prefill-v15"
+    )
+    prefill = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, False),
+        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+        dynamize_ranks=(2, 3),
+        stateful=False,
+    )
+
+    embeds_q1 = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask_q1 = torch.ones(1, example_t + 1, dtype=torch.long)
+    _, xml, stamp = tts_ov.ir_paths(
+        src, "firered_llm_decode_q1", ".ov-firered-decode-q1-v15"
+    )
+    compiled_q1 = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, True),
+        (embeds_q1, mask_q1, *past), xml, stamp, device,
+        dynamize_ranks=(2, 4),
+        stateful=False,
+    )
+    runner = tts_ov.DeviceKvRunner(compiled_q1, n_layers, prefill=prefill)
+    n_step = {"i": 0}
+    times = core._ov_times
+
+    def _log_step(embeds, hidden, prefix):
+        last = hidden[:, -1].float()
+        score = float("nan")
+        std = float("nan")
+        if torch.isfinite(last).all():
+            score = float(torch.sigmoid(core.stop_head(last)).item())
+            std = float(hidden.float().std())
+        log.info(
+            "firered ov step=%d q=%d prefix=%d stop=%.4f hidden_std=%.4f "
+            "prefill=%.3fs ar=%.3fs dit=%.3fs redae=%.3fs redae_hits=%s",
+            n_step["i"], int(embeds.shape[1]), prefix, score, std,
+            times["prefill"], times["ar"], times["dit"],
+            times.get("redae", 0.0), times.get("redae_hits", 0),
+        )
+
+    def _backbone_one_step(input_embeds, cache=None):
+        import time
+
+        if input_embeds.shape[0] != 1:
+            raise RuntimeError(
+                "firered ov backbone is compiled for batch=1; got %s"
+                % (tuple(input_embeds.shape),)
+            )
+        if cache is None:
+            runner.reset()
+            times["prefill"] = times["ar"] = times["dit"] = 0.0
+            n_step["i"] = 0
+            t0 = time.perf_counter()
+            hidden = runner.step(input_embeds)
+            times["prefill"] += time.perf_counter() - t0
+            n_step["i"] = 1
+            _log_step(input_embeds, hidden, runner.prefix_len)
+            return hidden, True
+        q = int(input_embeds.shape[1])
+        t0 = time.perf_counter()
+        if q == 1:
+            hidden = runner.step(input_embeds)
+        else:
+            parts = [runner.step(input_embeds[:, i:i + 1]) for i in range(q)]
+            hidden = torch.cat(parts, dim=1)
+        times["ar"] += time.perf_counter() - t0
+        n_step["i"] += 1
+        if n_step["i"] % 20 == 0:
+            _log_step(input_embeds, hidden, runner.prefix_len)
+        return hidden, True
+
+    core._backbone_one_step = _backbone_one_step
+    log.info(
+        "firered OV prefill + device-KV decode q=1 (q=%d sliced) on OpenVINO %s",
+        q_patch, device,
+    )
 
 
 def build_app(supports):

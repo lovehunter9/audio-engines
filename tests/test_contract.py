@@ -1174,6 +1174,10 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.implements("enhanceov"), ["enhance"])
         self.assertEqual(catalog.module_of("enhanceov", "enhance"), "enhance")
         self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
+        self.assertEqual(catalog.implements("breezeov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("breezeov", "tts"), "breeze")
+        self.assertEqual(catalog.implements("fireredov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("fireredov", "tts"), "firered")
 
     def test_ov_engine_spec_is_v2_like_main(self):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
@@ -2333,7 +2337,7 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
 
 
 class BaseRegistrationTests(unittest.TestCase):
-    """A base directory, the routing table and the README table name the same 12 bases.
+    """A base directory, the routing table and the README table name the same bases.
 
     Adding a base means adding a key to catalog.BASES: app.py routes on AUDIO_BASE, which
     append-image.sh sets from the directory name, and a base missing from that table exits at
@@ -2493,6 +2497,239 @@ class RawBodyIsReachedOnlyThroughItsWrapperTest(unittest.TestCase):
                 "the raw-body scan reads %r as %d offence(s), not %d -- so every call site "
                 "written that way is invisible to the assertion above"
                 % (source, len(self._offences(source, "<control>")), expected))
+
+
+class FireRedOvDeviceLieTest(unittest.TestCase):
+    def test_force_cpu_torch_device_stays_a_type(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+
+        from wrapper import tts_ov
+
+        restore = tts_ov.force_cpu_torch_device()
+        try:
+            self.assertTrue(isinstance(torch.device, type))
+            self.assertFalse(isinstance(None, torch.device))
+            self.assertEqual(str(torch.device("cuda")), "cpu")
+            self.assertTrue(isinstance(torch.device("cpu"), torch.device))
+        finally:
+            restore()
+        self.assertEqual(str(torch.device("cuda")), "cuda")
+
+
+class TtsOvCausalHelpersTest(unittest.TestCase):
+    def test_flatten_unflatten_roundtrip(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        k0 = torch.zeros(1, 2, 4, 8)
+        v0 = torch.ones(1, 2, 4, 8)
+        k1 = torch.zeros(1, 2, 4, 8) + 2
+        v1 = torch.ones(1, 2, 4, 8) + 2
+        flat = tts_ov.flatten_kv(((k0, v0), (k1, v1)))
+        self.assertEqual(len(flat), 4)
+        back = tts_ov.unflatten_kv(flat, 2)
+        self.assertTrue(torch.equal(back[1][0], k1))
+
+    def test_mask_np_ones_and_additive(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        ones = tts_ov.mask_np(None, 3, 0)
+        self.assertEqual(ones.shape, (1, 3))
+        add = torch.zeros(1, 1, 1, 5)
+        add[..., :2] = torch.finfo(torch.float32).min
+        keep = tts_ov.mask_np(add, 1, 4)
+        self.assertEqual(keep.shape, (1, 5))
+        self.assertEqual(int(keep[0, 0]), 0)
+        self.assertEqual(int(keep[0, 2]), 1)
+
+    def test_full_seq_runner_keeps_prefix(self):
+        try:
+            import numpy as np
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        def compiled(arr, mask):
+            return [np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32)]
+
+        runner = tts_ov.FullSeqRunner(compiled)
+        first = runner.step(torch.zeros(1, 2, 4))
+        self.assertEqual(tuple(first.shape), (1, 2, 4))
+        nxt = runner.step(torch.zeros(1, 1, 4))
+        self.assertEqual(tuple(nxt.shape), (1, 1, 4))
+        self.assertEqual(int(runner.prefix.shape[1]), 3)
+        runner.reset()
+        self.assertIsNone(runner.prefix)
+
+    def test_breeze_install_does_not_swallow_export_failure(self):
+        import inspect
+        from wrapper import tts_ov
+        from wrapper.caps import breeze
+
+        src = inspect.getsource(breeze._install_breeze_ov)
+        self.assertNotIn("leaving official eager on CPU", src)
+        self.assertIn("breeze_backbone_decode", src)
+        self.assertIn("compile_causal", src)
+        self.assertIn("DeviceKvRunner", src)
+        self.assertIn("_install_breeze_text_ov", src)
+        self.assertIn("_install_breeze_depth_ov", src)
+        self.assertIn("_install_breeze_codec_ov", src)
+        text = inspect.getsource(breeze._install_breeze_text_ov)
+        self.assertIn("breeze_text_encoder", text)
+        self.assertIn("_batched_text_encoder_forward", text)
+        self.assertIn("text_encoder_proj", text)
+        self.assertIn("dtype=wdtype", text)
+        depth = inspect.getsource(breeze._install_breeze_depth_ov)
+        self.assertIn("breeze_depth_decode", depth)
+        self.assertIn("DepthDecoderGraph._full_loop", depth)
+        codec = inspect.getsource(breeze._install_breeze_codec_ov)
+        self.assertIn("self.quantizer.decode", codec)
+        self.assertIn("self.pre_transformer", codec)
+        self.assertIn("super().__init__", codec)
+        self.assertIn("requires_grad_(False)", codec)
+        self.assertIn("breeze_codec_quant", codec)
+        self.assertIn("breeze_codec_pre", codec)
+        self.assertIn("breeze_codec_tail", codec)
+        self.assertIn("ExecutionLane.run_step", codec)
+        self.assertIn("compile_static", codec)
+        self.assertIn(".ov-breeze-codec-quant-v9", codec)
+        self.assertIn(".ov-breeze-codec-pre-v9", codec)
+        self.assertIn(".ov-breeze-codec-tail-v9", codec)
+        self.assertIn("example_t = 2", codec)
+        self.assertNotIn("example_t = 32", codec)
+        self.assertIn("breeze codec step=", codec)
+        self.assertIn("codec quant", codec)
+        self.assertIn("codec tail", codec)
+        self.assertIn("transpose(h, (0, 2, 1))", codec)
+        self.assertIn("input_proj", codec)
+        self.assertIn("causal_attn_bias", codec)
+        self.assertNotIn("create_causal_mask", codec)
+        self.assertIn("F.pad", codec)
+        cm = inspect.getsource(tts_ov.compile_module)
+        self.assertIn("requires_grad_(False)", cm)
+        self.assertIn("inference_mode", cm)
+        self.assertIn("jit.trace", cm)
+        st = inspect.getsource(tts_ov.compile_static)
+        self.assertIn("reshape", st)
+        self.assertIn("validate_nodes_and_infer_types", st)
+        self.assertIn("froze", st)
+        self.assertIn("compile_dyn_last", inspect.getsource(tts_ov.compile_dyn_last))
+        kv = inspect.getsource(tts_ov.causal_kv_module)
+        self.assertNotIn("create_causal_mask", kv)
+        self.assertIn("self_attn", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("wdtype", kv)
+        self.assertIn("causal_attn_bias", kv)
+        from wrapper.caps import firered
+        ov_src = inspect.getsource(firered._install_firered_ov)
+        self.assertIn("_install_firered_backbone(", ov_src)
+        self.assertIn("_install_firered_redae_cache(", ov_src)
+        self.assertIn("device-KV decode", ov_src)
+        redae = inspect.getsource(firered._install_firered_redae_cache)
+        self.assertIn("_tokenize_audio", redae)
+        self.assertIn("firered redae", redae)
+        self.assertIn("cache[key]", redae)
+        bb = inspect.getsource(firered._install_firered_backbone)
+        self.assertIn("DeviceKvRunner", bb)
+        self.assertIn("stateful=False", bb)
+        self.assertNotIn("StatefulKvRunner", bb)
+        self.assertNotIn("seed_flat", bb)
+        self.assertIn(".ov-firered-prefill-v15", bb)
+        self.assertIn(".ov-firered-decode-q1-v15", bb)
+        self.assertIn("firered_llm_prefill", bb)
+        self.assertIn("firered_llm_decode_q1", bb)
+        self.assertIn("dynamize_ranks=(2, 3)", bb)
+        self.assertIn("input_embeds[:, i:i + 1]", bb)
+        self.assertIn("dynamize_ranks=(2, 4)", bb)
+        self.assertNotIn("firered_llm_decode_q4", bb)
+        self.assertNotIn("tts_ov.KvRunner", bb)
+        self.assertIn("patch_stateful_kv", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("apply_make_stateful_transformation", inspect.getsource(tts_ov.patch_stateful_kv))
+        self.assertIn("consumers = list(port.get_target_inputs())", inspect.getsource(tts_ov.patch_stateful_kv))
+        runner_src = inspect.getsource(tts_ov.StatefulKvRunner)
+        self.assertIn("query_state", runner_src)
+        self.assertIn("st.state =", runner_src)
+        self.assertIn("seed_flat", runner_src)
+        self.assertNotIn(".set_state(", runner_src)
+        self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("INFERENCE_PRECISION_HINT", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("device-KV decode", inspect.getsource(firered._install_firered_backbone))
+        self.assertIn("create_infer_request", inspect.getsource(tts_ov.DeviceKvRunner))
+        self.assertIn("set_input_tensor", inspect.getsource(tts_ov.DeviceKvRunner))
+        self.assertIn("torch.triu", inspect.getsource(tts_ov.causal_attn_bias))
+
+    def test_causal_attn_bias_prefill_and_patch_decode(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        h = torch.zeros(1, 4, 8)
+        pre = tts_ov.causal_attn_bias(h, 4, 0)
+        self.assertEqual(tuple(pre.shape), (1, 1, 4, 4))
+        self.assertTrue(torch.isfinite(pre[0, 0, 1, 0]))
+        self.assertFalse(torch.isfinite(pre[0, 0, 0, 1]))
+        dec = tts_ov.causal_attn_bias(h, 4, 16)
+        self.assertEqual(tuple(dec.shape), (1, 1, 4, 20))
+        self.assertTrue(torch.isfinite(dec[0, 0, 0, 16]))
+        self.assertFalse(torch.isfinite(dec[0, 0, 0, 17]))
+        self.assertTrue(torch.isfinite(dec[0, 0, 3, 19]))
+        self.assertTrue(torch.isfinite(dec[0, 0, 3, 16]))
+
+    def test_kv_runner_appends_cache(self):
+        try:
+            import numpy as np
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        def prefill(arr, mask):
+            t = arr.shape[1]
+            return [
+                np.ones((1, t, arr.shape[2]), dtype=np.float32),
+                np.zeros((1, 2, t, 8), dtype=np.float32),
+                np.ones((1, 2, t, 8), dtype=np.float32),
+            ]
+
+        def decode(arr, mask, *past):
+            t = past[0].shape[-2] + arr.shape[1]
+            return [
+                np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32),
+                np.zeros((1, 2, t, 8), dtype=np.float32),
+                np.ones((1, 2, t, 8), dtype=np.float32),
+            ]
+
+        runner = tts_ov.KvRunner(prefill, decode, 1)
+        first = runner.step(torch.zeros(1, 4, 3))
+        self.assertEqual(tuple(first.shape), (1, 4, 3))
+        self.assertEqual(runner.prefix_len, 4)
+        nxt = runner.step(torch.zeros(1, 1, 3))
+        self.assertEqual(tuple(nxt.shape), (1, 1, 3))
+        self.assertEqual(runner.prefix_len, 5)
+
+
+class SlimTtsOvRecipeTest(unittest.TestCase):
+    def test_intel_tts_bases_have_openvino_and_no_cuda(self):
+        root = os.path.join(os.path.dirname(__file__), "../bases")
+        for name in ("breezeov", "fireredov"):
+            path = os.path.join(root, name, "deps.Dockerfile")
+            with open(path) as fh:
+                text = fh.read()
+            self.assertNotIn("nvidia/cuda", text, path)
+            self.assertIn("openvino", text, path)
+            self.assertIn("download.pytorch.org/whl/cpu", text, path)
 
 
 if __name__ == "__main__":
