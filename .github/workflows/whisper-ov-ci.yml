@@ -1,20 +1,16 @@
-# pyannote CI: triggers only; the build is the shared build-image.yml.
-name: pyannote-ci
+# Whisper OpenVINO CI (image audio-whisper-ov). Triggers only; build is build-image.yml.
+name: whisper-ov-ci
 
 on:
-  # Publishes are deliberate: a v* tag publishes this listing base, or dispatch.
   push:
     tags: ['v*']
-  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
   pull_request:
     paths:
       - 'wrapper/**'
       - 'tests/**'
-      - 'bases/pyannote/**'
-      - 'bases/runtime/**'
-      - '.github/workflows/pyannote-ci.yml'
+      - 'bases/whisperov/**'
+      - '.github/workflows/whisper-ov-ci.yml'
       - '.github/workflows/build-image.yml'
-  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
   workflow_dispatch:
     inputs:
       namespace:
@@ -30,15 +26,16 @@ permissions:
   contents: read
 
 concurrency:
-  group: pyannote-ci-${{ github.ref }}
+  group: whisper-ov-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   build:
     uses: ./.github/workflows/build-image.yml
     with:
-      base: pyannote
-      repo: audio-pyannote
+      base: whisperov
+      repo: audio-whisper-ov
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}
     secrets: inherit

@@ -1,5 +1,6 @@
 import glob
 import importlib
+import importlib.util
 import json
 import os
 import re
@@ -67,6 +68,12 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
         "async_supported": True,
     },
     ("whisper", "stt", "POST", "/v1/audio/translations"): {
+        "async_supported": True,
+    },
+    ("whisper_ov", "stt", "POST", "/v1/audio/transcriptions"): {
+        "async_supported": True,
+    },
+    ("whisper_ov", "stt", "POST", "/v1/audio/translations"): {
         "async_supported": True,
     },
 }
@@ -325,6 +332,7 @@ class RuntimeHelperTest(unittest.TestCase):
 
             def start(self):
                 events.append("thread.start")
+                self.target()
 
         with (
             mock.patch("wrapper.runtime.threading.Thread", FakeThread),
@@ -351,6 +359,7 @@ class RuntimeHelperTest(unittest.TestCase):
             [
                 "thread.start",
                 "watchdog",
+                "load",
                 ("build", ["vad"]),
                 (
                     "uvicorn",
@@ -487,6 +496,17 @@ class RuntimeHelperTest(unittest.TestCase):
                     "compute": None,
                 },
             },
+            "whisper_ov": {
+                "supports": ["stt"],
+                "watchdog": "whisper-ov",
+                "state": {
+                    "ready": False,
+                    "error": None,
+                    "model": None,
+                    "pipeline": None,
+                    "device": None,
+                },
+            },
         }
 
         for name, expected in cases.items():
@@ -519,9 +539,18 @@ class RuntimeHelperTest(unittest.TestCase):
                 self.assertTrue(callable(args[1]))
                 self.assertTrue(callable(args[2]))
                 self.assertEqual(args[3], expected["watchdog"])
-                if name != "stt_stream":
+                if name not in ("stt_stream", "align"):
                     self.assertIs(args[1], module._load)
                     self.assertIs(args[2], module.build_app)
+                elif name == "align":
+                    with (
+                        mock.patch.object(module, "_load", side_effect=RuntimeError("load failed")),
+                        mock.patch.object(module, "_p"),
+                        mock.patch.object(module.log, "exception"),
+                    ):
+                        args[1]()
+                    self.assertEqual(module._state["error"], "load failed")
+                    self.assertFalse(module._state["ready"])
                 else:
                     with (
                         mock.patch.object(
@@ -551,6 +580,819 @@ class RuntimeHelperTest(unittest.TestCase):
                     kwargs.get("disable_ws_ping", False),
                     expected.get("disable_ws_ping", False),
                 )
+
+
+class OpenVINOModeTest(unittest.TestCase):
+    """Intel is an install-time choice (AUDIO_BASE=ov + OLARES_GPU_MODE), never a CUDA fallback."""
+
+    def test_qwen_base_is_not_openvino(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen"}, clear=False):
+            self.assertFalse(q._is_ov())
+
+    def test_ov_base_is_openvino(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False):
+            self.assertTrue(q._is_ov())
+
+    def test_intel_modes_select_gpu_device_without_probing_cuda(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "OV_DEVICE", ""):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel",
+                                              "REQUIRED_GPU_MEMORY": "0"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu",
+                                              "REQUIRED_GPU_MEMORY": "12Gi"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU")
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia",
+                                              "REQUIRED_GPU_MEMORY": "0"}, clear=False):
+                self.assertEqual(q._ov_device(), "CPU")
+
+    def test_whisperov_generate_sends_a_float_list(self):
+        import types
+
+        from wrapper.caps import whisper_ov as w
+
+        class _Tensor:
+            def __init__(self, xs):
+                self._xs = list(xs)
+
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def float(self):
+                return self
+
+            def reshape(self, *_):
+                return self
+
+            def __iter__(self):
+                return iter(self._xs)
+
+        seen = {}
+
+        def fake_generate(raw, **kw):
+            seen["raw"] = raw
+            seen["kw"] = kw
+            return types.SimpleNamespace(texts=["hello"], text="hello")
+
+        w._state["pipeline"] = types.SimpleNamespace(generate=fake_generate)
+        out = w._generate(_Tensor([0.0, 0.25, -0.5]), "transcribe", "en")
+        self.assertEqual(out, "hello")
+        self.assertIsInstance(seen["raw"], list)
+        self.assertEqual(seen["raw"], [0.0, 0.25, -0.5])
+        self.assertTrue(all(isinstance(x, float) for x in seen["raw"]))
+        self.assertEqual(seen["kw"].get("task"), "transcribe")
+        self.assertEqual(seen["kw"].get("language"), "en")
+        self.assertNotIn("num_beams", seen["kw"])
+
+    def test_whisper_ir_requires_beam_idx(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, "openvino_encoder_model.xml"), "w").write("<net/>")
+            dec = os.path.join(td, "openvino_decoder_model.xml")
+            open(dec, "w").write("<net><layer name=\"input_ids\"/></net>")
+            self.assertFalse(ct2_whisper.is_whisper_ir(td))
+            open(dec, "w").write("<net><layer name=\"beam_idx\"/></net>")
+            self.assertTrue(ct2_whisper.is_whisper_ir(td))
+
+    def test_whisperov_refuses_cpu(self):
+        from wrapper.caps import whisper_ov as w
+
+        with mock.patch("wrapper.ovutil.device", return_value="CPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "must use GPU"):
+                    w._require_gpu()
+        with mock.patch("wrapper.ovutil.device", return_value="GPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+                self.assertEqual(w._require_gpu(), "GPU")
+
+    def test_enhanceov_requires_gpu(self):
+        from wrapper.caps import enhance
+
+        with mock.patch("wrapper.ovutil.device", return_value="CPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                with self.assertRaisesRegex(RuntimeError, "must use GPU"):
+                    enhance._require_ov_gpu()
+        with mock.patch("wrapper.ovutil.device", return_value="GPU"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+                self.assertEqual(enhance._require_ov_gpu(), "GPU")
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "pyannote"}, clear=False):
+            class CpuOnly:
+                class cuda:
+                    @staticmethod
+                    def is_available():
+                        return False
+
+            self.assertEqual(enhance._speechbrain_device(CpuOnly), "cpu")
+
+    def test_enhance_mask_follows_stft_time_freq(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper.caps import enhance
+
+        spec = torch.zeros(1, 11, 257, 2)
+        aligned = enhance._align_mask(torch.rand(1, 257, 11), spec)
+        self.assertEqual(tuple(aligned.shape), (1, 11, 257, 1))
+        aligned = enhance._align_mask(torch.rand(1, 11, 257), spec)
+        self.assertEqual(tuple(aligned.shape), (1, 11, 257, 1))
+
+    def test_ct2_whisper_never_fetches_a_second_repo(self):
+        import inspect
+        import tempfile
+
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, "model.bin"), "wb").close()
+            with open(os.path.join(td, "config.json"), "w", encoding="utf-8") as fh:
+                fh.write("{}")
+            self.assertTrue(ct2_whisper.is_ct2(td))
+            self.assertFalse(ct2_whisper.is_transformers(td))
+            src = inspect.getsource(ct2_whisper)
+            self.assertNotIn("snapshot_download", src)
+            self.assertNotIn("huggingface_hub", src)
+            with self.assertRaises((RuntimeError, ImportError)):
+                ct2_whisper.to_transformers_dir(td, os.path.join(td, "hf-from-ct2"))
+            self.assertNotIn("import ctranslate2", src)
+            self.assertIn("_read_ct2_bin", src)
+
+    def test_ct2_whisper_reads_model_bin_without_libctranslate2(self):
+        import struct
+
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy")
+        from wrapper import ct2_whisper
+
+        def write_string(fh, s):
+            b = s.encode("utf-8") + b"\0"
+            fh.write(struct.pack("<H", len(b)))
+            fh.write(b)
+
+        dtypes = {np.dtype("float32"): 0, np.dtype("int8"): 1}
+        tensors = {
+            "encoder/conv1/weight": np.ones((2, 1, 3), np.float32),
+            "encoder/conv1/bias": np.zeros((2,), np.float32),
+            "encoder/conv2/weight": np.ones((2, 2, 3), np.float32),
+            "encoder/conv2/bias": np.zeros((2,), np.float32),
+            "encoder/layer_norm/gamma": np.ones((2,), np.float32),
+            "encoder/layer_norm/beta": np.zeros((2,), np.float32),
+            "decoder/embeddings": np.ones((4, 2), np.float32),
+            "decoder/projection/weight": np.ones((4, 2), np.float32),
+            "encoder/layer_0/self_attention/linear_layers/0/weight": np.array(
+                [[10, -10], [20, 0]], np.int8),
+            "encoder/layer_0/self_attention/linear_layers/0/weight_scale": np.array(
+                [2.0, 4.0], np.float32),
+        }
+        with tempfile.TemporaryDirectory() as td:
+            bin_path = os.path.join(td, "model.bin")
+            with open(bin_path, "wb") as fh:
+                fh.write(struct.pack("<I", 6))
+                write_string(fh, "WhisperSpec")
+                fh.write(struct.pack("<I", 1))
+                fh.write(struct.pack("<I", len(tensors)))
+                for name, arr in tensors.items():
+                    arr = np.ascontiguousarray(arr)
+                    write_string(fh, name)
+                    fh.write(struct.pack("B", arr.ndim))
+                    for dim in arr.shape:
+                        fh.write(struct.pack("<I", int(dim)))
+                    fh.write(struct.pack("B", dtypes[arr.dtype]))
+                    fh.write(struct.pack("<I", arr.nbytes))
+                    fh.write(arr.tobytes())
+                fh.write(struct.pack("<I", 0))
+            with open(os.path.join(td, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"encoder_layers": 1, "decoder_layers": 0}, fh)
+            dumped = ct2_whisper._dump_ct2_state_dict(td)
+            q = dumped["encoder/layer_0/self_attention/linear_layers/0/weight"]
+            self.assertEqual(q.dtype, np.float32)
+            self.assertTrue(np.allclose(q, np.array([[5.0, -5.0], [5.0, 0.0]], np.float32)))
+            mapped = ct2_whisper._to_hf_names(dumped, {"encoder_layers": 1, "decoder_layers": 0})
+            self.assertGreaterEqual(len(mapped), 8)
+            self.assertEqual(mapped["model.encoder.conv1.weight"].shape, (2, 1, 3))
+            self.assertTrue(np.allclose(
+                mapped["model.encoder.layers.0.self_attn.q_proj.weight"], q))
+            hf = ct2_whisper._whisper_hf_config(dumped)
+            self.assertEqual(hf["model_type"], "whisper")
+            self.assertEqual(hf["encoder_layers"], 1)
+            self.assertEqual(hf["num_mel_bins"], 1)
+
+    def test_ct2_unfuses_whisper_attention(self):
+        try:
+            import numpy as np
+        except ImportError:
+            self.skipTest("numpy")
+        from wrapper import ct2_whisper
+
+        qkv = np.arange(12, dtype=np.float32).reshape(6, 2)
+        out_w = np.ones((2, 2), np.float32)
+        qkv_b = np.array([1, 2, 3, 4, 5, 6], np.float32)
+        kv = np.arange(8, dtype=np.float32).reshape(4, 2)
+        state = {
+            "encoder/conv1/weight": np.ones((2, 1, 3), np.float32),
+            "encoder/conv1/bias": np.zeros((2,), np.float32),
+            "encoder/conv2/weight": np.ones((2, 2, 3), np.float32),
+            "encoder/conv2/bias": np.zeros((2,), np.float32),
+            "encoder/layer_norm/gamma": np.ones((2,), np.float32),
+            "encoder/layer_norm/beta": np.zeros((2,), np.float32),
+            "encoder/layer_0/self_attention/linear_0/weight": qkv,
+            "encoder/layer_0/self_attention/linear_0/bias": qkv_b,
+            "encoder/layer_0/self_attention/linear_1/weight": out_w,
+            "decoder/embeddings": np.ones((4, 2), np.float32),
+            "decoder/layer_0/attention/linear_0/weight": np.eye(2, dtype=np.float32),
+            "decoder/layer_0/attention/linear_1/weight": kv,
+            "decoder/layer_0/attention/linear_2/weight": out_w,
+        }
+        mapped = ct2_whisper._to_hf_names(state, {"encoder_layers": 1, "decoder_layers": 1})
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.q_proj.weight"].tolist(),
+                         qkv[:2].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.k_proj.weight"].tolist(),
+                         qkv[2:4].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.v_proj.weight"].tolist(),
+                         qkv[4:].tolist())
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.q_proj.bias"].tolist(),
+                         [1, 2])
+        self.assertEqual(mapped["model.encoder.layers.0.self_attn.out_proj.weight"].tolist(),
+                         out_w.tolist())
+        self.assertEqual(mapped["model.decoder.layers.0.encoder_attn.k_proj.weight"].tolist(),
+                         kv[:2].tolist())
+        self.assertEqual(mapped["model.decoder.layers.0.encoder_attn.v_proj.weight"].tolist(),
+                         kv[2:].tolist())
+        self.assertEqual(mapped["proj_out.weight"].shape, (4, 2))
+
+    def test_ct2_dest_without_model_type_is_repaired(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dest = os.path.join(td, "dest")
+            os.makedirs(src)
+            os.makedirs(dest)
+            open(os.path.join(src, "model.bin"), "wb").close()
+            with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            open(os.path.join(dest, "model.safetensors"), "wb").close()
+            with open(os.path.join(dest, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            self.assertFalse(ct2_whisper._hf_config_ok(dest))
+            out = ct2_whisper.to_transformers_dir(src, dest)
+            self.assertEqual(out, dest)
+            self.assertTrue(ct2_whisper._hf_config_ok(dest))
+            with open(os.path.join(dest, "config.json"), encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            self.assertEqual(cfg["architectures"], ["WhisperForConditionalGeneration"])
+            self.assertTrue(os.path.isfile(os.path.join(dest, "preprocessor_config.json")))
+            with open(os.path.join(dest, "generation_config.json"), encoding="utf-8") as fh:
+                gen = json.load(fh)
+            self.assertEqual(gen["lang_to_id"]["<|en|>"], 50259)
+            self.assertEqual(gen["task_to_id"]["transcribe"], 50360)
+
+    def test_ct2_dest_missing_lang_to_id_is_repaired_into_openvino(self):
+        from wrapper import ct2_whisper
+
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dest = os.path.join(td, "dest")
+            nested = os.path.join(dest, "openvino")
+            os.makedirs(src)
+            os.makedirs(nested)
+            open(os.path.join(src, "model.bin"), "wb").close()
+            with open(os.path.join(src, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({"alignment_heads": []}, fh)
+            open(os.path.join(dest, "model.safetensors"), "wb").close()
+            with open(os.path.join(dest, "config.json"), "w", encoding="utf-8") as fh:
+                json.dump({
+                    "model_type": "whisper",
+                    "architectures": ["WhisperForConditionalGeneration"],
+                }, fh)
+            open(os.path.join(nested, "openvino_encoder_model.xml"), "wb").close()
+            open(os.path.join(nested, "openvino_decoder_model.xml"), "wb").close()
+            self.assertFalse(ct2_whisper._hf_config_ok(dest))
+            out = ct2_whisper.to_transformers_dir(src, dest)
+            self.assertEqual(out, dest)
+            self.assertTrue(ct2_whisper._hf_config_ok(dest))
+            with open(os.path.join(nested, "generation_config.json"), encoding="utf-8") as fh:
+                gen = json.load(fh)
+            self.assertIn("<|zh|>", gen["lang_to_id"])
+
+    def test_device_flag_overrides_mode(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "OV_DEVICE", "GPU.1"):
+            with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+                self.assertEqual(q._ov_device(), "GPU.1")
+
+    def test_absent_max_model_len_follows_install_mode(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia"}, clear=False):
+            self.assertEqual(q._default_max_model_len(), 8192)
+        with mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "nvidia-gb10"}, clear=False):
+            self.assertEqual(q._default_max_model_len(), 3072)
+
+    def test_absent_enforce_eager_is_on_for_nvidia_off_for_ov(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen"}, clear=False):
+            self.assertTrue(q._default_enforce_eager())
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False):
+            self.assertFalse(q._default_enforce_eager())
+
+    def test_written_max_model_len_and_eager_keep_the_user_value(self):
+        from wrapper.contract import EngineArgs
+
+        args = EngineArgs("--max-model-len 4096 --enforce-eager false")
+        self.assertEqual(args.count("--max-model-len", 8192), 4096)
+        self.assertFalse(args.switch("--enforce-eager", True))
+
+    def test_ov_generate_many_uses_one_batch_engine_call(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        seen = []
+
+        class _Eng:
+            def generate_many(self, clips, language=None, context="", max_new_tokens=64):
+                seen.append((len(clips), context, max_new_tokens))
+                return [("one", "Chinese"), ("two", "Chinese")]
+
+        def fail_generate(*a, **k):
+            raise AssertionError("official generate() must not run for B>1")
+
+        class _Clip:
+            def __init__(self, n):
+                self._n = n
+
+            def astype(self, _dt):
+                return self
+
+            def reshape(self, *a, **k):
+                return self
+
+            def tolist(self):
+                return [0.0] * self._n
+
+        asr, eng = q._state.get("asr"), q._state.get("ov_batch")
+        try:
+            q._state["asr"] = types.SimpleNamespace(generate=fail_generate)
+            q._state["ov_batch"] = _Eng()
+            out = q._ov_generate_many([_Clip(16000), _Clip(32000)], context="小瑾")
+            self.assertEqual(out, [("one", "Chinese"), ("two", "Chinese")])
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(seen[0][0], 2)
+            self.assertEqual(seen[0][1], "小瑾")
+        finally:
+            q._state["asr"] = asr
+            q._state["ov_batch"] = eng
+
+    def test_cuda_transcribe_many_still_sends_the_group_in_one_call(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        seen = []
+
+        def transcribe(**kw):
+            seen.append(kw)
+            clips = kw["audio"]
+            return [types.SimpleNamespace(text="t%d" % i, language="en")
+                    for i in range(len(clips))]
+
+        asr = q._state.get("asr")
+        try:
+            q._state["asr"] = types.SimpleNamespace(
+                transcribe=transcribe, sampling_params=None, max_new_tokens=32)
+            with mock.patch.object(q, "_is_ov", return_value=False):
+                out = q._offline_transcribe_many([[0.0] * 16000, [0.0] * 8000],
+                                                 language="en", context="小瑾")
+            self.assertEqual([t for t, _l in out], ["t0", "t1"])
+            self.assertEqual(len(seen), 1)
+            self.assertEqual(len(seen[0]["audio"]), 2)
+            self.assertEqual(seen[0]["context"], "小瑾")
+        finally:
+            q._state["asr"] = asr
+
+    def test_ov_stack_encoder_hiddens_pads_to_the_intel_floor(self):
+        import numpy as np
+        from wrapper.ov_asr_batch import MIN_INTEL_GPU_ENCODER_FRAMES, stack_encoder_hiddens
+
+        a = np.ones((1, 2, 4), dtype=np.float32)
+        b = np.full((1, 5, 4), 2.0, dtype=np.float32)
+        out = stack_encoder_hiddens([a, b])
+        self.assertEqual(out.shape, (2, MIN_INTEL_GPU_ENCODER_FRAMES, 4))
+        self.assertTrue((out[0, :2] == 1).all())
+        self.assertTrue((out[0, 2:] == 0).all())
+        self.assertTrue((out[1, :5] == 2).all())
+        self.assertTrue((out[1, 5:] == 0).all())
+        long = stack_encoder_hiddens([np.ones((1, 500, 4), dtype=np.float32)])
+        self.assertEqual(long.shape, (1, 500, 4))
+        raw = stack_encoder_hiddens([a, b], min_t=0)
+        self.assertEqual(raw.shape, (2, 5, 4))
+
+    def test_ov_extend_audio_tokens_matches_encoder_t(self):
+        from wrapper.ov_asr_batch import AUDIO_PAD, _text_prompt, extend_audio_tokens
+
+        prompt = _text_prompt("", "en")
+        self.assertEqual(prompt.count(AUDIO_PAD), 1)
+        self.assertIn("language en<asr_text>", prompt)
+        expanded = extend_audio_tokens(prompt, 400)
+        self.assertEqual(expanded.count(AUDIO_PAD), 400)
+        self.assertRaises(RuntimeError, extend_audio_tokens, "no pad here", 4)
+
+    def test_ov_nine_second_group_is_not_the_short_floor(self):
+        from wrapper.ov_asr_batch import MIN_GROUP_FLOOR_SAMPLES, MIN_INTEL_GPU_AUDIO_SAMPLES
+
+        self.assertLess(MIN_GROUP_FLOOR_SAMPLES, 9 * 16000)
+        self.assertLess(MIN_GROUP_FLOOR_SAMPLES, MIN_INTEL_GPU_AUDIO_SAMPLES)
+
+    def test_ov_encode_sends_the_group_in_one_encoder_infer(self):
+        import numpy as np
+        from wrapper import ov_asr_batch as m
+
+        class _Req:
+            def __init__(self, owner):
+                self.owner = owner
+
+            def set_tensor(self, *a, **k):
+                return None
+
+            def infer(self):
+                return None
+
+            def start_async(self):
+                return None
+
+            def wait(self):
+                return None
+
+            def get_output_tensor(self, _i):
+                class _T:
+                    data = np.ones((1, 5, 4), dtype=np.float32)
+                return _T()
+
+        class _Inp:
+            any_name = "input_features"
+
+        class _Enc:
+            inputs = [_Inp()]
+
+            def __init__(self):
+                self.calls = 0
+
+            def create_infer_request(self):
+                self.calls += 1
+                return _Req(self)
+
+        class _Feats:
+            def __call__(self, wavs, **k):
+                return {"input_features": np.ones((len(wavs), 8, 3), dtype=np.float32)}
+
+        class _Proc:
+            feature_extractor = _Feats()
+
+        class _Dec:
+            inputs = []
+
+        enc = _Enc()
+        eng = m.Engine(enc, _Dec(), _Proc(), "CPU")
+        with mock.patch.object(m, "_tensor", lambda a: a):
+            hidden = eng._encode([np.zeros(1600, dtype=np.float32),
+                                  np.zeros(1600, dtype=np.float32)], min_t=0)
+            self.assertEqual(enc.calls, 2)
+            self.assertEqual(hidden.shape, (2, 5, 4))
+            floored = eng._encode([np.zeros(1600, dtype=np.float32),
+                                   np.zeros(1600, dtype=np.float32)], min_t=400)
+            self.assertEqual(floored.shape, (2, 400, 4))
+
+    def test_ov_keep_last_token_logits_slices_lm_head(self):
+        try:
+            import openvino as ov
+            from openvino import opset13 as opset
+        except ImportError:
+            self.skipTest("openvino not installed")
+        import numpy as np
+        from wrapper.ov_asr_batch import keep_last_token_logits
+
+        hidden = opset.parameter(ov.PartialShape([-1, -1, 4]), np.float32)
+        weight = opset.constant(np.ones((6, 4), dtype=np.float32))
+        mm = opset.matmul(hidden, weight, False, True)
+        model = ov.Model([mm], [hidden], "toy_lm_head")
+        self.assertGreater(keep_last_token_logits(model), 0)
+        compiled = ov.Core().compile_model(model, "CPU")
+        x = np.zeros((2, 5, 4), dtype=np.float32)
+        x[:, -1, :] = 1.0
+        y = np.asarray(compiled(x)[compiled.output(0)])
+        self.assertEqual(y.shape[0], 2)
+        self.assertEqual(y.shape[-1], 6)
+        if y.ndim == 3:
+            self.assertEqual(y.shape[1], 1)
+
+    def test_ov_last_logits_takes_the_prefill_tail(self):
+        import numpy as np
+        from wrapper.ov_asr_batch import last_logits
+
+        prefill = np.zeros((2, 8, 5), dtype=np.float32)
+        prefill[0, -1, 3] = 9
+        prefill[1, -1, 1] = 7
+        got = last_logits(prefill, 2)
+        self.assertEqual(got.shape, (2, 5))
+        self.assertEqual(int(np.argmax(got[0])), 3)
+        self.assertEqual(int(np.argmax(got[1])), 1)
+        step = np.array([[0, 1, 4], [2, 9, 0]], dtype=np.float32)
+        self.assertEqual(last_logits(step, 2).shape, (2, 3))
+
+    def test_ov_base_implements_stt_and_align(self):
+        self.assertEqual(catalog.implements("ov"), ["stt", "stt_stream", "align"])
+        self.assertEqual(catalog.module_of("ov", "align"), "align")
+        self.assertEqual(catalog.module_of("ov", "stt_stream"), "stt_stream")
+
+    def test_whisperov_and_enhanceov_are_their_own_bases(self):
+        self.assertEqual(catalog.implements("whisperov"), ["stt"])
+        self.assertEqual(catalog.module_of("whisperov", "stt"), "whisper_ov")
+        self.assertIsNone(catalog.module_of("whisperov", "stt_stream"))
+        self.assertEqual(catalog.implements("enhanceov"), ["enhance"])
+        self.assertEqual(catalog.module_of("enhanceov", "enhance"), "enhance")
+        self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
+
+    def test_ov_engine_spec_is_v2_like_main(self):
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
+                                          "MODEL_SUPPORTS": "supports_align"}, clear=False):
+            app = FastAPI()
+            contract.register(app, model_name="Qwen/Qwen3-ForcedAligner-0.6B",
+                              module="align", served=["align"], is_ready=lambda: True)
+            spec = TestClient(app).get("/api/engine-spec").json()
+        self.assertEqual(spec["schema_version"], 2)
+        self.assertEqual(spec["base"], "qwen")
+        self.assertEqual(spec["model"], "Qwen/Qwen3-ForcedAligner-0.6B")
+        self.assertIsInstance(spec["implements"], list)
+        self.assertEqual(spec["serves"], ["align"])
+        self.assertEqual(spec["declares"], ["align"])
+        self.assertTrue(spec["endpoints"])
+        by_cap = {e.get("capability"): e for e in spec["endpoints"] if e.get("capability")}
+        self.assertTrue(by_cap["align"]["available"])
+        self.assertFalse(by_cap["stt"]["available"])
+        self.assertFalse(by_cap["stt_stream"]["available"])
+
+    def test_align_ov_headroom_is_the_container_not_the_gpu_tag(self):
+        from wrapper.caps import align as a
+        from wrapper import cgroup
+
+        snap = {"current": 3 * 1024 ** 3, "max": 8 * 1024 ** 3, "reclaimable": 0}
+        with mock.patch.object(a.ovutil, "is_ov", return_value=True), \
+             mock.patch.object(cgroup, "read", return_value=snap), \
+             mock.patch("wrapper.gpu._quota_bytes", return_value=4 * 1024 ** 3):
+            # 8Gi cgroup minus 3Gi current, not 4Gi tag minus 3Gi current.
+            self.assertEqual(a._headroom_bytes(), 5 * 1024 ** 3)
+
+    def test_align_ov_export_is_one_shot_asr_not_hf(self):
+        from wrapper.caps import align as a
+
+        cmd = a._ov_export_cmd("/src", "/dest")
+        self.assertEqual(cmd[cmd.index("--task") + 1], "automatic-speech-recognition")
+        self.assertNotIn("token-classification", cmd)
+        self.assertNotIn("with-past", "".join(cmd))
+
+    def test_align_ov_ir_accepts_one_shot_asr_without_marker(self):
+        from wrapper.caps import align as a
+
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+            self.assertTrue(a._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/><layer name=\"input_ids\"/></net>")
+            self.assertFalse(a._looks_like_ov_ir(td))
+
+    def test_ov_logits_splits_encoder_decoder_and_skips_thinker(self):
+        from wrapper.caps import align as a
+
+        class Enc:
+            def __call__(self, **kw):
+                return mock.Mock(last_hidden_state="h")
+
+        class Dec:
+            def __call__(self, **kw):
+                if kw.get("encoder_hidden_states") == "h" and kw.get("input_ids") == 1:
+                    return mock.Mock(logits="ok")
+                raise TypeError("bad decoder args %s" % kw)
+
+        class Fake:
+            def __init__(self):
+                self.encoder = Enc()
+                self.decoder = Dec()
+                self.thinker = mock.Mock(side_effect=TypeError(
+                    "OVModelForSeq2SeqLM.forward() got multiple values for "
+                    "keyword argument 'input_ids'"))
+
+            def __call__(self, **kw):
+                raise TypeError("must not call SpeechSeq2Seq.forward")
+
+        self.assertEqual(a._ov_logits(Fake(), {"input_ids": 1, "input_features": 2}), "ok")
+
+    def test_align_ov_inputs_accept_the_same_batch_shape_as_cuda(self):
+        import numpy as np
+        from wrapper.caps import align as a
+
+        clip_a = np.zeros(16000, dtype=np.float32)
+        clip_b = np.ones(8000, dtype=np.float32)
+        wavs, texts, langs = a._align_ov_inputs(
+            [(clip_a, 16000), (clip_b, 16000)],
+            ["你好", "hello"],
+            ["zh", "en"],
+        )
+        self.assertEqual(len(wavs), 2)
+        self.assertEqual(list(texts), ["你好", "hello"])
+        self.assertEqual(list(langs), ["zh", "en"])
+        self.assertEqual(wavs[0].shape[0], 16000)
+        self.assertEqual(wavs[1].shape[0], 8000)
+
+    def test_align_ov_dims_read_the_snapshot_json_when_the_ir_has_no_thinker(self):
+        from wrapper.caps import align as a
+
+        raw = {
+            "thinker_config": {
+                "text_config": {"hidden_size": 1024, "intermediate_size": 4096},
+                "audio_config": {"downsample_hidden_size": 512, "n_window": 100},
+                "classify_num": 5000,
+                "timestamp_segment_time": 80,
+            }
+        }
+        d = a._dims_from_hf(raw)
+        self.assertEqual(d["hidden"], 1024)
+        self.assertEqual(d["classes"], 5000)
+        self.assertEqual(d["grid_ms"], 80.0)
+
+    def test_nvidia_mode_does_not_flip_cuda_metrics_to_dri(self):
+        text = gpu.gpu_metrics_text()
+        self.assertIn("gpu_present 0", text)
+
+    def test_looks_like_ov_ir_rejects_stateless_whisper_decoder(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as td:
+            self.assertFalse(q._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+            self.assertFalse(q._looks_like_ov_ir(td))
+            with open(os.path.join(td, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/><layer name=\"input_ids\"/></net>")
+            self.assertTrue(q._looks_like_ov_ir(td))
+
+    def test_ov_export_cmd_uses_with_past(self):
+        from wrapper.caps import stt_stream as q
+
+        cmd = q._ov_export_cmd("/src", "/dest")
+        self.assertEqual(cmd[cmd.index("--task") + 1],
+                         "automatic-speech-recognition-with-past")
+        self.assertNotIn("automatic-speech-recognition", cmd)
+
+    def test_ensure_ov_ir_drops_stateless_cache_and_reexports(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as src:
+            nested = os.path.join(src, "openvino")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(nested, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"input_ids\"/></net>")
+
+            def fake_export(cmd, *a, **k):
+                dest = cmd[-1]
+                os.makedirs(dest, exist_ok=True)
+                with open(os.path.join(dest, "openvino_encoder_model.xml"), "w") as f:
+                    f.write("<net/>")
+                with open(os.path.join(dest, "openvino_decoder_model.xml"), "w") as f:
+                    f.write("<net><layer name=\"beam_idx\"/></net>")
+
+            with mock.patch("subprocess.check_call", side_effect=fake_export) as cc:
+                out = q._ensure_ov_ir(src)
+            self.assertEqual(out, nested)
+            argv = cc.call_args[0][0]
+            self.assertEqual(argv[argv.index("--task") + 1],
+                             "automatic-speech-recognition-with-past")
+            self.assertTrue(q._looks_like_ov_ir(out))
+
+    def test_ensure_ov_ir_skips_export_when_beam_idx_ir_exists(self):
+        from wrapper.caps import stt_stream as q
+
+        with tempfile.TemporaryDirectory() as src:
+            nested = os.path.join(src, "openvino")
+            os.makedirs(nested)
+            with open(os.path.join(nested, "openvino_encoder_model.xml"), "w") as f:
+                f.write("<net/>")
+            with open(os.path.join(nested, "openvino_decoder_model.xml"), "w") as f:
+                f.write("<net><layer name=\"beam_idx\"/></net>")
+            with mock.patch("subprocess.check_call") as cc:
+                self.assertEqual(q._ensure_ov_ir(src), nested)
+            cc.assert_not_called()
+
+    def test_ov_warmup_failure_fails_load(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "_is_ov", return_value=True):
+            with mock.patch.object(q, "_offline_transcribe", side_effect=RuntimeError("beam_idx")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    q._warmup()
+        self.assertIn("openvino warmup failed", str(ctx.exception))
+
+    def test_vllm_warmup_failure_does_not_block_ready(self):
+        from wrapper.caps import stt_stream as q
+
+        with mock.patch.object(q, "_is_ov", return_value=False):
+            with mock.patch.object(q, "_offline_transcribe", side_effect=RuntimeError("cold")):
+                q._warmup()
+
+    def test_ov_repetition_fallback_uses_the_same_per_second_cap(self):
+        from wrapper.caps import stt_stream as q
+
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        try:
+            q.REPETITION_ON = False
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                self.assertEqual(q._ov_max_new_tokens(10.0), q.OV_MAX_NEW_TOKENS)
+                q.REPETITION_ON = True
+                want = min(q.OFFLINE_MAX_TOKENS, int(10.0 * 12) + q.TOKENS_FLOOR)
+                self.assertEqual(q._ov_max_new_tokens(10.0), want)
+                q.REPETITION_FALLBACK_TOKENS_PER_SEC = 0
+                self.assertEqual(q._ov_max_new_tokens(10.0), q.OV_MAX_NEW_TOKENS)
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
+
+    def test_ov_generate_passes_the_fallback_budget(self):
+        import types
+        from wrapper.caps import stt_stream as q
+
+        seen = []
+
+        def fake_generate(raw, **kw):
+            seen.append(kw.get("max_new_tokens"))
+            return types.SimpleNamespace(texts=["ok"])
+
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        asr = q._state.get("asr")
+        try:
+            q.REPETITION_ON = True
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            q._state["asr"] = types.SimpleNamespace(generate=fake_generate)
+
+            class _Arr:
+                def astype(self, _dt):
+                    return self
+
+                def reshape(self, *a, **k):
+                    return self
+
+                def tolist(self):
+                    return [0.0] * 16000
+
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                q._ov_generate(_Arr())
+            self.assertEqual(seen, [min(q.OFFLINE_MAX_TOKENS, 12 + q.TOKENS_FLOOR)])
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
+            q._state["asr"] = asr
+
+    def test_ov_repetition_report_does_not_look_for_sampling_params(self):
+        from wrapper.caps import stt_stream as q
+
+        lines = []
+        was_on, was_n, was_said = q.REPETITION_ON, q.REPETITION_FALLBACK_TOKENS_PER_SEC, q._repdet_said[:]
+        try:
+            q.REPETITION_ON = True
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = 12
+            del q._repdet_said[:]
+            with mock.patch.object(q, "_is_ov", return_value=True):
+                with mock.patch.object(q, "_p", side_effect=lines.append):
+                    q._say_repetition_once()
+            self.assertTrue(any("OpenVINO has no vLLM detector" in x for x in lines), lines)
+            self.assertFalse(any("sampling_params" in x for x in lines), lines)
+        finally:
+            q.REPETITION_ON = was_on
+            q.REPETITION_FALLBACK_TOKENS_PER_SEC = was_n
+            del q._repdet_said[:]
+            q._repdet_said.extend(was_said)
 
 
 class SharedHelperTest(unittest.TestCase):
@@ -1215,7 +2057,6 @@ class FasterWhisperNoCudaTorchRecipeTest(unittest.TestCase):
         with open(path) as fh:
             text = fh.read()
         self.assertNotIn("FROM ${RUNTIME_IMAGE}", text)
-        self.assertNotIn("lovehunter9/audio-runtime", text)
         self.assertNotIn("beclab/audio-runtime", text)
         self.assertNotIn("strip_unused_cuda.sh", text)
         self.assertNotIn("download.pytorch.org/whl/cu128", text)
@@ -1264,6 +2105,37 @@ class SlimPyannoteRecipeTest(unittest.TestCase):
         self.assertGreater(pin, torch)
         self.assertGreater(four, pin)
         self.assertNotIn("pip uninstall", text)
+
+
+class QwenOvPublishTest(unittest.TestCase):
+    def test_qwen_ov_matches_the_other_ov_bases(self):
+        root = os.path.join(os.path.dirname(__file__), "..")
+        ov = os.path.join(root, "bases/ov")
+        self.assertFalse(os.path.exists(os.path.join(ov, "vendor.Dockerfile")))
+        self.assertFalse(os.path.exists(os.path.join(ov, "Dockerfile")))
+        self.assertFalse(os.path.exists(os.path.join(root, "scripts/vendor-image.sh")))
+        self.assertFalse(os.path.exists(
+            os.path.join(root, ".github/workflows/ov-vendor-ci.yml")))
+        deps = open(os.path.join(ov, "deps.Dockerfile")).read()
+        self.assertIn("FROM ubuntu:24.04", deps)
+        self.assertIn("openvino-genai", deps)
+        self.assertIn("qwen-asr==0.0.6", deps)
+        self.assertNotIn("apply_qwen3_asr_batch.py", deps)
+        self.assertNotIn("COPY wrapper", deps)
+        self.assertNotIn("cmake", deps)
+        self.assertFalse(os.path.exists(os.path.join(ov, "patches/apply_qwen3_asr_batch.py")))
+        append = open(os.path.join(ov, "append.env")).read()
+        self.assertIn("Wrapper on deps image", append)
+        self.assertNotIn("BASE_IMAGE=", append)
+        ci = open(os.path.join(root, ".github/workflows/qwen-ov-ci.yml")).read()
+        self.assertIn("uses: ./.github/workflows/build-image.yml", ci)
+        self.assertIn("default: beclab", ci)
+        self.assertIn("namespace: ${{ inputs.namespace || github.repository_owner }}", ci)
+        whisper = open(os.path.join(root, ".github/workflows/whisper-ov-ci.yml")).read()
+        self.assertIn("default: beclab", whisper)
+        build = open(os.path.join(root, ".github/workflows/build-image.yml")).read()
+        self.assertNotIn("ov-vendor-ci", build)
+        self.assertNotIn("vendor-image.sh", build)
 
 
 class SlimBreezeRecipeTest(unittest.TestCase):

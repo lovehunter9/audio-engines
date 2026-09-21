@@ -28,12 +28,33 @@ MODEL_REPO = _runtime.model_repo
 PORT = _runtime.port
 
 _args = EngineArgs()
+
+
+def _is_ov():
+    """The ov image bakes AUDIO_BASE=ov. Never infer Intel from visible hardware."""
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "ov"
+
+
+def _gpu_mode():
+    return (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+
+
+def _default_max_model_len():
+    # Chart used to stuff this into empty ENGINE_ARGS; the user-written flag still wins.
+    return 3072 if _gpu_mode() == "nvidia-gb10" else 8192
+
+
+def _default_enforce_eager():
+    # NVIDIA used to always get --enforce-eager; OpenVINO does not read the flag, so the default stays off.
+    return not _is_ov()
+
+
 # vLLM wants a share of the whole card; the platform hands out a quota, so derive one from it.
 GPU_UTIL = _args.number("--gpu-memory-utilization", memory_fraction() or 0.45)
 # Holds ONE unit of work; the chart sizes it per machine type, since unified memory needs less.
-MAX_MODEL_LEN = _args.count("--max-model-len", 8192)
+MAX_MODEL_LEN = max(1, _args.count("--max-model-len", _default_max_model_len()))
 # Capture is where startup wedges holding the vGPU lock.
-ENFORCE_EAGER = _args.switch("--enforce-eager")
+ENFORCE_EAGER = _args.switch("--enforce-eager", _default_enforce_eager())
 # One flag for how much audio a generate() carries, in one of two units: `auto` sizes from what
 # this machine measures, `600s` is a padded-second budget, `32` a span count, `0` one span a call.
 
@@ -84,6 +105,8 @@ except Exception as _batch_err:
     GROUPING, MAX_SPANS = False, None
     _BATCH_NOTES = ["WARN could not read --batch-max-spans (%s: %s); one span per call"
                     % (type(_batch_err).__name__, str(_batch_err)[:160])]
+# Same ceiling name as CUDA contract tests. Measurement-on with no ceiling is still a batch.
+MAX_BATCH_SPANS = MAX_SPANS if MAX_SPANS is not None else (2 if GROUPING else 1)
 # End a span that has started repeating rather than folding the loop out afterwards.
 REPETITION_FALLBACK_TOKENS_PER_SEC = max(
     0, _args.count("--repetition-fallback-tokens-per-sec", 12))
@@ -109,6 +132,9 @@ def repetition_request(args):
 
 
 REPETITION_ON, REPETITION_OVERRIDE, _REP_NOTE = repetition_request(_args)
+# OpenVINO (`AUDIO_BASE=ov`) only; claimed so a leftover `--device` is not a silent typo. The qwen/vLLM load never reads these.
+OV_DEVICE = _args.text("--device", "")
+OV_MAX_NEW_TOKENS = _args.count("--max-new-tokens", 256)
 # 🔴 Every flag has to be READ before this line: warn_unclaimed reports whatever is not yet
 # claimed. Seen once: a flag read below this line was honoured and reported discarded at once.
 _args.warn_unclaimed(log)
@@ -136,6 +162,33 @@ _repset_said = []
 _infer_lock = asyncio.Lock()
 # The same engine is also driven by the task worker (offline stt), which lives on another thread.
 _gpu = threading.Lock()
+
+# Qwen3-ASR on OpenVINO wants English names; WS/start often sends ISO 639-1.
+_OV_LANG = {
+    "en": "English", "zh": "Chinese", "yue": "Chinese", "ja": "Japanese",
+    "ko": "Korean", "de": "German", "fr": "French",
+    "english": "English", "chinese": "Chinese", "japanese": "Japanese",
+    "korean": "Korean", "german": "German", "french": "French",
+}
+
+
+def _ov_device():
+    if OV_DEVICE:
+        return OV_DEVICE
+    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+    if mode.startswith("intel"):
+        return "GPU"
+    gpu_raw = (os.environ.get("REQUIRED_GPU_MEMORY") or "").strip()
+    if gpu_raw in ("", "0"):
+        return "CPU"
+    return "GPU"
+
+
+def _ov_language(raw):
+    if not raw:
+        return None
+    key = str(raw).strip()
+    return _OV_LANG.get(key.lower(), key)
 
 
 def _gated(fn, *a):
@@ -166,6 +219,190 @@ def _patch_max_input(seconds):
     if patched:
         _p("patched qwen-asr MAX_ASR_INPUT_SECONDS -> %ds in %s"
            % (int(seconds), ", ".join(patched)))
+
+
+def _xml_has_input(path, name, limit=1048576):
+    """True if an OpenVINO IR lists `name` in the first `limit` bytes (graph inputs sit there)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(limit)
+    except OSError:
+        return False
+    return name.encode("ascii") in head
+
+
+def _looks_like_ov_ir(path):
+    """GenAI's Qwen3ASRDecoder compiles openvino_decoder_model.xml and sets beam_idx.
+
+    Any .xml is not enough: `--task automatic-speech-recognition` (no -with-past)
+    writes a Whisper-style stateless decoder. ASRPipeline then 500s with
+    'Port for tensor name beam_idx was not found.'
+    """
+    if not path or not os.path.isdir(path):
+        return False
+    enc = os.path.join(path, "openvino_encoder_model.xml")
+    dec = os.path.join(path, "openvino_decoder_model.xml")
+    if not (os.path.isfile(enc) and os.path.isfile(dec)):
+        return False
+    return _xml_has_input(dec, "beam_idx")
+
+
+def _ov_export_cmd(src, dest):
+    # Local snapshots cannot infer the HF task; Hub `auto` upgrades to `-with-past`. Pass the task without that suffix.
+    return [
+        "optimum-cli", "export", "openvino",
+        "--model", src,
+        "--task", "automatic-speech-recognition-with-past",
+        "--trust-remote-code",
+        dest,
+    ]
+
+
+def _resolve_hf_dir(repo):
+    if os.path.isdir(repo):
+        return repo
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(repo_id=repo, local_files_only=True)
+
+
+def _ensure_ov_ir(src):
+    """ASRPipeline wants a converted OpenVINO directory, not the raw HF checkpoint.
+
+    Prefer an `openvino/` subdir (what the chart can ship) or xml already in src;
+    otherwise export once next to the snapshot so the next start skips this.
+    A previous start that exported the stateless decoder is treated as missing.
+    """
+    nested = os.path.join(src, "openvino")
+    if _looks_like_ov_ir(src):
+        return src
+    if _looks_like_ov_ir(nested):
+        return nested
+    dest = nested
+    if os.path.isdir(dest) and not _looks_like_ov_ir(dest):
+        import shutil
+        _p("removing unusable export dir %s (need encoder+decoder with beam_idx)" % dest)
+        shutil.rmtree(dest)
+    _p("no OpenVINO IR in %s; exporting to %s (first start is slow)" % (src, dest))
+    os.makedirs(dest, exist_ok=True)
+    import subprocess
+
+    cmd = _ov_export_cmd(src, dest)
+    _p("running: %s" % " ".join(cmd))
+    subprocess.check_call(cmd)
+    if not _looks_like_ov_ir(dest):
+        raise RuntimeError(
+            "optimum-cli export finished but %s is not a GenAI ASR IR "
+            "(need openvino_encoder_model.xml + openvino_decoder_model.xml with beam_idx)"
+            % dest
+        )
+    return dest
+
+
+def _load_ov():
+    _p("importing openvino_genai (device=%s) ..." % _ov_device())
+    import openvino_genai as ov_genai
+
+    src = _resolve_hf_dir(MODEL_REPO)
+    model_dir = _ensure_ov_ir(src)
+    device = _ov_device()
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache")
+    os.makedirs(cache, exist_ok=True)
+    _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
+    pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
+    _state["asr"] = pipe
+    from .. import ov_asr_batch
+
+    _state["ov_batch"] = ov_asr_batch.Engine.load(model_dir, src, device, cache)
+    _state["backend"] = "openvino"
+    _say_repetition_once()
+    _warmup()
+    _state["ready"] = True
+    _p("engine READY: %s (openvino %s)" % (MODEL_REPO, device))
+    log.info("openvino-genai ASR loaded: %s device=%s", MODEL_REPO, device)
+
+
+def _ov_result_text(result):
+    texts = getattr(result, "texts", None)
+    if texts:
+        return (texts[0] or "").strip()
+    t = getattr(result, "text", None)
+    if t:
+        return str(t).strip()
+    return (str(result) if result is not None else "").strip()
+
+
+def _ov_result_language(result, fallback=None):
+    langs = getattr(result, "languages", None)
+    if langs:
+        return langs[0] or fallback
+    return fallback
+
+
+def _ov_batch_collapsed(pairs, clips):
+    """True when a long group came back as the same one-word filler; serial official generate does not."""
+    if len(pairs) < 2:
+        return False
+    fillers = {"okay.", "okay", "ok.", "ok", "oh.", "oh", "yeah.", "yeah",
+               "hmm.", "hmm", "mmm.", "mmm", ""}
+    texts = [(t or "").strip().lower() for t, _l in pairs]
+    # Same sample count as generate_many: reshape(-1).tolist(); a test double has no __len__ on the clip.
+    def samples(c):
+        raw = c.astype("float32").reshape(-1) if hasattr(c, "astype") else c
+        if hasattr(raw, "tolist"):
+            return len(raw.tolist())
+        try:
+            return len(raw)
+        except TypeError:
+            return 0
+    long_enough = any(samples(c) > 16000 * 3 for c in clips)
+    return long_enough and all(t in fillers for t in texts)
+
+
+def _ov_generate(audio, language=None, streamer=None):
+    asr = _state["asr"]
+    raw = audio.astype("float32").reshape(-1).tolist()
+    kw = {"max_new_tokens": _ov_max_new_tokens(len(raw) / 16000.0)}
+    lang = _ov_language(language)
+    if lang:
+        kw["language"] = lang
+    if streamer is not None:
+        kw["streamer"] = streamer
+    return asr.generate(raw, **kw)
+
+
+def _ov_generate_many(clips, language=None, context=""):
+    """One group, one decoder generate. Official generate() is one waveform
+    and has no context hook; B>1 or a prompt uses the wrapper batch engine.
+    CUDA still goes through qwen-asr transcribe(list) — this is ov-only.
+    """
+    if len(clips) == 1 and not (context or "").strip():
+        result = _ov_generate(clips[0], language=language)
+        return [(_ov_result_text(result), _ov_result_language(result, language))]
+    eng = _state.get("ov_batch")
+    if eng is None:
+        raise RuntimeError("openvino batch engine is not loaded")
+    seconds = 0.0
+    for c in clips:
+        raw = c.astype("float32").reshape(-1)
+        seconds = max(seconds, (len(raw.tolist()) if hasattr(raw, "tolist") else len(raw)) / 16000.0)
+    try:
+        pairs = eng.generate_many(
+            clips, language=_ov_language(language) or language,
+            context=context or "", max_new_tokens=_ov_max_new_tokens(seconds),
+        )
+        if not _ov_measure_batch and _ov_batch_collapsed(pairs, clips):
+            raise RuntimeError("openvino batch collapsed to filler")
+        return pairs
+    except Exception as e:
+        if _ov_measure_batch:
+            raise
+        log.warning("openvino batch generate_many failed (%s); official generate per clip", e)
+        out = []
+        for clip in clips:
+            result = _ov_generate(clip, language=language)
+            out.append((_ov_result_text(result), _ov_result_language(result, language)))
+        return out
 
 
 def _load_blocking():
@@ -352,6 +589,9 @@ _scale_seen = 0
 _calls_seen = 0
 #: What the process holds with no request in flight, measured once the model is loaded.
 _resting_bytes = None
+_cgroup_peak = [0]
+#: Warmup must meter Engine.generate_many; tones look like filler and would otherwise measure serial generate.
+_ov_measure_batch = False
 #: Padded seconds a call was refused at, if one ever was. A ceiling, not a budget: the refusal is
 #: the one reading this model cannot produce, since a call that died allocated nothing to measure.
 _refused_above = None
@@ -376,16 +616,30 @@ def _say_batching():
           "" if MAX_SPANS is None else ", and never more than %d spans" % MAX_SPANS))
 
 
+def _cgroup_reading():
+    """(spent now, peak spent) from the container account. Intel unified memory
+    lives here. Raw `current` includes page cache of the checkpoint, which does
+    not rise when the decoder runs, so calibration saw used=0 and kept the
+    CUDA factory price."""
+    spent = _spent(cgroup.read())
+    if spent is None:
+        return None
+    _cgroup_peak[0] = max(_cgroup_peak[0] or 0, int(spent))
+    return int(spent), _cgroup_peak[0]
+
+
 def _memory_reading():
     """(allocated now, peak so far) in bytes, or None where there is no counter to read."""
     try:
         import torch
 
-        if not torch.cuda.is_available():
-            return None
-        return int(torch.cuda.memory_allocated()), int(torch.cuda.max_memory_allocated())
+        if torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated()), int(torch.cuda.max_memory_allocated())
     except Exception:
-        return None
+        pass
+    if _is_ov():
+        return _cgroup_reading()
+    return None
 
 
 def _reset_peak():
@@ -396,8 +650,13 @@ def _reset_peak():
 
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
+            return
     except Exception:
         pass
+    if _is_ov():
+        reading = _cgroup_reading()
+        if reading is not None:
+            _cgroup_peak[0] = reading[0]
 
 
 # ⚠️ Two configurations measured in one process both read the larger of the two; it is not a
@@ -518,11 +777,13 @@ def _held_bytes():
     try:
         import torch
 
-        if not torch.cuda.is_available():
-            return None
-        return int(torch.cuda.memory_allocated())
+        if torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated())
     except Exception:
-        return None
+        pass
+    if _is_ov():
+        return _spent(cgroup.read())
+    return None
 
 
 def _cached_bytes():
@@ -547,6 +808,9 @@ def _headroom_bytes():
     held = _held_bytes()
     if held is None:
         return None
+    if _is_ov():
+        # REQUIRED_GPU_MEMORY is a scheduler tag here; unified memory is the container account.
+        return cgroup.headroom(cgroup.read())
     hami = _hami_limit_bytes()
     if hami:
         # 🔴 A published limit does not mean the counters were rewritten to respect it (the
@@ -691,6 +955,9 @@ def _budget_now():
     # one generate() on a card with no grant. `is not None`: zero is the container AT its limit.
     if budget is not None and host is not None:
         budget = min(budget, host)
+    elif budget is None and host is not None and _is_ov():
+        # Intel unified memory: the container account IS the card; NVIDIA must not stand in.
+        budget = host
     return budget
 
 
@@ -798,18 +1065,24 @@ def _warmup():
     # 🔴 FIRST, before anything that could raise: a peak left at the model-load high-water mark
     # makes `_used` answer zero for every later call while the log promises a measurement.
     _reset_peak()
-    # ⚠️ Non-fatal in every direction, enforced here: the guard used to cover only the
-    # transcription, so an OSError from a reading left `ready` unset for the process's life.
+    # OpenVINO: a failed first generate is usually a bad IR, so fail the load. CUDA warmup stays non-fatal.
+    if _is_ov():
+        try:
+            _offline_transcribe(_tone(1.0))
+        except Exception as e:
+            raise RuntimeError("openvino warmup failed: %s" % e) from e
     try:
         _measure_at_load()
     except Exception as e:
+        if _is_ov():
+            raise RuntimeError("openvino warmup failed: %s" % e) from e
         _p("WARN warmup could not finish measuring (%s: %s); the engine is serviceable and "
            "batch sizing keeps the correction it had" % (type(e).__name__, e))
 
 
 def _measure_at_load():
     """Read, calibrate, observe. Every exit here is a log line, not a dead engine."""
-    global _resting_bytes, _host_bytes_a_padded_second
+    global _resting_bytes, _host_bytes_a_padded_second, _ov_measure_batch
 
     t0 = time.time()
     reading = _memory_reading()
@@ -822,7 +1095,12 @@ def _measure_at_load():
     try:
         if calibrating:
             clips = [_tone(CALIBRATION_SPAN_SEC)] * CALIBRATION_SPANS
-            _offline_transcribe_many(clips)
+            measuring = _is_ov()
+            _ov_measure_batch = measuring
+            try:
+                _offline_transcribe_many(clips)
+            finally:
+                _ov_measure_batch = False
         else:
             # No counter to read, so nothing to calibrate: warm on the cheapest shape there
             # is. This is also the CPU path, where a 60 second shape is minutes of warmup.
@@ -956,6 +1234,20 @@ def _say_repetition_once():
                "--repetition-detection, which was not asked for"
                % REPETITION_FALLBACK_TOKENS_PER_SEC)
         return
+    # OpenVINO applies the per-second fallback through max_new_tokens; do not import vLLM to log that sampling_params is missing.
+    if _is_ov():
+        if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+            _p("WARN repetition fallback off (--repetition-fallback-tokens-per-sec=0) and "
+               "OpenVINO has no vLLM detector: a repeating span is bounded only by "
+               "max_new_tokens=%d" % OV_MAX_NEW_TOKENS)
+            return
+        _p("repetition fallback: OpenVINO has no vLLM detector, capping output at %d tokens "
+           "per audio second via max_new_tokens (same rule as a vLLM build without the "
+           "detector; too low truncates, and truncation is not visible here)%s" % (
+               REPETITION_FALLBACK_TOKENS_PER_SEC,
+               ". --batch-max-spans still groups; a group is one decoder generate"
+               if MAX_BATCH_SPANS > 1 else ""))
+        return
     asr = _state.get("asr")
     if asr is not None and getattr(asr, "sampling_params", None) is None:
         _p("WARN this qwen-asr exposes no sampling_params: neither --repetition-detection nor "
@@ -988,16 +1280,33 @@ def _say_repetition_once():
            if GROUPING else ""))
 
 
+def _fallback_token_budget(seconds, stock):
+    """The length cap that stands in when this build has no vLLM detector.
+
+    One formula, two stock ceilings: CUDA keeps OFFLINE_MAX_TOKENS, OpenVINO keeps
+    --max-new-tokens. The per-second number is the model's, not the runtime's.
+    """
+    if not REPETITION_ON or REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
+        return stock
+    return max(TOKENS_FLOOR,
+               min(OFFLINE_MAX_TOKENS,
+                   int(seconds * REPETITION_FALLBACK_TOKENS_PER_SEC) + TOKENS_FLOOR))
+
+
 def _token_budget(seconds):
     # Replace the stock budget only when there is no detector and fallback tokens/sec > 0.
     _say_repetition_once()
     if not REPETITION_ON or _detector_class() is not None:
         return OFFLINE_MAX_TOKENS
-    if REPETITION_FALLBACK_TOKENS_PER_SEC <= 0:
-        return OFFLINE_MAX_TOKENS
-    return max(TOKENS_FLOOR,
-               min(OFFLINE_MAX_TOKENS,
-                   int(seconds * REPETITION_FALLBACK_TOKENS_PER_SEC) + TOKENS_FLOOR))
+    return _fallback_token_budget(seconds, OFFLINE_MAX_TOKENS)
+
+
+def _ov_max_new_tokens(seconds):
+    """OpenVINO has no RepetitionDetectionParams; use the same fallback the CUDA path uses
+    when this vLLM build lacks the class. Do not import vLLM just to prove it is missing.
+    """
+    _say_repetition_once()
+    return _fallback_token_budget(seconds, OV_MAX_NEW_TOKENS)
 
 
 # HTTP speaks ISO-639-1 ("zh"), the library full names ("Chinese"), and normalize_language_name()
@@ -1066,6 +1375,11 @@ def _text_and_language(r):
 
 def _offline_transcribe(audio, language=None, context=""):
     # Native offline transcription on the same load; max_tokens is raised then restored.
+    if _is_ov():
+        if context:
+            return _ov_generate_many([audio], language=language, context=context)[0]
+        result = _ov_generate(audio, language=language)
+        return _ov_result_text(result), _ov_result_language(result, language)
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
     old = getattr(sp, "max_tokens", _MISSING) if sp is not None else _MISSING
@@ -1098,6 +1412,9 @@ def _offline_transcribe(audio, language=None, context=""):
 
 
 def _offline_transcribe_many(clips, language=None, context=""):
+    # OpenVINO group is one padded encode + one decoder generate; CUDA is qwen-asr transcribe(list).
+    if _is_ov():
+        return _ov_generate_many(clips, language=language, context=context)
     # qwen-asr's transcribe() takes a list and hands the whole list to the engine in one generate().
     asr = _state["asr"]
     sp = getattr(asr, "sampling_params", None)
@@ -1242,7 +1559,8 @@ def _is_oom(e):
     if type(e).__name__.lower().replace("_", "").startswith("outofmemory"):
         return True
     msg = str(e).lower()
-    return "out of memory" in msg or "cuda oom" in msg
+    return ("out of memory" in msg or "cuda oom" in msg
+            or "cl_out_of_resources" in msg or "out of resources" in msg)
 
 
 def _call_group(group, language=None, context=""):
@@ -1341,6 +1659,119 @@ def _batching_report(how, span_count, planned, calls, splits, refusals, replans,
     line += ("; peak since load %s"
              % ("unmeasured" if peak is None else "%.0f MiB" % (peak / 2 ** 20)))
     return line
+
+
+async def _ws_openvino(ws: WebSocket):
+    """OpenVINO output-side streaming: buffer PCM until stop, then token-stream partials.
+
+    Must not emit `partial` while the client is still sending audio — that would be the
+    fake live path we refuse. Decoder tokens after the utterance are the advertised stream.
+    """
+    import numpy as np
+
+    await ws.accept()
+    if not _state["ready"]:
+        await ws.send_text(json.dumps({"type": "error",
+                                       "detail": _state["error"] or "model not ready"}))
+        await ws.close()
+        return
+    sample_rate = 16000
+    language = None
+    pending = np.zeros((0,), dtype="float32")
+    total = 0
+    await ws.send_text(json.dumps({"type": "ready"}))
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+            text = msg.get("text")
+            if text is not None:
+                try:
+                    obj = json.loads(text)
+                except Exception:
+                    obj = {}
+                t = obj.get("type")
+                if t == "start":
+                    language = obj.get("language") or None
+                    sample_rate = int(obj.get("sample_rate") or 16000)
+                    continue
+                if t in ("stop", "done", "finish"):
+                    break
+                continue
+            data = msg.get("bytes")
+            if not data:
+                continue
+            seg = resample_linear(pcm16_to_float32(data), sample_rate)
+            pending = np.concatenate([pending, seg]) if pending.size else seg
+            total += int(seg.shape[0])
+        if pending.size:
+            loop = asyncio.get_running_loop()
+            acc = [""]
+            out_q = asyncio.Queue()
+
+            def streamer(subword):
+                piece = subword if isinstance(subword, str) else str(subword)
+                acc[0] += piece
+                loop.call_soon_threadsafe(out_q.put_nowait, acc[0])
+                try:
+                    import openvino_genai as ov_genai
+                    return ov_genai.StreamingStatus.RUNNING
+                except Exception:
+                    return False
+
+            def work():
+                try:
+                    result = _ov_generate(pending, language=language, streamer=streamer)
+                    loop.call_soon_threadsafe(out_q.put_nowait, ("done", result))
+                except Exception as e:
+                    loop.call_soon_threadsafe(out_q.put_nowait, ("error", e))
+
+            async with _infer_lock:
+                worker = asyncio.create_task(asyncio.to_thread(_gated, work))
+                result = None
+                try:
+                    while True:
+                        item = await out_q.get()
+                        if isinstance(item, tuple) and item[0] == "done":
+                            result = item[1]
+                            break
+                        if isinstance(item, tuple) and item[0] == "error":
+                            raise item[1]
+                        await ws.send_text(json.dumps({
+                            "type": "partial",
+                            "text": item,
+                            "language": _ov_language(language),
+                        }))
+                finally:
+                    await worker
+            final_text = acc[0] or _ov_result_text(result)
+            lang = _ov_result_language(result, _ov_language(language))
+            if not acc[0] and final_text:
+                await ws.send_text(json.dumps({
+                    "type": "partial", "text": final_text, "language": lang,
+                }))
+            await ws.send_text(json.dumps({
+                "type": "final", "text": final_text, "language": lang,
+            }))
+        else:
+            await ws.send_text(json.dumps({
+                "type": "final", "text": "", "language": _ov_language(language),
+            }))
+        await ws.send_text(json.dumps({
+            "type": "closed",
+            "audio_seconds": round(total / 16000.0, 3),
+        }))
+        await ws.close()
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        log.exception("openvino stream error: %s", e)
+        try:
+            await ws.send_text(json.dumps({"type": "error", "detail": str(e)}))
+            await ws.close()
+        except Exception:
+            pass
 
 
 def build_app(supports):
@@ -1521,6 +1952,9 @@ def build_app(supports):
     if has_stream:
         @app.websocket("/v1/audio/stream")
         async def stream(ws: WebSocket):
+            if _is_ov():
+                await _ws_openvino(ws)
+                return
             import numpy as np
 
             await ws.accept()
@@ -1648,11 +2082,12 @@ def build_app(supports):
 
 
 def run(supports):
-    _p("stt_stream starting; model=%s port=%s supports=%s" % (MODEL_REPO, PORT, supports))
+    _p("stt_stream starting; model=%s port=%s supports=%s ov=%s" % (
+        MODEL_REPO, PORT, supports, _is_ov()))
 
     def load():
         try:
-            _load_blocking()
+            (_load_ov if _is_ov() else _load_blocking)()
         except Exception as e:
             _state["error"] = hfgate.explain(MODEL_REPO, e)
             _p("engine load FAILED: %s" % e)
@@ -1663,12 +2098,13 @@ def run(supports):
         _p("starting uvicorn on :%s (ready=%s)" % (PORT, _state["ready"]))
         return app
 
-    # No server-initiated WS keepalive: bursty inference lags Pong and drops a healthy session.
+    # No server-initiated WS keepalive (bursty inference lags Pong). First OpenVINO start may export IR.
     _runtime.serve(
         supports,
         load,
         build,
-        "qwen-asr",
+        "openvino-genai ASR" if _is_ov() else "qwen-asr",
         load_on_main=True,
         disable_ws_ping=True,
+        **({"timeout_s": 5400} if _is_ov() else {}),
     )

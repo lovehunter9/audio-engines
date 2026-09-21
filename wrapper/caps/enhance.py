@@ -1,4 +1,4 @@
-# Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default).
+# Speech enhancement / denoise with SpeechBrain (audio in -> 16k mono, WAV by default). Intel enhanceov is OpenVINO GPU.
 import contextlib
 import io
 import os
@@ -47,53 +47,215 @@ _FORMATS = {
 _FORMAT_ALIAS = {"": "wav", "opus": "ogg", "vorbis": "ogg", "oga": "ogg"}
 
 _state = _runtime.state
+_OV_STAMP = ".ov-enhance-v3"
+# Export CNN+DNN only; STFT/ISTFT stay in torch (IR ISTFT wants freq at data_shape[-3]).
+
+
+def _is_ov_enhance():
+    return (os.environ.get("AUDIO_BASE") or "").strip() == "enhanceov"
+
+
+def _require_ov_gpu():
+    from .. import ovutil
+
+    device = ovutil.device()
+    mode = (os.environ.get("OLARES_GPU_MODE") or "").strip().lower()
+    if mode.startswith("intel") and device.upper() != "GPU":
+        raise RuntimeError("enhanceov on %s must use GPU, got %s" % (mode, device))
+    if device.upper() != "GPU":
+        raise RuntimeError("enhanceov requires OpenVINO GPU, got %s" % device)
+    return device
+
+
+def _speechbrain_device(torch):
+    # CUDA pyannote image only. Intel enhance never comes through here.
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
+def _sb_classes():
+    try:
+        from speechbrain.inference.enhancement import (
+            WaveformEnhancement, SpectralMaskEnhancement)
+        from speechbrain.inference.separation import SepformerSeparation
+    except ImportError:
+        from speechbrain.pretrained import (
+            WaveformEnhancement, SpectralMaskEnhancement, SepformerSeparation)
+    return [("waveform", WaveformEnhancement),
+            ("spectralmask", SpectralMaskEnhancement),
+            ("sepformer", SepformerSeparation)]
+
+
+def _pcm_numpy(noisy):
+    import numpy as np
+
+    if hasattr(noisy, "detach"):
+        pcm = noisy.detach().cpu().float().numpy()
+    else:
+        pcm = np.asarray(noisy, dtype=np.float32)
+    if pcm.ndim == 1:
+        pcm = pcm[None, :]
+    return pcm
+
+
+def _enhance_mod(model):
+    inner = getattr(getattr(model, "mods", None), "enhance_model", None)
+    if inner is None:
+        raise RuntimeError("SpeechBrain model has no mods.enhance_model; cannot export OpenVINO")
+    return inner
+
+
+def _mask_forward(inner):
+    import torch
+
+    class _Mask(torch.nn.Module):
+        def __init__(self, cnn, dnn):
+            super().__init__()
+            self.CNN = cnn
+            self.DNN = dnn
+
+        def forward(self, log_mag):
+            return self.DNN(self.CNN(log_mag)).clamp(min=0, max=1)
+
+    wrapped = _Mask(inner.CNN, inner.DNN)
+    wrapped.eval()
+    return wrapped
+
+
+def _ensure_ir(src, model):
+    import openvino as ov
+    import torch
+
+    ir_dir = os.path.join(src, "openvino")
+    xml = os.path.join(ir_dir, "enhance_model.xml")
+    stamp = os.path.join(ir_dir, _OV_STAMP)
+    if os.path.isfile(xml) and os.path.isfile(stamp):
+        return xml
+    inner = _enhance_mod(model)
+    os.makedirs(ir_dir, exist_ok=True)
+    with torch.no_grad():
+        example = inner.extract_feats(inner.stft(torch.zeros(1, 2 * SR)))
+    log.info("exporting EnhanceResnet CNN+DNN (log-mag %s)", tuple(example.shape))
+    ov_model = ov.convert_model(_mask_forward(inner), example_input=example)
+    ov.save_model(ov_model, xml)
+    open(stamp, "w").close()
+    log.info("wrote enhance mask IR %s", xml)
+    return xml
+
+
+def _load_ov():
+    import openvino as ov
+    from huggingface_hub import snapshot_download
+
+    device = _require_ov_gpu()
+    src = snapshot_download(MODEL_REPO, local_files_only=True,
+                            cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+    last = None
+    model = None
+    for kind, cls in _sb_classes():
+        try:
+            savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+            log.info("speechbrain %s from_hparams on cpu (STFT/ISTFT stay here)", kind)
+            model = cls.from_hparams(source=src, savedir=savedir,
+                                     run_opts={"device": "cpu"})
+            log.info("speechbrain %s cpu load done; exporting mask IR if needed", kind)
+            xml = _ensure_ir(src, model)
+            break
+        except Exception as e:
+            last = e
+            model = None
+            log.info("model is not a %s class (%s)", kind, e)
+    else:
+        raise last or RuntimeError("no compatible speechbrain enhancement class")
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_enhance")
+    os.makedirs(cache, exist_ok=True)
+    compiled = ov.Core().compile_model(xml, device, {"CACHE_DIR": cache})
+    _state.update(compiled=compiled, model=model, kind="waveform-ov", device=device, ready=True)
+    log.info("enhance OpenVINO mask compiled from %s on %s", xml, device)
+
+
+def _load_torch():
+    from huggingface_hub import snapshot_download
+    import torch
+
+    src = snapshot_download(MODEL_REPO, local_files_only=True,
+                            cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
+    last = None
+    for kind, cls in _sb_classes():
+        try:
+            savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
+            dev = _speechbrain_device(torch)
+            model = cls.from_hparams(source=src, savedir=savedir,
+                                     run_opts={"device": dev})
+            _state.update(model=model, compiled=None, kind=kind, device=dev, ready=True)
+            log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
+            return
+        except Exception as e:
+            last = e
+            log.info("model is not a %s class (%s)", kind, e)
+    raise last or RuntimeError("no compatible speechbrain enhancement class")
 
 
 def _load():
     try:
-        import torch
-        from huggingface_hub import snapshot_download
-
-        src = snapshot_download(MODEL_REPO, local_files_only=True,
-                                cache_dir=os.environ.get("HF_HUB_CACHE"), token=HF_TOKEN)
-        # speechbrain needs a "<type>:<index>" device string ("cuda" alone errors).
-        dev = "cuda:0" if torch.cuda.is_available() else "cpu"
-        # Repos need different inference classes; try each in turn (1.x moved the module path).
-        try:
-            from speechbrain.inference.enhancement import (
-                WaveformEnhancement, SpectralMaskEnhancement)
-            from speechbrain.inference.separation import SepformerSeparation
-        except ImportError:
-            from speechbrain.pretrained import (
-                WaveformEnhancement, SpectralMaskEnhancement, SepformerSeparation)
-        candidates = [("waveform", WaveformEnhancement),
-                      ("spectralmask", SpectralMaskEnhancement),
-                      ("sepformer", SepformerSeparation)]
-        last = None
-        for kind, cls in candidates:
-            try:
-                savedir = os.path.join(tempfile.gettempdir(), "sb-enhance-%s" % kind)
-                model = cls.from_hparams(source=src, savedir=savedir, run_opts={"device": dev})
-                _state.update(model=model, kind=kind, device=dev, ready=True)
-                log.info("speechbrain %s loaded as '%s' on %s", MODEL_REPO, kind, dev)
-                return
-            except Exception as e:
-                last = e
-                log.info("model is not a %s class (%s)", kind, e)
-        raise last or RuntimeError("no compatible speechbrain enhancement class")
+        if _is_ov_enhance():
+            _load_ov()
+        else:
+            _load_torch()
     except Exception as e:
         _state["error"] = hfgate.explain(MODEL_REPO, e)
         log.exception("enhance load failed: %s", e)
 
 
+def _align_mask(mask, spec):
+    # SpeechBrain STFT is [B, time, freq, 2]; OV mask may be [B, freq, time] or drop a singleton.
+    if spec.ndim != 4 or spec.shape[-1] != 2:
+        raise RuntimeError("unexpected STFT spec %s" % (tuple(spec.shape),))
+    _, t, f, _ = spec.shape
+    if mask.ndim == 4 and mask.shape[-1] == 1:
+        mask = mask.squeeze(-1)
+    if mask.ndim == 2:
+        if tuple(mask.shape) == (t, f):
+            mask = mask.unsqueeze(0)
+        elif tuple(mask.shape) == (f, t):
+            mask = mask.transpose(0, 1).unsqueeze(0)
+    if mask.ndim == 3 and mask.shape[1] == f and mask.shape[2] == t:
+        mask = mask.transpose(1, 2)
+    if mask.ndim != 3 or mask.shape[1] != t or mask.shape[2] != f:
+        raise RuntimeError("mask %s vs spec %s" % (tuple(mask.shape), tuple(spec.shape)))
+    return mask.unsqueeze(-1)
+
+
+def _run_ov(noisy):
+    import numpy as np
+    import torch
+
+    inner = _enhance_mod(_state["model"])
+    pcm = torch.from_numpy(np.ascontiguousarray(_pcm_numpy(noisy))).float()
+    n = int(pcm.shape[-1])
+    with torch.no_grad():
+        spec = inner.stft(pcm)
+        log_mag = inner.extract_feats(spec)
+    mask = np.asarray(_state["compiled"](log_mag.numpy())[0])
+    mask = torch.from_numpy(np.ascontiguousarray(mask)).clamp(0, 1)
+    log.info("enhance mask %s spec %s log_mag %s", tuple(mask.shape),
+             tuple(spec.shape), tuple(log_mag.shape))
+    mask = _align_mask(mask, spec)
+    w = float(getattr(inner, "mask_weight", 0.99))
+    with torch.no_grad():
+        out = inner.istft(w * mask * spec + (1.0 - w) * spec)
+    return np.ascontiguousarray(out.detach().cpu().float().numpy().reshape(-1)[:n])
+
+
 def _run(noisy):
-    # Enhance one (1, time) tensor -> 1-D float32 numpy of the same length.
+    if _state.get("compiled") is not None:
+        return _run_ov(noisy)
     import torch
 
     model = _state["model"]
     # SpeechBrain's enhance_batch has no no-grad of its own, and that dead graph dominates VRAM.
-    amp = AMP and _state["device"].startswith("cuda")
-    with torch.no_grad(), (torch.autocast("cuda", dtype=torch.float16) if amp
+    kind = _state["device"].split(":", 1)[0]
+    amp = AMP and kind in ("cuda",)
+    with torch.no_grad(), (torch.autocast(kind, dtype=torch.float16) if amp
                            else contextlib.nullcontext()):
         if _state["kind"] == "sepformer":
             est = model.separate_batch(noisy)    # (batch, time, n_src)
