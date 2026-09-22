@@ -893,8 +893,8 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
 
     ExecutionLane.run_step = run_step
     log.info(
-        "breeze codec codes-to-wav on OpenVINO %s upsample=%d static_t=%d n_q=%d",
-        device, upsample, example_t, n_q,
+        "breeze codec codes-to-wav on OpenVINO %s static_t=%d n_q=%d",
+        device, example_t, n_q,
     )
 
 
