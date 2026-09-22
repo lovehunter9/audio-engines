@@ -2749,6 +2749,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("patch_stateful_kv", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("apply_make_stateful_transformation", inspect.getsource(tts_ov.patch_stateful_kv))
         self.assertIn("consumers = list(port.get_target_inputs())", inspect.getsource(tts_ov.patch_stateful_kv))
+        self.assertIn("present_kv_", inspect.getsource(tts_ov.patch_stateful_kv))
+        self.assertIn("get_names()", inspect.getsource(tts_ov.patch_stateful_kv))
         runner_src = inspect.getsource(tts_ov.StatefulKvRunner)
         self.assertIn("query_state", runner_src)
         self.assertIn("st.state =", runner_src)
