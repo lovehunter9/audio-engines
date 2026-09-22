@@ -329,6 +329,63 @@ def _is_ov():
     return tts_ov.is_breeze_ov()
 
 
+def _breeze_snapshot_missing(path):
+    """Files the tokenizer and the weight load both require.
+
+    llm-init can publish the download sentinel while the snapshot still only
+    has the small sidecars. AutoTokenizer then builds GemmaTokenizerFast with
+    tokenizer_file=None, sentencepiece is not in this image, and
+    convert_slow_tokenizer dies on vocab_file.endswith.
+    """
+    import json
+
+    missing = []
+    tok = path / "tokenizer.json"
+    if not tok.is_file() or tok.stat().st_size < 8 * 1024 * 1024:
+        missing.append("tokenizer.json")
+    index = path / "model.safetensors.index.json"
+    if not index.is_file():
+        missing.append("model.safetensors.index.json")
+        return missing
+    try:
+        weight_map = json.loads(index.read_text()).get("weight_map") or {}
+    except (OSError, json.JSONDecodeError):
+        missing.append("model.safetensors.index.json")
+        return missing
+    shards = sorted(set(weight_map.values()))
+    if not shards:
+        missing.append("model.safetensors.index.json")
+        return missing
+    for name in shards:
+        shard = path / name
+        if not shard.is_file() or shard.stat().st_size < 100 * 1024 * 1024:
+            missing.append(name)
+    return missing
+
+
+def _wait_breeze_snapshot(path, timeout_s=1800):
+    """Block in the load thread until the snapshot can actually be tokenized."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last = 0.0
+    while True:
+        missing = _breeze_snapshot_missing(path)
+        if not missing:
+            log.info("breeze snapshot ready at %s", path)
+            return
+        if time.monotonic() >= deadline:
+            raise FileNotFoundError(
+                "Breeze snapshot %s still missing %s; refusing to load the tokenizer"
+                % (path, ", ".join(missing))
+            )
+        now = time.monotonic()
+        if now - last >= 15:
+            log.info("breeze snapshot incomplete, waiting for %s", ", ".join(missing))
+            last = now
+        time.sleep(2)
+
+
 def _register_breeze_tokenizer():
     """BreezeConfig is not in Transformers' tokenizer table.
 
@@ -353,8 +410,9 @@ def _load():
     from breeze_infer.runtime import load_runtime, resolve_device, update_generation_config_for_breeze
     from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
 
-    _register_breeze_tokenizer()
     path = Path(tts_el.model_path())
+    _wait_breeze_snapshot(path)
+    _register_breeze_tokenizer()
     if _is_ov():
         from .. import tts_ov
 
