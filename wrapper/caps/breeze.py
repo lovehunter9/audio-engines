@@ -483,6 +483,22 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     )
     runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
     orig_bb = backbone.forward
+    # A single prefill of a ~13s reference (English voices, ~227 tokens) comes
+    # back non-finite on this GPU. A ~10s reference (~174 tokens) does not, and
+    # decode of one token already ran past that length while speaking Chinese.
+    # Keep the first chunk on the prefill graph; extend the rest one token at
+    # a time on the decode graph.
+    prefill_chunk = 160
+
+    def _prefill_long(embeds):
+        t = int(embeds.shape[1])
+        if t <= prefill_chunk:
+            return runner.step(embeds)
+        parts = [runner.step(embeds[:, :prefill_chunk])]
+        for i in range(prefill_chunk, t):
+            parts.append(runner.step(embeds[:, i:i + 1]))
+        log.info("breeze ov prefill chunked t=%d chunk=%d", t, prefill_chunk)
+        return torch.cat(parts, dim=1)
 
     def bb_forward(*args, **kwargs):
         embeds = kwargs.get("inputs_embeds")
@@ -498,7 +514,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             )
         if past_in is None:
             runner.reset()
-        hidden = runner.step(embeds)
+            hidden = _prefill_long(embeds)
+        else:
+            hidden = runner.step(embeds)
         return type("BBOut", (), {
             "last_hidden_state": hidden,
             "past_key_values": past_in,
