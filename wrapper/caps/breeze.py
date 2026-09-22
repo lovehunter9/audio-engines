@@ -463,9 +463,10 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     # reference did not, so only that export is f32. CUDA never reaches here.
     src = str(path)
     example_t = 16
-    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
+    prefill_t = 320
+    embeds_pre = torch.zeros(1, prefill_t, hidden, dtype=torch.float32)
     embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
-    mask_pre = torch.ones(1, example_t, dtype=torch.long)
+    mask_pre = torch.ones(1, prefill_t, dtype=torch.long)
     mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
     past = []
     for _ in range(n_layers):
@@ -477,10 +478,11 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
     )
     backbone.float()
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v6")
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
     prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+        dynamize_ranks=(),
     )
     import gc
     gc.collect()
@@ -501,7 +503,30 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             )
         if past_in is None:
             runner.reset()
-        hidden = runner.step(embeds)
+            import numpy as np
+            import openvino as ov
+            import time
+            real = int(embeds.shape[1])
+            if real > prefill_t:
+                raise RuntimeError(
+                    "breeze ov prefill length %d exceeds static %d" % (real, prefill_t)
+                )
+            t0 = time.perf_counter()
+            buf = np.zeros((1, prefill_t, hidden), dtype=np.float32)
+            buf[:, :real] = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+            mask = np.zeros((1, prefill_t), dtype=np.int64)
+            mask[:, :real] = 1
+            out = prefill(buf, mask)
+            hidden = torch.from_numpy(np.ascontiguousarray(out[0]))[:, :real]
+            kv = []
+            for i in range(1, 1 + 2 * n_layers):
+                arr = np.array(out[i], copy=True)
+                kv.append(ov.Tensor(np.ascontiguousarray(arr[:, :, :real, :])))
+            runner.kv = kv
+            runner._prefix = real
+            log.info("breeze prefill tokens=%d %.3fs", real, time.perf_counter() - t0)
+        else:
+            hidden = runner.step(embeds)
         if hidden.dtype != embeds.dtype:
             hidden = hidden.to(dtype=embeds.dtype)
         return type("BBOut", (), {
