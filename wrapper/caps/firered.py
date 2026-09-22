@@ -459,6 +459,47 @@ def _is_ov():
     return tts_ov.is_firered_ov()
 
 
+def _firered_snapshot_missing(path):
+    """Weight files FireRedTTS3Instruct opens. Config-only dirs are not enough."""
+    from pathlib import Path
+
+    path = Path(path)
+    need = (
+        ("redae/model.safetensors", 100 * 1024 * 1024),
+        ("fireredtts3_instruct/model.safetensors", 100 * 1024 * 1024),
+        ("text_tokenizer/tokenizer.json", 1024 * 1024),
+    )
+    missing = []
+    for rel, floor in need:
+        f = path / rel
+        if not f.is_file() or f.stat().st_size < floor:
+            missing.append(rel)
+    return missing
+
+
+def _wait_firered_snapshot(path, timeout_s=1800):
+    """OV load only. CUDA calls FireRedTTS3Instruct directly."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    last = 0.0
+    while True:
+        missing = _firered_snapshot_missing(path)
+        if not missing:
+            log.info("firered snapshot ready at %s", path)
+            return
+        if time.monotonic() >= deadline:
+            raise FileNotFoundError(
+                "FireRed snapshot %s still missing %s; refusing to construct the model"
+                % (path, ", ".join(missing))
+            )
+        now = time.monotonic()
+        if now - last >= 15:
+            log.info("firered snapshot incomplete, waiting for %s", ", ".join(missing))
+            last = now
+        time.sleep(2)
+
+
 def _load():
     from fireredtts3.core import FireRedTTS3Instruct
 
@@ -470,6 +511,7 @@ def _load():
 
         device = tts_ov.require_gpu()
         restore = tts_ov.force_cpu_torch_device()
+        _wait_firered_snapshot(path)
         try:
             log.info("loading FireRedTTS3-Instruct OpenVINO from %s (ov=%s)", path, device)
             instruct = FireRedTTS3Instruct(

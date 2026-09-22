@@ -2614,6 +2614,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         missing = inspect.getsource(breeze._breeze_snapshot_missing)
         self.assertIn("tokenizer.json", missing)
         self.assertIn("weight_map", missing)
+        self.assertIn("audio_tokenizer/model.safetensors", missing)
         self.assertIn("refusing to load the tokenizer", inspect.getsource(breeze._wait_breeze_snapshot))
         load = inspect.getsource(breeze._load)
         self.assertIn("_register_breeze_tokenizer()", load)
@@ -2652,7 +2653,10 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("ExecutionLane.run_step", codec)
         self.assertIn("compile_static", codec)
         self.assertIn("dec.forward = forward", codec)
-        self.assertLess(codec.index("dec.forward = forward"), codec.index("release_parameters"))
+        self.assertLess(
+            codec.index("dec.forward = forward"),
+            codec.index("tts_ov.release_parameters("),
+        )
         self.assertIn("wav_lens", codec)
         self.assertIn("breeze codec official wav lengths", codec)
         self.assertIn("shorter than official", codec)
@@ -2685,6 +2689,17 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("wdtype", kv)
         self.assertIn("causal_attn_bias", kv)
         from wrapper.caps import firered
+        fr_load = inspect.getsource(firered._load)
+        fr_ov = fr_load.split("if _is_ov():", 1)[1].split("else:", 1)[0]
+        fr_cuda = fr_load.split("else:", 1)[1]
+        self.assertIn("_wait_firered_snapshot(", fr_ov)
+        self.assertLess(fr_ov.index("_wait_firered_snapshot("), fr_ov.index("FireRedTTS3Instruct("))
+        self.assertNotIn("_wait_firered_snapshot", fr_cuda)
+        self.assertNotIn("_firered_snapshot_missing", fr_cuda)
+        fr_need = inspect.getsource(firered._firered_snapshot_missing)
+        self.assertIn("redae/model.safetensors", fr_need)
+        self.assertIn("fireredtts3_instruct/model.safetensors", fr_need)
+        self.assertIn("text_tokenizer/tokenizer.json", fr_need)
         ov_src = inspect.getsource(firered._install_firered_ov)
         self.assertIn("_install_firered_backbone(", ov_src)
         self.assertIn("_install_firered_decoder_ov(", ov_src)

@@ -360,6 +360,9 @@ def _breeze_snapshot_missing(path):
         shard = path / name
         if not shard.is_file() or shard.stat().st_size < 100 * 1024 * 1024:
             missing.append(name)
+    audio = path / "audio_tokenizer" / "model.safetensors"
+    if not audio.is_file() or audio.stat().st_size < 100 * 1024 * 1024:
+        missing.append("audio_tokenizer/model.safetensors")
     return missing
 
 
