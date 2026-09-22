@@ -475,9 +475,47 @@ def _cache_backbone_suppress_mask():
     fast_streaming.sample_logits = sample_logits
 
 
+def _cache_prompt_encode():
+    """Reuse codec codes when the reference wav bytes have not changed.
+
+    iter_clone writes a new temp path every request, so a path cache never hits.
+    prepare_inputs encodes that file again between the budget log and prefill.
+    """
+    import hashlib
+    import time
+
+    import breeze_infer.templates as tmpl
+
+    original = tmpl.encode_prompt_audio
+    cache = {}
+
+    def cached(audio_tokenizer, audio_path):
+        with open(audio_path, "rb") as fh:
+            raw = fh.read()
+        key = hashlib.sha1(raw).hexdigest()
+        hit = cache.get(key)
+        if hit is not None:
+            log.info("breeze prompt encode cache hit bytes=%d", len(raw))
+            return hit.clone()
+        t0 = time.perf_counter()
+        codes = original(audio_tokenizer, audio_path)
+        kept = codes.detach().cpu().contiguous()
+        if len(cache) >= 8:
+            cache.pop(next(iter(cache)))
+        cache[key] = kept
+        log.info(
+            "breeze prompt encode cache miss bytes=%d %.3fs shape=%s",
+            len(raw), time.perf_counter() - t0, tuple(kept.shape),
+        )
+        return kept.clone()
+
+    tmpl.encode_prompt_audio = cached
+
+
 def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     """Official five stages all go to OpenVINO: text, backbone prefill/decode, depth, codec."""
     _cache_backbone_suppress_mask()
+    _cache_prompt_encode()
     import torch
 
     from models.cudagraph.backbone_graph import BackboneGraph
