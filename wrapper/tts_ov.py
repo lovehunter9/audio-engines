@@ -241,6 +241,10 @@ def patch_stateful_kv(ov_model):
 
     if len(ov_model.inputs) < 4:
         raise RuntimeError("stateful decode needs embeds, mask, and K/V")
+    for i, inp in enumerate(ov_model.inputs[2:]):
+        tensor = inp.get_tensor()
+        if not tensor.get_names():
+            tensor.add_names({"past_kv_%d" % i})
     kv_in = [inp.get_any_name() for inp in ov_model.inputs[2:]]
     # convert_model leaves tuple outputs unnamed. get_any_name then throws
     # "Attempt to get a name for a Tensor without names".
