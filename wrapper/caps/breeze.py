@@ -329,12 +329,31 @@ def _is_ov():
     return tts_ov.is_breeze_ov()
 
 
+def _register_breeze_tokenizer():
+    """BreezeConfig is not in Transformers' tokenizer table.
+
+    The checkpoint tokenizer is GemmaTokenizerFast. AutoTokenizer.from_pretrained
+    only sees that when tokenizer_config.json is read. If it falls through to the
+    model config, TOKENIZER_MAPPING raises KeyError: 'BreezeConfig' and the
+    process stays up returning 503.
+    """
+    from transformers import AutoTokenizer, GemmaTokenizerFast
+    from models.breeze_config import BreezeConfig
+
+    AutoTokenizer.register(
+        BreezeConfig,
+        fast_tokenizer_class=GemmaTokenizerFast,
+        exist_ok=True,
+    )
+
+
 def _load():
     attn = tts_el.ATTN or "eager"
     _rewrite_flash_attn(attn)
     from breeze_infer.runtime import load_runtime, resolve_device, update_generation_config_for_breeze
     from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
 
+    _register_breeze_tokenizer()
     path = Path(tts_el.model_path())
     if _is_ov():
         from .. import tts_ov
