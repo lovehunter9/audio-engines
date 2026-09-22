@@ -229,7 +229,7 @@ def _dynamize_time(ov_model, ranks=(2, 3, 4)):
     return ov_model
 
 
-def patch_stateful_kv(ov_model):
+def patch_stateful_kv(ov_model, kv_from=2):
     """Intel FireRedTTS2 helper: hide K/V as InferRequest VariableState.
 
     Official notebook calls apply_make_stateful_transformation so decode does
@@ -241,11 +241,13 @@ def patch_stateful_kv(ov_model):
 
     if len(ov_model.inputs) < 4:
         raise RuntimeError("stateful decode needs embeds, mask, and K/V")
-    for i, inp in enumerate(ov_model.inputs[2:]):
+    # kv_from skips non-cache inputs that sit in front of K/V (embeds, mask,
+    # and a static-slot position). Default 2 is the original decode signature.
+    for i, inp in enumerate(ov_model.inputs[kv_from:]):
         tensor = inp.get_tensor()
         if not tensor.get_names():
             tensor.add_names({"past_kv_%d" % i})
-    kv_in = [inp.get_any_name() for inp in ov_model.inputs[2:]]
+    kv_in = [inp.get_any_name() for inp in ov_model.inputs[kv_from:]]
     # convert_model leaves tuple outputs unnamed. get_any_name then throws
     # "Attempt to get a name for a Tensor without names".
     kv_out = []
@@ -299,7 +301,8 @@ def patch_stateful_kv(ov_model):
     return ov_model
 
 
-def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4), stateful=False):
+def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
+                   stateful=False, kv_from=2):
     """Like compile_module, but dynamize the time axis before save."""
     import numpy as np
     import openvino as ov
@@ -316,7 +319,7 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4), s
                 ov.convert_model(mod, example_input=example), dynamize_ranks
             )
         if stateful:
-            ov_model = patch_stateful_kv(ov_model)
+            ov_model = patch_stateful_kv(ov_model, kv_from=kv_from)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
@@ -600,6 +603,94 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     return h, k, v
 
 
+def _layer_slot(layer, hidden, rope, attn_mask, pk, pv, position):
+    """One new token written into a fixed-length cache. Shape never changes."""
+    import torch
+
+    attn = layer.self_attn
+    residual = hidden
+    h = layer.input_layernorm(hidden)
+    b, t, _ = h.shape
+    if t != 1:
+        raise RuntimeError("static slot decode is one token, got %d" % t)
+    head_dim = int(attn.head_dim)
+    n_q = attn.q_proj.out_features // head_dim
+    n_kv = attn.k_proj.out_features // head_dim
+    q = attn.q_proj(h).view(b, t, n_q, head_dim)
+    k = attn.k_proj(h).view(b, t, n_kv, head_dim)
+    v = attn.v_proj(h).view(b, t, n_kv, head_dim)
+    if getattr(attn, "q_norm", None) is not None:
+        q = attn.q_norm(q)
+    if getattr(attn, "k_norm", None) is not None:
+        k = attn.k_norm(k)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    cos, sin = rope
+    q, k = _apply_rope(q, k, cos, sin)
+    pk = pk.to(dtype=k.dtype)
+    pv = pv.to(dtype=v.dtype)
+    index = position.to(dtype=torch.long).reshape(1, 1, 1, 1).expand(b, n_kv, 1, head_dim)
+    k = pk.scatter(2, index, k)
+    v = pv.scatter(2, index, v)
+    n_rep = n_q // n_kv
+    k_rep = _repeat_kv(k, n_rep)
+    v_rep = _repeat_kv(v, n_rep)
+    scale = float(getattr(attn, "scaling", head_dim ** -0.5))
+    scores = torch.matmul(q, k_rep.transpose(2, 3)) * scale
+    scores = scores + attn_mask
+    probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
+    out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
+    h = residual + attn.o_proj(out)
+    h = h + layer.mlp(layer.post_attention_layernorm(h))
+    return h, k, v
+
+
+def static_slot_kv_module(inner, slots):
+    """Decode one token into a fixed cache. OpenVINO then keeps that cache as state.
+
+    A growing stateful cache reallocated between steps and the wall time
+    wandered off the infer timer. The slot count never changes, so the
+    compiled kernel stays put.
+    """
+    import torch
+    import torch.nn as nn
+
+    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
+        raise RuntimeError("backbone missing layers/norm/rotary_emb for slot export")
+    cfg = getattr(inner, "config", None)
+    if cfg is not None:
+        cfg._attn_implementation = "eager"
+    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
+    width = int(slots)
+
+    class _Step(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask, position, *past):
+            wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
+            hidden = inputs_embeds.to(dtype=wdtype)
+            pos = position.reshape(1, 1).to(dtype=torch.long)
+            attn = hidden.new_zeros(1, 1, 1, width)
+            keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, width)
+            attn = attn.masked_fill(~keep, torch.finfo(hidden.dtype).min)
+            rope = self.inner.rotary_emb(hidden, pos)
+            present = []
+            for i, layer in enumerate(self.inner.layers[:n_layers]):
+                hidden, nk, nv = _layer_slot(
+                    layer, hidden, rope, attn,
+                    past[2 * i], past[2 * i + 1], position,
+                )
+                present.extend([nk, nv])
+            hidden = self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
+            out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
+            return (hidden, *out_kv)
+
+    return _Step()
+
+
 class KvRunner:
     """Prefill once, then decode with tensor K/V. No full-seq rerun.
 
@@ -856,13 +947,15 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
 class StatefulKvRunner:
     """One InferRequest; K/V stay in VariableState. Official prefill then seed_kv."""
 
-    def __init__(self, decode, n_layers):
+    def __init__(self, decode, n_layers, static_position=False):
         compiled = getattr(decode, "compiled", None)
         if compiled is None:
             raise RuntimeError("StatefulKvRunner needs compile_causal().compiled")
         self.compiled = compiled
         self.req = compiled.create_infer_request()
         self.n_layers = n_layers
+        self.static_position = bool(static_position)
+        self.slots = 0
         self._prefix = 0
         self._ready = False
 
@@ -874,8 +967,12 @@ class StatefulKvRunner:
     def seed_kv(self, cache):
         self.seed_flat(flatten_kv(cache))
 
-    def seed_flat(self, flat):
-        """Write already-flat K/V (torch or numpy, our [B,kv,T,D] layout) into state."""
+    def seed_flat(self, flat, prefix=None):
+        """Write already-flat K/V (torch or numpy, our [B,kv,T,D] layout) into state.
+
+        prefix is the real token count when the tensors are padded out to a
+        static slot count. The padded shape is not the next write index.
+        """
         import numpy as np
         import openvino as ov
 
@@ -884,16 +981,17 @@ class StatefulKvRunner:
             raise RuntimeError(
                 "state %d vs kv %d" % (len(states), len(flat))
             )
-        prefix = None
+        width = None
         for st, t in zip(states, flat):
             if hasattr(t, "detach"):
                 arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
             else:
                 arr = np.ascontiguousarray(np.asarray(t, dtype=np.float32))
             st.state = ov.Tensor(arr)
-            if prefix is None:
-                prefix = int(arr.shape[-2])
-        self._prefix = int(prefix or 0)
+            if width is None:
+                width = int(arr.shape[-2])
+        self.slots = int(width or 0)
+        self._prefix = int(self.slots if prefix is None else prefix)
         self._ready = True
 
     @property
@@ -909,12 +1007,25 @@ class StatefulKvRunner:
             raise RuntimeError("StatefulKvRunner.step needs seed_kv")
         q = int(embeds.shape[1])
         self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
-        self._mask = mask_np(None, q, self._prefix)
         self._beam = np.zeros((1,), dtype=np.int32)
         req = self.req
         req.set_input_tensor(0, ov.Tensor(self._emb))
-        req.set_input_tensor(1, ov.Tensor(self._mask))
-        req.set_input_tensor(2, ov.Tensor(self._beam))
+        if self.static_position:
+            pos = int(self._prefix)
+            if pos >= self.slots:
+                raise RuntimeError(
+                    "breeze ov decode position %d exceeds static %d" % (pos, self.slots)
+                )
+            self._mask = np.zeros((1, self.slots), dtype=np.int64)
+            self._mask[0, : pos + 1] = 1
+            self._pos = np.array([pos], dtype=np.int64)
+            req.set_input_tensor(1, ov.Tensor(self._mask))
+            req.set_input_tensor(2, ov.Tensor(self._pos))
+            req.set_input_tensor(3, ov.Tensor(self._beam))
+        else:
+            self._mask = mask_np(None, q, self._prefix)
+            req.set_input_tensor(1, ov.Tensor(self._mask))
+            req.set_input_tensor(2, ov.Tensor(self._beam))
         req.infer()
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
         self._prefix += q
