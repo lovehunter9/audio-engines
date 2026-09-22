@@ -737,6 +737,117 @@ class DeviceKvRunner:
         return hidden[:, -q:, :]
 
 
+def fixed_cache_decode_module(inner, past_slots):
+    """Decode one new token against a right-aligned cache of fixed length.
+
+    Shapes never change, so Intel's GPU plugin keeps one static kernel.
+    A growing stateful cache recompiles every codebook and that is the
+    depth-frame cost. Pads sit on the left and the mask hides them.
+    The returned cache drops the leftmost slot, which is still padding
+    until the last codebook.
+    """
+    import torch
+    import torch.nn as nn
+
+    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
+        raise RuntimeError("depth model missing layers/norm/rotary_emb")
+    cfg = getattr(inner, "config", None)
+    if cfg is not None:
+        cfg._attn_implementation = "eager"
+    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
+    slots = int(past_slots)
+
+    class _Step(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask, position, *past):
+            wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
+            hidden = inputs_embeds.to(dtype=wdtype)
+            q_len = hidden.shape[1]
+            pos = position.to(dtype=torch.long).view(1, q_len)
+            total = int(past[0].shape[-2]) + q_len
+            min_v = torch.finfo(hidden.dtype).min
+            attn = hidden.new_zeros(1, 1, q_len, total)
+            keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, total)
+            attn = attn.masked_fill(~keep, min_v)
+            rope = self.inner.rotary_emb(hidden, pos)
+            present = []
+            for i, layer in enumerate(self.inner.layers[:n_layers]):
+                pk = past[2 * i].to(dtype=wdtype)
+                pv = past[2 * i + 1].to(dtype=wdtype)
+                hidden, nk, nv = _layer_kv(layer, hidden, rope, attn, pk, pv)
+                present.extend([nk[:, :, 1:, :], nv[:, :, 1:, :]])
+            hidden = self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
+            out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
+            return (hidden, *out_kv)
+
+    if slots < 2:
+        raise RuntimeError("fixed depth cache needs at least 2 slots, got %d" % slots)
+    return _Step()
+
+
+class FixedCacheRunner:
+    """One static decode model. Real keys stay right-aligned in a fixed buffer."""
+
+    def __init__(self, decode, n_layers, past_slots):
+        self.run = decode
+        self.n_layers = n_layers
+        self.past = int(past_slots)
+        self.kv = None
+        self.valid = 0
+
+    def reset(self):
+        self.kv = None
+        self.valid = 0
+
+    def load_prefill(self, tensors):
+        import numpy as np
+
+        if tensors is None or len(tensors) != 2 * self.n_layers:
+            raise RuntimeError(
+                "depth prefill kv %s vs %d"
+                % (0 if tensors is None else len(tensors), 2 * self.n_layers)
+            )
+        bufs = []
+        valid = None
+        for t in tensors:
+            arr = np.array(getattr(t, "data", t), copy=True)
+            n = int(arr.shape[-2])
+            if n > self.past:
+                raise RuntimeError("depth prefill len %d exceeds cache %d" % (n, self.past))
+            buf = np.zeros((arr.shape[0], arr.shape[1], self.past, arr.shape[3]), dtype=arr.dtype)
+            buf[:, :, -n:, :] = arr
+            bufs.append(np.ascontiguousarray(buf))
+            valid = n if valid is None else valid
+        self.kv = bufs
+        self.valid = int(valid or 0)
+
+    def step(self, embeds):
+        import numpy as np
+        import torch
+
+        if self.kv is None:
+            raise RuntimeError("FixedCacheRunner.step needs load_prefill")
+        q = int(embeds.shape[1])
+        if self.valid + q > self.past + 1:
+            raise RuntimeError(
+                "depth cache valid %d + %d exceeds %d"
+                % (self.valid, q, self.past + 1)
+            )
+        total = self.past + q
+        mask = np.zeros((1, total), dtype=np.int64)
+        mask[0, self.past - self.valid :] = 1
+        pos = np.array([[self.valid]], dtype=np.int64)
+        arr = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        out = self.run(arr, mask, pos, *self.kv)
+        hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
+        self.kv = [np.ascontiguousarray(out[i]) for i in range(1, 1 + 2 * self.n_layers)]
+        self.valid += q
+        return hidden[:, -q:, :]
+
+
 class StatefulKvRunner:
     """One InferRequest; K/V stay in VariableState. Official prefill then seed_kv."""
 
