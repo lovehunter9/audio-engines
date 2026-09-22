@@ -544,13 +544,14 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    # v10 is the bf16 decode traced before backbone.float(). v11 re-exports
-    # that same stateful graph from the f32 module.
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v11")
+    # v11 still invented RoPE from the example cache. v12 takes the position
+    # the official loop already wrote (prefill_len + step).
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v12")
+    pos_dec = torch.zeros(1, 1, dtype=torch.long)
     decode = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(backbone, True),
-        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
-        stateful=True,
+        tts_ov.causal_kv_module(backbone, True, external_position=True),
+        (embeds_dec, mask_dec, pos_dec, *past), dec_xml, dec_stamp, device,
+        stateful=True, kv_from=3,
     )
     _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
     prefill = tts_ov.compile_causal(
@@ -600,7 +601,10 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             runner.seed_flat(kv)
             log.info("breeze prefill tokens=%d %.3fs", real, time.perf_counter() - t0)
         else:
-            states = runner.step(embeds)
+            pos = kwargs.get("position_ids")
+            if pos is None:
+                raise RuntimeError("breeze ov decode has no position_ids")
+            states = runner.step(embeds, pos.detach())
         if states.dtype != embeds.dtype:
             states = states.to(dtype=embeds.dtype)
         return type("BBOut", (), {
