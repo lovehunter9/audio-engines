@@ -528,8 +528,11 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     cfg = getattr(backbone, "config", None) or model.config
     n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
-    # One-token decode already ran in bf16. The long prefill of a hot English
-    # reference did not, so only that export is f32. CUDA never reaches here.
+    # A long reference prefill overflowed in bf16. Decode used to be traced
+    # before this cast, so it kept bf16 weights and then read the f32 prefill
+    # cache: the first frame could be a real phone, and every later frame was
+    # the other network. Both exports are f32. CUDA never reaches here.
+    backbone.float()
     src = str(path)
     example_t = 16
     prefill_t = 320
@@ -541,15 +544,14 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    # v9 overwrote this xml with the fixed-slot graph. v10 is the stateful
-    # concat decode again, and the stamp is what forces that re-export.
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v10")
+    # v10 is the bf16 decode traced before backbone.float(). v11 re-exports
+    # that same stateful graph from the f32 module.
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v11")
     decode = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, True),
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
         stateful=True,
     )
-    backbone.float()
     _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
     prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, False),
