@@ -2606,6 +2606,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("DeviceKvRunner", src)
         self.assertIn("backbone.float()", src)
         self.assertIn(".ov-breeze-v6", src)
+        self.assertIn(".ov-breeze-v7", src)
+        self.assertIn("prefill_t = 320", src)
         self.assertLess(src.index("breeze_backbone_decode"), src.index("backbone.float()"))
         self.assertLess(src.index("backbone.float()"), src.index("breeze_backbone_prefill"))
         self.assertNotIn("backbone.float()", cuda_branch)
