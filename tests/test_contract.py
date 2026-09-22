@@ -2549,7 +2549,6 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 
     def test_release_parameters_drops_storage(self):
         try:
-            import torch
             from torch import nn
         except ImportError:
             self.skipTest("torch")
