@@ -745,99 +745,25 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """Official DepthDecoderGraph loop stays; layer stack runs on GPU like backbone."""
-    import torch
+    """Leave depth-codebook sampling on the official loop.
 
-    from models.cudagraph.depth_decoder_graph import DepthDecoderGraph
-
-    from .. import tts_ov
-
+    The fused OpenVINO frame drew every codebook with its own inverse CDF.
+    The official codec of those ids still transcribed as a grunt, so the ids
+    were not speech. Weights stay for the model's own sampler. CUDA never
+    calls this.
+    """
     depth = getattr(model, "depth_decoder", None)
     inner = getattr(depth, "model", None) if depth is not None else None
     if inner is None:
         raise RuntimeError("Breeze model has no depth_decoder.model")
-    cfg = getattr(model.config, "depth_decoder_config", None) or inner.config
-    n_layers, _, _ = tts_ov.kv_meta(cfg)
-    hidden = int(cfg.hidden_size)
     head = getattr(depth, "codebooks_head", None)
     if head is None or getattr(head, "weight", None) is None:
         raise RuntimeError("Breeze depth decoder has no codebooks_head")
-    n_codebooks = int(getattr(head, "num_codebooks", 0) or getattr(cfg, "num_codebooks", 0) or 0)
-    vocab = int(head.weight.shape[-1])
-    codec_cfg = getattr(getattr(model, "config", None), "codec_config", None)
-    codebook_size = int(getattr(codec_cfg, "codebook_size", vocab) or vocab)
-    n_tokens = n_codebooks - 1
-    src = str(path)
-    example = (
-        torch.zeros(1, 2, hidden, dtype=torch.float32),
-        torch.ones(1, dtype=torch.float32),
-        torch.ones(1, dtype=torch.long),
-        torch.ones(1, dtype=torch.float32),
-        torch.ones(1, dtype=torch.long),
-        torch.full((n_tokens,), 0.5, dtype=torch.float32),
-    )
-    _, frame_xml, frame_stamp = tts_ov.ir_paths(src, "breeze_depth_frame", ".ov-breeze-depth-v4")
-    frame = tts_ov.compile_causal(
-        tts_ov.fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size),
-        example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(),
-    )
-    import time
-    import numpy as np
-    depth_times = {"n": 0, "s": 0.0}
-
-    def _full_loop(self):
-        if int(getattr(self, "batch_size", 1)) != 1:
-            raise RuntimeError(
-                "breeze ov depth is compiled for batch=1; got %s" % self.batch_size
-            )
-        if int(self.num_codebooks) != n_codebooks:
-            raise RuntimeError(
-                "breeze depth frame codebooks %d vs graph %s" % (n_codebooks, self.num_codebooks)
-            )
-        t0 = time.perf_counter()
-        self.prefill_input_ids[:, 0] = 0
-        self.prefill_input_ids[:, 1] = self.first_cb_token_buf
-
-        def _as_weight(x, mod):
-            w = getattr(mod, "weight", None)
-            if w is None or x.dtype == w.dtype:
-                return x
-            return x.to(dtype=w.dtype)
-
-        prefill_embeds = self.embed_tokens(self.prefill_input_ids)
-        backbone_h = self.backbone_hidden_buf
-        if self.backbone_hidden_state_projector is not None:
-            backbone_h = self.backbone_hidden_state_projector(
-                _as_weight(backbone_h, self.backbone_hidden_state_projector)
-            )
-        if backbone_h.dtype != prefill_embeds.dtype:
-            backbone_h = backbone_h.to(dtype=prefill_embeds.dtype)
-        prefill_embeds = self.inputs_embeds_projector(
-            _as_weight(prefill_embeds, self.inputs_embeds_projector)
-        )
-        temp = np.ascontiguousarray(self.temperature_buf[:1, 0].detach().float().cpu().numpy())
-        topk = np.ascontiguousarray(self.top_k_buf[:1, 0].detach().cpu().numpy().astype(np.int64))
-        topp = np.ascontiguousarray(self.top_p_buf[:1, 0].detach().float().cpu().numpy())
-        dos = np.ascontiguousarray(self.do_sample_buf[:1].detach().cpu().numpy().astype(np.int64))
-        uniform = np.ascontiguousarray(torch.rand(n_tokens).numpy().astype(np.float32))
-        embeds = np.ascontiguousarray(prefill_embeds.detach().float().cpu().numpy())
-        toks = np.array(frame(embeds, temp, topk, topp, dos, uniform)[0]).reshape(-1)
-        for i, tok in enumerate(toks):
-            self.output_tokens[:, i] = int(tok)
-        depth_times["n"] += 1
-        depth_times["s"] += time.perf_counter() - t0
-        if depth_times["n"] == 1 or depth_times["n"] % 8 == 0:
-            log.info(
-                "breeze depth frames=%d %.3fs", depth_times["n"], depth_times["s"],
-            )
-
-    DepthDecoderGraph._full_loop = _full_loop
     log.info(
-        "breeze depth fused frame on OpenVINO %s layers=%d codebooks=%d",
-        device, n_layers, n_codebooks,
+        "breeze depth stays on the official codebook loop path=%s device=%s",
+        path, device,
     )
-    tts_ov.release_parameters(getattr(inner, "layers", None), "breeze depth layers")
+    return depth
 
 
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
