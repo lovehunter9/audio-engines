@@ -242,7 +242,14 @@ def patch_stateful_kv(ov_model):
     if len(ov_model.inputs) < 4:
         raise RuntimeError("stateful decode needs embeds, mask, and K/V")
     kv_in = [inp.get_any_name() for inp in ov_model.inputs[2:]]
-    kv_out = [out.get_any_name() for out in ov_model.outputs[1:]]
+    # convert_model leaves tuple outputs unnamed. get_any_name then throws
+    # "Attempt to get a name for a Tensor without names".
+    kv_out = []
+    for i, out in enumerate(ov_model.outputs[1:]):
+        tensor = out.get_tensor()
+        if not tensor.get_names():
+            tensor.add_names({"present_kv_%d" % i})
+        kv_out.append(out.get_any_name())
     if len(kv_in) != len(kv_out):
         raise RuntimeError("stateful kv in/out %d vs %d" % (len(kv_in), len(kv_out)))
     import openvino as ov
