@@ -552,11 +552,29 @@ def _install_firered_ov(instruct, path, device):
     _install_firered_decode_log(instruct, times)
 
 
+def _firered_sliding_mask(hidden, window):
+    """Additive mask: causal, and only the last `window` keys (eager Qwen3).
+
+    kv_idx > q_idx - window matches transformers sliding_window_overlay.
+    """
+    import torch
+
+    t = hidden.shape[1]
+    causal = torch.triu(torch.ones(t, t, dtype=torch.bool, device=hidden.device), 1)
+    q_idx = torch.arange(t, device=hidden.device).view(t, 1)
+    kv_idx = torch.arange(t, device=hidden.device).view(1, t)
+    blocked = causal | (kv_idx <= q_idx - window)
+    attn = hidden.new_zeros(1, 1, t, t)
+    return attn.masked_fill(blocked, torch.finfo(hidden.dtype).min)
+
+
 def _install_firered_decoder_ov(instruct, path, device):
     """Put the RedAE decoder transformer on OpenVINO. ISTFT stays in torch.
 
-    A short speak spent ~8s in this decode, after the AR loop. Export failure
-    keeps the official decoder and is logged; load still finishes.
+    A short speak spent ~8s in this decode, after the AR loop. Qwen3Model.forward
+    builds the sliding-window mask through the HF cache helpers and the trace
+    dies with 'tuple index out of range'. Walk the layers with that same mask.
+    Export failure keeps the official decoder and is logged; load still finishes.
     """
     import torch
     from torch import nn
@@ -569,6 +587,16 @@ def _install_firered_decoder_ov(instruct, path, device):
     if qwen is None:
         raise RuntimeError("FireRed RedAE decoder has no qwen3")
     hidden = int(dec.qwen3_config.hidden_size)
+    cfg = qwen.config
+    cfg.use_cache = False
+    cfg._attn_implementation = "eager"
+    layer_types = [str(x) for x in (getattr(cfg, "layer_types", None) or [])]
+    window = int(getattr(cfg, "sliding_window", 0) or 0)
+    n_sliding = sum(x == "sliding_attention" for x in layer_types)
+    log.info(
+        "firered redae decoder layers=%d sliding=%d window=%s",
+        len(layer_types), n_sliding, window,
+    )
 
     class _Dec(nn.Module):
         def __init__(self, qwen):
@@ -576,20 +604,43 @@ def _install_firered_decoder_ov(instruct, path, device):
             self.qwen = qwen
 
         def forward(self, embeds):
-            return self.qwen(
-                inputs_embeds=embeds, attention_mask=None
-            ).last_hidden_state
+            wdtype = next(self.qwen.parameters()).dtype
+            h = embeds.to(dtype=wdtype)
+            t = h.shape[1]
+            pos = torch.arange(t, device=h.device).unsqueeze(0)
+            rope = self.qwen.rotary_emb(h, pos)
+            full = h.new_zeros(1, 1, t, t)
+            full = full.masked_fill(
+                torch.triu(torch.ones(t, t, dtype=torch.bool, device=h.device), 1),
+                torch.finfo(h.dtype).min,
+            )
+            sliding = _firered_sliding_mask(h, window) if window else full
+            for i, layer in enumerate(self.qwen.layers):
+                kind = layer_types[i] if i < len(layer_types) else "full_attention"
+                mask = sliding if kind == "sliding_attention" and window else full
+                h = layer(
+                    h,
+                    attention_mask=mask,
+                    position_ids=pos,
+                    past_key_values=None,
+                    use_cache=False,
+                    position_embeddings=rope,
+                )
+                if isinstance(h, (tuple, list)):
+                    h = h[0]
+            return self.qwen.norm(h).to(dtype=embeds.dtype)
 
     _, xml, stamp = tts_ov.ir_paths(
-        str(path), "firered_redae_dec", ".ov-firered-dec-v1"
+        str(path), "firered_redae_dec", ".ov-firered-dec-v2"
     )
     try:
-        compiled = tts_ov.compile_module(
+        compiled = tts_ov.compile_causal(
             _Dec(qwen), torch.zeros(1, 32, hidden, dtype=torch.float32),
             xml, stamp, device,
+            dynamize_ranks=(3,),
         )
-    except Exception as e:
-        log.error("firered redae decoder stayed on torch: %s", e)
+    except Exception:
+        log.exception("firered redae decoder stayed on torch")
         return
     orig_fwd = dec.forward
 
