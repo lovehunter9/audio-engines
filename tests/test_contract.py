@@ -2601,8 +2601,11 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         ov_branch = load.split("if _is_ov():", 1)[1].split("else:", 1)[0]
         cuda_branch = load.split("else:", 1)[1].split("update_generation_config_for_breeze", 1)[0]
         self.assertIn("_wait_breeze_snapshot(path)", ov_branch)
+        self.assertIn("_register_breeze_tokenizer()", ov_branch)
         self.assertLess(ov_branch.index("_wait_breeze_snapshot("), ov_branch.index("load_runtime("))
+        self.assertLess(ov_branch.index("_register_breeze_tokenizer()"), ov_branch.index("load_runtime("))
         self.assertNotIn("_wait_breeze_snapshot", cuda_branch)
+        self.assertNotIn("_register_breeze_tokenizer", cuda_branch)
         self.assertNotIn("_install_breeze_ov", cuda_branch)
         self.assertNotIn('device="cpu"', cuda_branch)
         self.assertIn("resolve_device()", cuda_branch)
