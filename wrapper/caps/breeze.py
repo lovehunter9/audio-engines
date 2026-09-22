@@ -462,23 +462,26 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     # One-token decode already ran in bf16. The long prefill of a hot English
     # reference did not, so only that export is f32. CUDA never reaches here.
     src = str(path)
-    example_t = 16
     prefill_t = 320
     embeds_pre = torch.zeros(1, prefill_t, hidden, dtype=torch.float32)
     embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
     mask_pre = torch.ones(1, prefill_t, dtype=torch.long)
-    mask_dec = torch.ones(1, example_t + 1, dtype=torch.long)
+    # Fixed slots: a growing stateful cache was reallocating between tokens
+    # and the extra time never showed up inside the infer timer.
+    slots = 1024
+    mask_dec = torch.ones(1, slots, dtype=torch.long)
+    position = torch.tensor([16], dtype=torch.long)
     past = []
     for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    # v8 is stateful. A 245-token prefill is ~0.1s, and one decode token was
-    # the same, so the time is rebinding K/V every frame, not the matmul.
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v8")
+        past.append(torch.zeros(1, n_kv, slots, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, slots, head_dim, dtype=torch.float32))
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v9")
     decode = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(backbone, True),
-        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+        tts_ov.static_slot_kv_module(backbone, slots),
+        (embeds_dec, mask_dec, position, *past), dec_xml, dec_stamp, device,
+        dynamize_ranks=(),
         stateful=True,
+        kv_from=3,
     )
     backbone.float()
     _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
@@ -489,7 +492,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     )
     import gc
     gc.collect()
-    runner = tts_ov.StatefulKvRunner(decode, n_layers)
+    runner = tts_ov.StatefulKvRunner(decode, n_layers, static_position=True)
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):
@@ -509,9 +512,10 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             import numpy as np
             import time
             real = int(embeds.shape[1])
-            if real > prefill_t:
+            if real > prefill_t or real > slots:
                 raise RuntimeError(
-                    "breeze ov prefill length %d exceeds static %d" % (real, prefill_t)
+                    "breeze ov prefill length %d exceeds static %d/%d"
+                    % (real, prefill_t, slots)
                 )
             t0 = time.perf_counter()
             buf = np.zeros((1, prefill_t, hidden), dtype=np.float32)
@@ -524,9 +528,14 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             states = torch.from_numpy(np.ascontiguousarray(out[0]))[:, :real]
             kv = []
             for i in range(1, 1 + 2 * n_layers):
-                arr = np.array(out[i], copy=True)
-                kv.append(np.ascontiguousarray(arr[:, :, :real, :]))
-            runner.seed_flat(kv)
+                arr = np.array(out[i], copy=True)[:, :, :real, :]
+                pad = np.zeros(
+                    (arr.shape[0], arr.shape[1], slots, arr.shape[3]),
+                    dtype=np.float32,
+                )
+                pad[:, :, :real, :] = arr
+                kv.append(np.ascontiguousarray(pad))
+            runner.seed_flat(kv, prefix=real)
             log.info("breeze prefill tokens=%d %.3fs", real, time.perf_counter() - t0)
         else:
             states = runner.step(embeds)
