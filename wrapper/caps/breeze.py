@@ -472,10 +472,13 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v6")
+    # v8 is stateful. A 245-token prefill is ~0.1s, and one decode token was
+    # the same, so the time is rebinding K/V every frame, not the matmul.
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v8")
     decode = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, True),
         (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
+        stateful=True,
     )
     backbone.float()
     _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
@@ -486,7 +489,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     )
     import gc
     gc.collect()
-    runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
+    runner = tts_ov.StatefulKvRunner(decode, n_layers)
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):
@@ -504,7 +507,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         if past_in is None:
             runner.reset()
             import numpy as np
-            import openvino as ov
             import time
             real = int(embeds.shape[1])
             if real > prefill_t:
@@ -523,9 +525,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             kv = []
             for i in range(1, 1 + 2 * n_layers):
                 arr = np.array(out[i], copy=True)
-                kv.append(ov.Tensor(np.ascontiguousarray(arr[:, :, :real, :])))
-            runner.kv = kv
-            runner._prefix = real
+                kv.append(np.ascontiguousarray(arr[:, :, :real, :]))
+            runner.seed_flat(kv)
             log.info("breeze prefill tokens=%d %.3fs", real, time.perf_counter() - t0)
         else:
             states = runner.step(embeds)
@@ -550,12 +551,18 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         self._prefill_len = seq_len
         return seq_len
 
+    step_t = {"n": 0, "embed": 0.0, "ov": 0.0, "head": 0.0}
+
     def decode_step(self):
+        import time
+
         if self.batch_size != 1:
             raise RuntimeError(
                 "breeze ov BackboneGraph is compiled for batch=1; got %d" % self.batch_size
             )
+        t0 = time.perf_counter()
         inputs_embeds = self.embed_tokens(self.input_ids_buf)
+        t1 = time.perf_counter()
         out = self.model(
             inputs_embeds=inputs_embeds,
             attention_mask=self.attn_mask,
@@ -564,19 +571,30 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             cache_position=self.cache_position,
             use_cache=True,
         )
+        t2 = time.perf_counter()
         self.hidden_buf.copy_(out.last_hidden_state.to(self.hidden_buf.dtype))
         logits = self.lm_head(
             self.hidden_buf[:, -1, :].to(dtype=self.lm_head.weight.dtype)
         )
         self.logits_buf.copy_(logits)
         self.cfg_logits_buf.copy_(self.logits_buf[: self.half])
+        t3 = time.perf_counter()
+        step_t["n"] += 1
+        step_t["embed"] += t1 - t0
+        step_t["ov"] += t2 - t1
+        step_t["head"] += t3 - t2
+        if step_t["n"] % 8 == 0:
+            log.info(
+                "breeze backbone steps=%d embed=%.3fs ov=%.3fs head=%.3fs",
+                step_t["n"], step_t["embed"], step_t["ov"], step_t["head"],
+            )
 
     prefill_kv._ov = True
     decode_step._ov = True
     BackboneGraph.prefill_kv = prefill_kv
     BackboneGraph._decode_step = decode_step
     log.info(
-        "breeze backbone prefill+decode device-KV on OpenVINO %s layers=%d",
+        "breeze backbone prefill+decode stateful-KV on OpenVINO %s layers=%d",
         device, n_layers,
     )
     # Layer stack is in the OV blob. embed_tokens / lm_head stay for the Python loop.
