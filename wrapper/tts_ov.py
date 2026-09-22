@@ -32,6 +32,52 @@ def ir_paths(src, name, stamp):
     return ir_dir, os.path.join(ir_dir, name + ".xml"), os.path.join(ir_dir, stamp)
 
 
+def release_parameters(mod, label):
+    """Drop torch weight storage once those weights are in an OpenVINO IR.
+
+    The next stage's convert_model allocates another copy. Leaving the compiled
+    stage's parameters resident is what pushed Breeze over the cgroup after the
+    backbone graph was already on GPU.
+    """
+    import gc
+
+    if mod is None:
+        return 0
+    seen = set()
+    nbytes = 0
+    for p in list(mod.parameters()):
+        storage = p.data.untyped_storage()
+        key = storage.data_ptr()
+        if key not in seen and p.data.numel():
+            seen.add(key)
+            nbytes += storage.nbytes()
+        p.data = p.data.new_empty(0)
+    gc.collect()
+    trimmed = False
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+        trimmed = True
+    except OSError:
+        pass
+    log.info(
+        "released %s torch params bytes=%d storages=%d trim=%s rss_kib=%s",
+        label, nbytes, len(seen), trimmed, _rss_kib(),
+    )
+    return nbytes
+
+
+def _rss_kib():
+    try:
+        with open("/proc/self/status") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    return line.split()[1]
+    except OSError:
+        return "?"
+    return "?"
+
+
 def compile_module(mod, example, xml, stamp, device):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np."""
     import numpy as np

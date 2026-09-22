@@ -463,6 +463,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         "breeze backbone prefill+decode device-KV on OpenVINO %s layers=%d",
         device, n_layers,
     )
+    # Layer stack is in the OV blob. embed_tokens / lm_head stay for the Python loop.
+    tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     _install_breeze_text_ov(model, path, device)
     _install_breeze_depth_ov(model, path, device)
     _install_breeze_codec_ov(audio_tokenizer, path, device)
@@ -534,6 +536,7 @@ def _install_breeze_text_ov(model, path, device):
     model._batched_text_encoder_forward = _batched_text_encoder_forward.__get__(
         model, type(model)
     )
+    tts_ov.release_parameters(enc, "breeze text encoder")
     log.info("breeze text encoder on OpenVINO %s static_t=%d", device, t_fixed)
 
 
@@ -616,8 +619,7 @@ def _install_breeze_depth_ov(model, path, device):
 
     DepthDecoderGraph._full_loop = _full_loop
     log.info("breeze depth prefill+decode device-KV on OpenVINO %s layers=%d", device, n_layers)
-    import gc
-    gc.collect()
+    tts_ov.release_parameters(getattr(inner, "layers", None), "breeze depth layers")
 
 
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
@@ -715,6 +717,8 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     compiled_tail = tts_ov.compile_static(
         _Tail(dec), ex_h.permute(0, 2, 1).contiguous(), t_xml, t_stamp, device
     )
+    for part in ("quantizer", "pre_conv", "pre_transformer", "upsample", "decoder"):
+        tts_ov.release_parameters(getattr(dec, part, None), "breeze codec " + part)
     upsample = int(getattr(dec, "total_upsample", 1) or 1)
     times = {"quant": 0.0, "pre": 0.0, "tail": 0.0, "n": 0}
 
