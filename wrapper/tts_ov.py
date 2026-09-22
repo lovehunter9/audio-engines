@@ -514,8 +514,14 @@ def _repeat_kv(x, n_rep):
     )
 
 
-def causal_kv_module(inner, with_past):
-    """One transformer step with tensor K/V. Never calls official forward or Cache."""
+def causal_kv_module(inner, with_past, external_position=False):
+    """One transformer step with tensor K/V. Never calls official forward or Cache.
+
+    external_position puts position_ids on the decode signature, in front of K/V.
+    Breeze's official loop already computed that id; deriving it from the example
+    cache length leaves every new frame at the export position. FireRed stays
+    on the default.
+    """
     import torch
     import torch.nn as nn
 
@@ -531,10 +537,14 @@ def causal_kv_module(inner, with_past):
             super().__init__()
             self.inner = inner
 
-        def forward(self, inputs_embeds, attention_mask, *past):
+        def forward(self, inputs_embeds, attention_mask, *rest):
             # rotary inv_freq is float32 even when the linears are bf16.
             # Taking the first parameter casts every activation to float and
             # the next linear refuses the pair.
+            if external_position:
+                position_ids, past = rest[0], rest[1:]
+            else:
+                position_ids, past = None, rest
             wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
             hidden = inputs_embeds.to(dtype=wdtype)
             q_len = hidden.shape[1]
@@ -542,9 +552,12 @@ def causal_kv_module(inner, with_past):
             if with_past:
                 past_len = past[0].shape[-2]
             total = past_len + q_len
-            pos = torch.arange(
-                past_len, total, device=hidden.device
-            ).unsqueeze(0)
+            if position_ids is None:
+                pos = torch.arange(
+                    past_len, total, device=hidden.device
+                ).unsqueeze(0)
+            else:
+                pos = position_ids
             attn = causal_attn_bias(hidden, q_len, past_len)
             keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, total)
             attn = attn.masked_fill(~keep, torch.finfo(hidden.dtype).min)
@@ -903,7 +916,7 @@ class StatefulKvRunner:
     def prefix_len(self):
         return int(self._prefix)
 
-    def step(self, embeds):
+    def step(self, embeds, position=None):
         import numpy as np
         import openvino as ov
         import torch
@@ -917,7 +930,14 @@ class StatefulKvRunner:
         req = self.req
         req.set_input_tensor(0, ov.Tensor(self._emb))
         req.set_input_tensor(1, ov.Tensor(self._mask))
-        req.set_input_tensor(2, ov.Tensor(self._beam))
+        nxt = 2
+        if position is not None:
+            if hasattr(position, "detach"):
+                position = position.detach().cpu().numpy()
+            self._pos = np.asarray(position, dtype=np.int64).reshape(1, -1)
+            req.set_input_tensor(nxt, ov.Tensor(self._pos))
+            nxt += 1
+        req.set_input_tensor(nxt, ov.Tensor(self._beam))
         req.infer()
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
         self._prefix += q
