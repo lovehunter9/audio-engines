@@ -2670,6 +2670,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("breeze_codec_pre", codec)
         self.assertIn("breeze_codec_tail", codec)
         self.assertIn("ExecutionLane.run_step", codec)
+        self.assertIn("load_request_state", codec)
+        self.assertIn("store_request_state", codec)
         self.assertIn("compile_static", codec)
         self.assertIn("dec.forward = forward", codec)
         self.assertLess(
