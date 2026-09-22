@@ -645,50 +645,34 @@ def _install_breeze_depth_ov(model, path, device):
     cfg = getattr(model.config, "depth_decoder_config", None) or inner.config
     n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
+    n_codebooks = int(getattr(cfg, "num_codebooks", 32) or 32)
+    past_slots = n_codebooks - 1
     src = str(path)
     embeds_pre = torch.zeros(1, 2, hidden, dtype=torch.float32)
     embeds_dec = torch.zeros(1, 1, hidden, dtype=torch.float32)
     mask_pre = torch.ones(1, 2, dtype=torch.long)
-    mask_dec = torch.ones(1, 3, dtype=torch.long)
+    mask_dec = torch.ones(1, past_slots + 1, dtype=torch.long)
+    position = torch.zeros(1, 1, dtype=torch.long)
     past = []
     for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
-        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_depth_prefill", ".ov-breeze-depth-v1")
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_depth_decode", ".ov-breeze-depth-v2")
+        past.append(torch.zeros(1, n_kv, past_slots, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, past_slots, head_dim, dtype=torch.float32))
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_depth_prefill", ".ov-breeze-depth-v3")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_depth_decode_fix", ".ov-breeze-depth-v3")
     prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(inner, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
+        dynamize_ranks=(),
     )
     decode = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(inner, True),
-        (embeds_dec, mask_dec, *past), dec_xml, dec_stamp, device,
-        stateful=True,
+        tts_ov.fixed_cache_decode_module(inner, past_slots),
+        (embeds_dec, mask_dec, position, *past), dec_xml, dec_stamp, device,
+        dynamize_ranks=(),
     )
     pre_runner = tts_ov.DeviceKvRunner(prefill, n_layers, prefill=prefill)
-    state = tts_ov.StatefulKvRunner(decode, n_layers)
+    cache = tts_ov.FixedCacheRunner(decode, n_layers, past_slots)
     import time
-    import numpy as np
     depth_times = {"n": 0, "s": 0.0}
-
-    def _seed_depth():
-        import openvino as ov
-
-        tensors = pre_runner.kv
-        states = state.req.query_state()
-        if tensors is None or len(states) != len(tensors):
-            raise RuntimeError(
-                "breeze depth state %d vs kv %s"
-                % (len(states), 0 if tensors is None else len(tensors))
-            )
-        prefix = None
-        for st, t in zip(states, tensors):
-            arr = np.array(t.data, copy=True)
-            st.state = ov.Tensor(arr)
-            if prefix is None:
-                prefix = int(arr.shape[-2])
-        state._prefix = int(prefix or 0)
-        state._ready = True
 
     def _full_loop(self):
         if int(getattr(self, "batch_size", 1)) != 1:
@@ -716,10 +700,15 @@ def _install_breeze_depth_ov(model, path, device):
         prefill_embeds = self.inputs_embeds_projector(
             _as_weight(prefill_embeds, self.inputs_embeds_projector)
         )
+        if int(self.num_codebooks) != n_codebooks:
+            raise RuntimeError(
+                "breeze depth cache codebooks %d vs graph %s"
+                % (n_codebooks, self.num_codebooks)
+            )
         pre_runner.reset()
         hidden_states = pre_runner.step(prefill_embeds)
-        state.reset()
-        _seed_depth()
+        cache.reset()
+        cache.load_prefill(pre_runner.kv)
         first_logits = self.codebooks_head(
             _as_weight(hidden_states[:, 1:, :], self.codebooks_head),
             cache_position=self.head_prefill_pos,
@@ -739,7 +728,7 @@ def _install_breeze_depth_ov(model, path, device):
             emb = self.inputs_embeds_projector(
                 _as_weight(emb, self.inputs_embeds_projector)
             )
-            hidden_states = state.step(emb)
+            hidden_states = cache.step(emb)
             cache_pos = self.decode_cache_positions[cb_idx - 1]
             logits = self.codebooks_head(
                 _as_weight(hidden_states, self.codebooks_head), cache_position=cache_pos
@@ -757,7 +746,10 @@ def _install_breeze_depth_ov(model, path, device):
             )
 
     DepthDecoderGraph._full_loop = _full_loop
-    log.info("breeze depth prefill+decode device-KV on OpenVINO %s layers=%d", device, n_layers)
+    log.info(
+        "breeze depth static cache on OpenVINO %s layers=%d codebooks=%d",
+        device, n_layers, n_codebooks,
+    )
     tts_ov.release_parameters(getattr(inner, "layers", None), "breeze depth layers")
 
 
