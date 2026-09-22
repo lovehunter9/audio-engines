@@ -459,6 +459,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     cfg = getattr(backbone, "config", None) or model.config
     n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
+    # English references peak near full scale. bf16 attention then returns
+    # non-finite logits. CUDA keeps bf16. This export is f32, then released.
+    backbone.float()
     src = str(path)
     example_t = 16
     embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
@@ -469,8 +472,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v4")
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v4")
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v5")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_backbone_decode", ".ov-breeze-v5")
     prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(backbone, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
@@ -483,22 +486,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     )
     runner = tts_ov.DeviceKvRunner(decode, n_layers, prefill=prefill)
     orig_bb = backbone.forward
-    # A single prefill of a ~13s reference (English voices, ~227 tokens) comes
-    # back non-finite on this GPU. A ~10s reference (~174 tokens) does not, and
-    # decode of one token already ran past that length while speaking Chinese.
-    # Keep the first chunk on the prefill graph; extend the rest one token at
-    # a time on the decode graph.
-    prefill_chunk = 160
-
-    def _prefill_long(embeds):
-        t = int(embeds.shape[1])
-        if t <= prefill_chunk:
-            return runner.step(embeds)
-        parts = [runner.step(embeds[:, :prefill_chunk])]
-        for i in range(prefill_chunk, t):
-            parts.append(runner.step(embeds[:, i:i + 1]))
-        log.info("breeze ov prefill chunked t=%d chunk=%d", t, prefill_chunk)
-        return torch.cat(parts, dim=1)
 
     def bb_forward(*args, **kwargs):
         embeds = kwargs.get("inputs_embeds")
@@ -514,9 +501,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             )
         if past_in is None:
             runner.reset()
-            hidden = _prefill_long(embeds)
-        else:
-            hidden = runner.step(embeds)
+        hidden = runner.step(embeds)
         return type("BBOut", (), {
             "last_hidden_state": hidden,
             "past_key_values": past_in,
@@ -581,6 +566,10 @@ def _install_breeze_text_ov(model, path, device):
     enc = getattr(model, "text_encoder", None)
     if enc is None:
         raise RuntimeError("Breeze model has no text_encoder")
+    enc.float()
+    proj = getattr(model, "text_encoder_proj", None)
+    if proj is not None and hasattr(proj, "float"):
+        proj.float()
     t_fixed = 256
 
     class _Text(nn.Module):
@@ -595,7 +584,7 @@ def _install_breeze_text_ov(model, path, device):
     ids = torch.zeros(1, t_fixed, dtype=torch.long)
     mask = torch.ones(1, t_fixed, dtype=torch.long)
     pos = torch.arange(t_fixed, dtype=torch.long).unsqueeze(0)
-    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v1")
+    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v2")
     compiled = tts_ov.compile_module(_Text(), (ids, mask, pos), xml, stamp, device)
     orig = model._batched_text_encoder_forward
     proj = getattr(model, "text_encoder_proj", None)
