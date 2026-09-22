@@ -2598,8 +2598,14 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         from wrapper.caps import breeze
 
         load = inspect.getsource(breeze._load)
-        self.assertLess(load.index("_wait_breeze_snapshot("), load.index("load_runtime("))
-        self.assertLess(load.index("_wait_breeze_snapshot("), load.index("_register_breeze_tokenizer()"))
+        ov_branch = load.split("if _is_ov():", 1)[1].split("else:", 1)[0]
+        cuda_branch = load.split("else:", 1)[1].split("update_generation_config_for_breeze", 1)[0]
+        self.assertIn("_wait_breeze_snapshot(path)", ov_branch)
+        self.assertLess(ov_branch.index("_wait_breeze_snapshot("), ov_branch.index("load_runtime("))
+        self.assertNotIn("_wait_breeze_snapshot", cuda_branch)
+        self.assertNotIn("_install_breeze_ov", cuda_branch)
+        self.assertNotIn('device="cpu"', cuda_branch)
+        self.assertIn("resolve_device()", cuda_branch)
         wait = inspect.getsource(breeze._wait_breeze_snapshot)
         self.assertIn("breeze snapshot incomplete", wait)
         missing = inspect.getsource(breeze._breeze_snapshot_missing)
