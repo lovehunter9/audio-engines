@@ -751,6 +751,11 @@ def _install_breeze_depth_ov(model, path, device):
     The official codec of those ids still transcribed as a grunt, so the ids
     were not speech. Weights stay for the model's own sampler. CUDA never
     calls this.
+
+    backbone.float() (f32 prefill export) also floats the tied codebook
+    embedding. The depth projector stays bf16, and the official loop then
+    dies in inputs_embeds_projector: float != BFloat16. Put that shared
+    embedding back on the projector dtype. The projector itself is not cast.
     """
     depth = getattr(model, "depth_decoder", None)
     inner = getattr(depth, "model", None) if depth is not None else None
@@ -759,6 +764,19 @@ def _install_breeze_depth_ov(model, path, device):
     head = getattr(depth, "codebooks_head", None)
     if head is None or getattr(head, "weight", None) is None:
         raise RuntimeError("Breeze depth decoder has no codebooks_head")
+    proj = getattr(inner, "inputs_embeds_projector", None)
+    if proj is None or getattr(proj, "weight", None) is None:
+        raise RuntimeError("Breeze depth decoder has no inputs_embeds_projector")
+    emb = getattr(inner, "embed_tokens", None)
+    if emb is None or getattr(emb, "weight", None) is None:
+        raise RuntimeError("Breeze depth decoder has no embed_tokens")
+    wdtype = proj.weight.dtype
+    if emb.weight.dtype != wdtype:
+        emb.weight.data = emb.weight.data.to(dtype=wdtype)
+        log.info(
+            "breeze depth codebook embedding restored to %s for the official loop",
+            wdtype,
+        )
     log.info(
         "breeze depth stays on the official codebook loop path=%s device=%s",
         path, device,
