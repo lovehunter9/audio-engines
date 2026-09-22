@@ -78,8 +78,12 @@ def _rss_kib():
     return "?"
 
 
-def compile_module(mod, example, xml, stamp, device):
-    """Export a torch nn.Module once, compile on GPU, return a callable(np)->np."""
+def compile_module(mod, example, xml, stamp, device, config=None):
+    """Export a torch nn.Module once, compile on GPU, return a callable(np)->np.
+
+    The callable's .compiled is the ov.CompiledModel so a caller can keep one
+    InferRequest instead of rebuilding the feed every step.
+    """
     import numpy as np
     import openvino as ov
     import torch
@@ -104,7 +108,7 @@ def compile_module(mod, example, xml, stamp, device):
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     core = ov.Core()
-    compiled = core.compile_model(xml, device)
+    compiled = core.compile_model(xml, device, config or {})
     log.info("compiled %s on %s", xml, device)
 
     def run(*arrays):
@@ -114,6 +118,7 @@ def compile_module(mod, example, xml, stamp, device):
             feed[key] = np.ascontiguousarray(arr)
         return compiled(feed)
 
+    run.compiled = compiled
     return run
 
 
