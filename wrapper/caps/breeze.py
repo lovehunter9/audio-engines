@@ -411,11 +411,13 @@ def _load():
     from models.fast_streaming import FastBreezeStreamingRuntime, FastStreamingConfig
 
     path = Path(tts_el.model_path())
-    _wait_breeze_snapshot(path)
     _register_breeze_tokenizer()
     if _is_ov():
         from .. import tts_ov
 
+        # The sentinel can go up before tokenizer.json exists. CUDA does not
+        # take this wait: its loader is unchanged.
+        _wait_breeze_snapshot(path)
         device = tts_ov.require_gpu()
         tts_ov.allow_breeze_fast_on_cpu()
         log.info("loading Breeze TTS 2 OpenVINO from %s (attn=%s, ov=%s)", path, attn, device)
