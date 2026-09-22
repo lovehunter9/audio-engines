@@ -2598,6 +2598,15 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         from wrapper.caps import breeze
 
         load = inspect.getsource(breeze._load)
+        self.assertLess(load.index("_wait_breeze_snapshot("), load.index("load_runtime("))
+        self.assertLess(load.index("_wait_breeze_snapshot("), load.index("_register_breeze_tokenizer()"))
+        wait = inspect.getsource(breeze._wait_breeze_snapshot)
+        self.assertIn("breeze snapshot incomplete", wait)
+        missing = inspect.getsource(breeze._breeze_snapshot_missing)
+        self.assertIn("tokenizer.json", missing)
+        self.assertIn("weight_map", missing)
+        self.assertIn("refusing to load the tokenizer", inspect.getsource(breeze._wait_breeze_snapshot))
+        load = inspect.getsource(breeze._load)
         self.assertIn("_register_breeze_tokenizer()", load)
         reg = inspect.getsource(breeze._register_breeze_tokenizer)
         self.assertIn("AutoTokenizer.register", reg)
