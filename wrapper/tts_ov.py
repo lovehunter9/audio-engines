@@ -518,7 +518,10 @@ def causal_kv_module(inner, with_past):
             self.inner = inner
 
         def forward(self, inputs_embeds, attention_mask, *past):
-            wdtype = next(self.inner.parameters()).dtype
+            # rotary inv_freq is float32 even when the linears are bf16.
+            # Taking the first parameter casts every activation to float and
+            # the next linear refuses the pair.
+            wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
             hidden = inputs_embeds.to(dtype=wdtype)
             q_len = hidden.shape[1]
             past_len = 0
