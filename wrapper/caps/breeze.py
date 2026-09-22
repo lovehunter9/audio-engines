@@ -502,6 +502,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         if past_in is None:
             runner.reset()
         hidden = runner.step(embeds)
+        if hidden.dtype != embeds.dtype:
+            hidden = hidden.to(dtype=embeds.dtype)
         return type("BBOut", (), {
             "last_hidden_state": hidden,
             "past_key_values": past_in,
@@ -536,7 +538,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             use_cache=True,
         )
         self.hidden_buf.copy_(out.last_hidden_state.to(self.hidden_buf.dtype))
-        logits = self.lm_head(self.hidden_buf[:, -1, :].float())
+        logits = self.lm_head(
+            self.hidden_buf[:, -1, :].to(dtype=self.lm_head.weight.dtype)
+        )
         self.logits_buf.copy_(logits)
         self.cfg_logits_buf.copy_(self.logits_buf[: self.half])
 
@@ -567,9 +571,6 @@ def _install_breeze_text_ov(model, path, device):
     if enc is None:
         raise RuntimeError("Breeze model has no text_encoder")
     enc.float()
-    proj = getattr(model, "text_encoder_proj", None)
-    if proj is not None and hasattr(proj, "float"):
-        proj.float()
     t_fixed = 256
 
     class _Text(nn.Module):
@@ -672,16 +673,28 @@ def _install_breeze_depth_ov(model, path, device):
             )
         self.prefill_input_ids[:, 0] = 0
         self.prefill_input_ids[:, 1] = self.first_cb_token_buf
+        def _as_weight(x, mod):
+            w = getattr(mod, "weight", None)
+            if w is None or x.dtype == w.dtype:
+                return x
+            return x.to(dtype=w.dtype)
+
         prefill_embeds = self.embed_tokens(self.prefill_input_ids)
         backbone_h = self.backbone_hidden_buf
         if self.backbone_hidden_state_projector is not None:
-            backbone_h = self.backbone_hidden_state_projector(backbone_h)
+            backbone_h = self.backbone_hidden_state_projector(
+                _as_weight(backbone_h, self.backbone_hidden_state_projector)
+            )
+        if backbone_h.dtype != prefill_embeds.dtype:
+            backbone_h = backbone_h.to(dtype=prefill_embeds.dtype)
         prefill_embeds[:, 0] = backbone_h
-        prefill_embeds = self.inputs_embeds_projector(prefill_embeds)
+        prefill_embeds = self.inputs_embeds_projector(
+            _as_weight(prefill_embeds, self.inputs_embeds_projector)
+        )
         runner.reset()
         hidden_states = runner.step(prefill_embeds)
         first_logits = self.codebooks_head(
-            hidden_states[:, 1:, :].float(),
+            _as_weight(hidden_states[:, 1:, :], self.codebooks_head),
             cache_position=self.head_prefill_pos,
         )
         if self.debug_logits is not None:
@@ -696,10 +709,14 @@ def _install_breeze_depth_ov(model, path, device):
                     0, self.num_codebooks * self.vocab_size - 1
                 )
             )
-            emb = self.inputs_embeds_projector(emb)
+            emb = self.inputs_embeds_projector(
+                _as_weight(emb, self.inputs_embeds_projector)
+            )
             hidden_states = runner.step(emb)
             cache_pos = self.decode_cache_positions[cb_idx - 1]
-            logits = self.codebooks_head(hidden_states.float(), cache_position=cache_pos)
+            logits = self.codebooks_head(
+                _as_weight(hidden_states, self.codebooks_head), cache_position=cache_pos
+            )
             if self.debug_logits is not None:
                 self.debug_logits[cb_idx].copy_(logits[:, 0, :])
             self._cfg_sample(logits)
