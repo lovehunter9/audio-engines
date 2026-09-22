@@ -841,205 +841,23 @@ def _install_breeze_depth_ov(model, path, device):
 
 
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
-    """Official codec stage is codes→wav (quantizer, pre_conv, pre_transformer, tail).
+    """Leave codes→wav on the official streaming decoder.
 
-    intel11 dynamized T=2 and Add died. intel13 only compiled the conv tail, leaving
-    pre_transformer on CPU. intel22 froze T=32 and re-ran the pad every 2-frame chunk.
-    Official chunk is T=2; freeze that and stop left-padding to 32.
+    A stateless OpenVINO forward of each 2-frame chunk zeroed the causal left
+    context. The joined waveform jumped at every chunk and ASR returned a
+    grunt, not the text. The streaming lane already carries that cache.
+    Decoder weights stay put so the lane can run. CUDA never calls this.
     """
-    import time
-    import numpy as np
-    import torch
-    import torch.nn as nn
-    import torch.nn.functional as F
-
-    from models.stream_runtime.stream.lane import ExecutionLane
-
-    from .. import tts_ov
-
     if audio_tokenizer is None or getattr(audio_tokenizer, "model", None) is None:
-        raise RuntimeError("Breeze audio_tokenizer.model is required for codec OV")
-    dec = audio_tokenizer.model.decoder
-    dec.eval()
-    for p in dec.parameters():
-        p.requires_grad_(False)
-    pt = dec.pre_transformer
-    if hasattr(pt, "config"):
-        pt.config.use_cache = False
-        pt.config._attn_implementation = "eager"
-    n_q = int(getattr(dec.config, "num_quantizers", 16))
-    example_t = 2
-
-    class _Quant(nn.Module):
-        def __init__(self, decoder):
-            super().__init__()
-            self.quantizer = decoder.quantizer
-
-        def forward(self, codes):
-            return self.quantizer.decode(codes)
-
-    class _Pre(nn.Module):
-        def __init__(self, decoder):
-            super().__init__()
-            self.pre_conv = decoder.pre_conv
-            self.pre_transformer = decoder.pre_transformer
-
-        def forward(self, h):
-            import torch
-
-            h = self.pre_conv(h).transpose(1, 2)
-            pt = self.pre_transformer
-            h = pt.input_proj(h)
-            t_len = int(h.shape[1])
-            pos = torch.arange(t_len, device=h.device).unsqueeze(0)
-            rope = pt.rotary_emb(h, pos)
-            attn = tts_ov.causal_attn_bias(h, t_len, 0)
-            for layer in pt.layers:
-                h = layer(
-                    h,
-                    attention_mask=attn,
-                    position_ids=pos,
-                    past_key_values=None,
-                    use_cache=False,
-                    cache_position=pos.squeeze(0),
-                    position_embeddings=rope,
-                )
-            return pt.output_proj(pt.norm(h))
-
-    class _Tail(nn.Module):
-        def __init__(self, decoder):
-            super().__init__()
-            self.upsample = decoder.upsample
-            self.tail = decoder.decoder
-
-        def forward(self, h):
-            for blocks in self.upsample:
-                for block in blocks:
-                    h = block(h)
-            wav = h
-            for block in self.tail:
-                wav = block(wav)
-            return wav.clamp(min=-1, max=1)
-
-    example = torch.zeros(1, n_q, example_t, dtype=torch.long)
-    with torch.inference_mode():
-        ex_q = dec.quantizer.decode(example)
-        ex_pre = dec.pre_conv(ex_q).transpose(1, 2)
-        ex_h = dec.pre_transformer(inputs_embeds=ex_pre, use_cache=False).last_hidden_state
-    src = str(path)
-    _, q_xml, q_stamp = tts_ov.ir_paths(src, "breeze_codec_quant", ".ov-breeze-codec-quant-v9")
-    _, p_xml, p_stamp = tts_ov.ir_paths(src, "breeze_codec_pre", ".ov-breeze-codec-pre-v9")
-    _, t_xml, t_stamp = tts_ov.ir_paths(src, "breeze_codec_tail", ".ov-breeze-codec-tail-v9")
-    compiled_q = tts_ov.compile_static(_Quant(dec), example, q_xml, q_stamp, device)
-    compiled_pre = tts_ov.compile_static(_Pre(dec), ex_q, p_xml, p_stamp, device)
-    compiled_tail = tts_ov.compile_static(
-        _Tail(dec), ex_h.permute(0, 2, 1).contiguous(), t_xml, t_stamp, device
-    )
-    # Speak-time MultiRequestStreamRuntime calls decoder(dummy_codes) to learn
-    # samples_per_code. That is the torch codebook. Measure the official lengths
-    # while the weights still exist, then point decoder.forward at OpenVINO
-    # before release_parameters empties the embedding.
-    wav_lens = {}
-    with torch.inference_mode():
-        for t_len in (1, example_t):
-            official = dec(torch.zeros(1, n_q, t_len, dtype=torch.long))
-            if isinstance(official, (tuple, list)):
-                official = official[0]
-            wav_lens[t_len] = int(official.shape[-1])
-    log.info("breeze codec official wav lengths %s", wav_lens)
-    times = {"quant": 0.0, "pre": 0.0, "tail": 0.0, "n": 0}
-
-    def codes_to_wav(codes):
-        t_len = int(codes.shape[-1])
-        if t_len < 1 or t_len > example_t:
-            raise RuntimeError(
-                "breeze codec ov chunk t=%s is outside 1..%s" % (t_len, example_t)
-            )
-        if t_len < example_t:
-            padded = F.pad(codes, (example_t - t_len, 0))
-        else:
-            padded = codes
-        codes_np = np.ascontiguousarray(padded.detach().cpu().numpy())
-        t0 = time.perf_counter()
-        try:
-            h = compiled_q(codes_np)[0]
-        except Exception:
-            log.exception("codec quant in=%s", getattr(codes_np, "shape", None))
-            raise
-        times["quant"] += time.perf_counter() - t0
-        t0 = time.perf_counter()
-        try:
-            h = compiled_pre(np.ascontiguousarray(h))[0]
-        except Exception:
-            log.exception("codec pre in=%s", getattr(h, "shape", None))
-            raise
-        times["pre"] += time.perf_counter() - t0
-        h = np.ascontiguousarray(np.transpose(h, (0, 2, 1)))
-        t0 = time.perf_counter()
-        try:
-            wav = torch.from_numpy(np.ascontiguousarray(compiled_tail(h)[0]))
-        except Exception:
-            log.exception("codec tail in=%s", getattr(h, "shape", None))
-            raise
-        times["tail"] += time.perf_counter() - t0
-        want = wav_lens[t_len]
-        if int(wav.shape[-1]) < want:
-            raise RuntimeError(
-                "breeze codec ov wav %s shorter than official t=%s len=%s"
-                % (tuple(wav.shape), t_len, want)
-            )
-        return wav[..., -want:].to(dtype=torch.float32)
-
-    with torch.inference_mode():
-        for t_len, official_len in wav_lens.items():
-            got = int(codes_to_wav(torch.zeros(1, n_q, t_len, dtype=torch.long)).shape[-1])
-            if got != official_len:
-                raise RuntimeError(
-                    "breeze codec ov length t=%s got=%s official=%s"
-                    % (t_len, got, official_len)
-                )
-
-    def forward(codes):
-        if not hasattr(codes, "detach"):
-            raise RuntimeError("breeze codec ov expected a tensor, got %s" % type(codes).__name__)
-        if codes.dim() == 2:
-            codes = codes.unsqueeze(0)
-        if int(codes.shape[0]) != 1:
-            raise RuntimeError(
-                "breeze codec ov is compiled for batch=1; got %s" % (tuple(codes.shape),)
-            )
-        return codes_to_wav(codes.detach())
-
-    dec.forward = forward
-    for part in ("quantizer", "pre_conv", "pre_transformer", "upsample", "decoder"):
-        tts_ov.release_parameters(getattr(dec, part, None), "breeze codec " + part)
-
-    def run_step(self, codes_chunk, step_idx):
-        codes = codes_chunk.detach()
-        if codes.dim() == 2:
-            codes = codes.unsqueeze(0)
-        wav = codes_to_wav(codes)
-        times["n"] += 1
-        if times["n"] == 1 or times["n"] % 5 == 0:
-            log.info(
-                "breeze codec step=%d n=%d quant=%.3fs pre=%.3fs tail=%.3fs",
-                int(step_idx), times["n"], times["quant"], times["pre"], times["tail"],
-            )
-        return wav
-
-    def _skip_codec_state(self, state):
-        # The OV chunk is a stateless T=2 forward. The streaming lane still
-        # copied conv and KV state on every chunk, and that copy sat outside
-        # the quant/pre/tail timer.
-        return None
-
-    ExecutionLane.run_step = run_step
-    ExecutionLane.load_request_state = _skip_codec_state
-    ExecutionLane.store_request_state = _skip_codec_state
+        raise RuntimeError("Breeze audio_tokenizer.model is required for the codec")
+    dec = getattr(audio_tokenizer.model, "decoder", None)
+    if dec is None:
+        raise RuntimeError("Breeze audio tokenizer has no decoder")
     log.info(
-        "breeze codec codes-to-wav on OpenVINO %s static_t=%d n_q=%d",
-        device, example_t, n_q,
+        "breeze codec stays on the official streaming decoder path=%s device=%s",
+        path, device,
     )
+    return dec
 
 
 def build_app(supports):
