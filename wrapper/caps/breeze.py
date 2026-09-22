@@ -517,7 +517,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             mask = np.zeros((1, prefill_t), dtype=np.int64)
             mask[:, :real] = 1
             out = prefill(buf, mask)
-            hidden = torch.from_numpy(np.ascontiguousarray(out[0]))[:, :real]
+            # Do not assign to `hidden`: that name is the closure width, and
+            # any assignment makes the zeros() above an unbound local.
+            states = torch.from_numpy(np.ascontiguousarray(out[0]))[:, :real]
             kv = []
             for i in range(1, 1 + 2 * n_layers):
                 arr = np.array(out[i], copy=True)
@@ -526,11 +528,11 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             runner._prefix = real
             log.info("breeze prefill tokens=%d %.3fs", real, time.perf_counter() - t0)
         else:
-            hidden = runner.step(embeds)
-        if hidden.dtype != embeds.dtype:
-            hidden = hidden.to(dtype=embeds.dtype)
+            states = runner.step(embeds)
+        if states.dtype != embeds.dtype:
+            states = states.to(dtype=embeds.dtype)
         return type("BBOut", (), {
-            "last_hidden_state": hidden,
+            "last_hidden_state": states,
             "past_key_values": past_in,
         })()
 
