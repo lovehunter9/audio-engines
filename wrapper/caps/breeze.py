@@ -794,20 +794,30 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     compiled_tail = tts_ov.compile_static(
         _Tail(dec), ex_h.permute(0, 2, 1).contiguous(), t_xml, t_stamp, device
     )
-    for part in ("quantizer", "pre_conv", "pre_transformer", "upsample", "decoder"):
-        tts_ov.release_parameters(getattr(dec, part, None), "breeze codec " + part)
-    upsample = int(getattr(dec, "total_upsample", 1) or 1)
+    # Speak-time MultiRequestStreamRuntime calls decoder(dummy_codes) to learn
+    # samples_per_code. That is the torch codebook. Measure the official lengths
+    # while the weights still exist, then point decoder.forward at OpenVINO
+    # before release_parameters empties the embedding.
+    wav_lens = {}
+    with torch.inference_mode():
+        for t_len in (1, example_t):
+            official = dec(torch.zeros(1, n_q, t_len, dtype=torch.long))
+            if isinstance(official, (tuple, list)):
+                official = official[0]
+            wav_lens[t_len] = int(official.shape[-1])
+    log.info("breeze codec official wav lengths %s", wav_lens)
     times = {"quant": 0.0, "pre": 0.0, "tail": 0.0, "n": 0}
 
-    def run_step(self, codes_chunk, step_idx):
-        codes = codes_chunk.detach()
-        if codes.dim() == 2:
-            codes = codes.unsqueeze(0)
-        t = int(codes.shape[-1])
-        if t < example_t:
-            padded = F.pad(codes, (example_t - t, 0))
+    def codes_to_wav(codes):
+        t_len = int(codes.shape[-1])
+        if t_len < 1 or t_len > example_t:
+            raise RuntimeError(
+                "breeze codec ov chunk t=%s is outside 1..%s" % (t_len, example_t)
+            )
+        if t_len < example_t:
+            padded = F.pad(codes, (example_t - t_len, 0))
         else:
-            padded = codes[..., -example_t:]
+            padded = codes
         codes_np = np.ascontiguousarray(padded.detach().cpu().numpy())
         t0 = time.perf_counter()
         try:
@@ -831,14 +841,50 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             log.exception("codec tail in=%s", getattr(h, "shape", None))
             raise
         times["tail"] += time.perf_counter() - t0
+        want = wav_lens[t_len]
+        if int(wav.shape[-1]) < want:
+            raise RuntimeError(
+                "breeze codec ov wav %s shorter than official t=%s len=%s"
+                % (tuple(wav.shape), t_len, want)
+            )
+        return wav[..., -want:].to(dtype=torch.float32)
+
+    with torch.inference_mode():
+        for t_len, official_len in wav_lens.items():
+            got = int(codes_to_wav(torch.zeros(1, n_q, t_len, dtype=torch.long)).shape[-1])
+            if got != official_len:
+                raise RuntimeError(
+                    "breeze codec ov length t=%s got=%s official=%s"
+                    % (t_len, got, official_len)
+                )
+
+    def forward(codes):
+        if not hasattr(codes, "detach"):
+            raise RuntimeError("breeze codec ov expected a tensor, got %s" % type(codes).__name__)
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)
+        if int(codes.shape[0]) != 1:
+            raise RuntimeError(
+                "breeze codec ov is compiled for batch=1; got %s" % (tuple(codes.shape),)
+            )
+        return codes_to_wav(codes.detach())
+
+    dec.forward = forward
+    for part in ("quantizer", "pre_conv", "pre_transformer", "upsample", "decoder"):
+        tts_ov.release_parameters(getattr(dec, part, None), "breeze codec " + part)
+
+    def run_step(self, codes_chunk, step_idx):
+        codes = codes_chunk.detach()
+        if codes.dim() == 2:
+            codes = codes.unsqueeze(0)
+        wav = codes_to_wav(codes)
         times["n"] += 1
         if times["n"] == 1 or times["n"] % 5 == 0:
             log.info(
                 "breeze codec step=%d n=%d quant=%.3fs pre=%.3fs tail=%.3fs",
                 int(step_idx), times["n"], times["quant"], times["pre"], times["tail"],
             )
-        keep = int(codes.shape[-1]) * upsample
-        return wav[..., -keep:].to(dtype=torch.float32)
+        return wav
 
     ExecutionLane.run_step = run_step
     log.info(
