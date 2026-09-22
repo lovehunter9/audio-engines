@@ -507,10 +507,7 @@ def _install_firered_ov(instruct, path, device):
     x = torch.zeros(2, t_len, redae + hidden, dtype=torch.float32)
     t = torch.zeros(2, 1, 1, dtype=torch.float32)
     _, dit_xml, dit_stamp = tts_ov.ir_paths(path, "firered_dit", ".ov-firered-v1")
-    compiled_dit = tts_ov.compile_module(
-        dit, (x, t), dit_xml, dit_stamp, device,
-        {"PERFORMANCE_HINT": "LATENCY", "INFERENCE_PRECISION_HINT": "f32"},
-    )
+    compiled_dit = tts_ov.compile_module(dit, (x, t), dit_xml, dit_stamp, device)
     orig_dit = dit.forward
     times = {"prefill": 0.0, "ar": 0.0, "dit": 0.0}
     core._ov_times = times
@@ -533,7 +530,6 @@ def _install_firered_ov(instruct, path, device):
         return torch.from_numpy(np.ascontiguousarray(out)).to(x_in.device)
 
     dit.forward = dit_forward
-    _install_firered_flow(core, compiled_dit, psize, redae, hist, hidden, times)
     lat = torch.zeros(1, psize, redae, dtype=torch.float32)
     _, pe_xml, pe_stamp = tts_ov.ir_paths(path, "firered_patch", ".ov-firered-v1")
     compiled_pe = tts_ov.compile_module(patch, lat, pe_xml, pe_stamp, device)
@@ -552,75 +548,68 @@ def _install_firered_ov(instruct, path, device):
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
     _install_firered_backbone(core, path, device)
     _install_firered_redae_cache(instruct, times)
+    _install_firered_decoder_ov(instruct, path, device)
     _install_firered_decode_log(instruct, times)
 
 
-def _install_firered_flow(core, compiled_dit, psize, redae, hist, hidden, times):
-    """Run the 10-step Euler loop on one DiT InferRequest.
+def _install_firered_decoder_ov(instruct, path, device):
+    """Put the RedAE decoder transformer on OpenVINO. ISTFT stays in torch.
 
-    dit.forward pays a torch/numpy round-trip on every timestep. The shapes
-    are fixed (history + one patch, CFG batch 2), so the loop stays in numpy
-    and only the velocity comes back. cfg <= 0 and unexpected shapes keep the
-    per-step hook.
+    A short speak spent ~8s in this decode, after the AR loop. Export failure
+    keeps the official decoder and is logged; load still finishes.
     """
-    import numpy as np
-    import openvino as ov
     import torch
+    from torch import nn
 
-    compiled = getattr(compiled_dit, "compiled", None)
-    if compiled is None:
-        raise RuntimeError("firered dit compile did not expose a CompiledModel")
-    req = compiled.create_infer_request()
-    t_len = hist + psize
-    x_buf = np.empty((2, t_len, redae + hidden), dtype=np.float32)
-    t_buf = np.empty((2, 1, 1), dtype=np.float32)
-    orig = core._flow_one_step
+    from .. import tts_ov
 
-    def _flow_one_step(hist_latents, backbone_cond, t_span, inference_cfg):
-        import time
+    redae = getattr(instruct, "redae", None)
+    dec = getattr(redae, "decoder", None) if redae is not None else None
+    qwen = getattr(dec, "qwen3", None) if dec is not None else None
+    if qwen is None:
+        raise RuntimeError("FireRed RedAE decoder has no qwen3")
+    hidden = int(dec.qwen3_config.hidden_size)
 
-        if float(inference_cfg) <= 0:
-            return orig(hist_latents, backbone_cond, t_span, inference_cfg)
-        hist_np = np.ascontiguousarray(hist_latents.detach().float().cpu().numpy())
-        cond_np = np.ascontiguousarray(backbone_cond.detach().float().cpu().numpy())
-        if (
-            hist_np.ndim != 3
-            or cond_np.ndim != 3
-            or hist_np.shape[1] != hist
-            or hist_np.shape[2] != redae
-            or cond_np.shape[2] != hidden
-            or cond_np.shape[1] * psize != t_len
-        ):
-            return orig(hist_latents, backbone_cond, t_span, inference_cfg)
-        t0 = time.perf_counter()
-        cond_rep = np.repeat(cond_np, psize, axis=1)
-        noise = torch.randn(1, psize, redae, dtype=torch.float32).numpy()
-        xt = np.concatenate([hist_np, np.ascontiguousarray(noise)], axis=1)
-        span = np.ascontiguousarray(t_span.detach().float().cpu().numpy()).reshape(-1)
-        cfg = float(inference_cfg)
-        for ti in range(int(span.shape[0]) - 1):
-            dt = float(span[ti + 1] - span[ti])
-            t_buf.fill(float(span[ti]))
-            x_buf[0, :, :redae] = xt[0]
-            x_buf[0, :, redae:] = cond_rep[0]
-            x_buf[1, :, :redae] = xt[0]
-            x_buf[1, :, redae:] = 0
-            req.set_input_tensor(0, ov.Tensor(x_buf))
-            req.set_input_tensor(1, ov.Tensor(t_buf))
-            req.infer()
-            vt = req.get_output_tensor(0).data
-            mixed = (
-                (1.0 + cfg) * np.array(vt[0, -psize:], dtype=np.float32, copy=True)
-                - cfg * np.array(vt[1, -psize:], dtype=np.float32, copy=True)
-            )
-            xt[0, -psize:] = xt[0, -psize:] + dt * mixed
-        times["dit"] += time.perf_counter() - t0
-        return torch.from_numpy(np.ascontiguousarray(xt[:, -psize:].copy()))
+    class _Dec(nn.Module):
+        def __init__(self, qwen):
+            super().__init__()
+            self.qwen = qwen
 
-    core._flow_one_step = _flow_one_step
-    log.info(
-        "firered flow euler on one DiT infer request (t=%d patch=%d)", t_len, psize
+        def forward(self, embeds):
+            return self.qwen(
+                inputs_embeds=embeds, attention_mask=None
+            ).last_hidden_state
+
+    _, xml, stamp = tts_ov.ir_paths(
+        str(path), "firered_redae_dec", ".ov-firered-dec-v1"
     )
+    try:
+        compiled = tts_ov.compile_module(
+            _Dec(qwen), torch.zeros(1, 32, hidden, dtype=torch.float32),
+            xml, stamp, device,
+        )
+    except Exception as e:
+        log.error("firered redae decoder stayed on torch: %s", e)
+        return
+    orig_fwd = dec.forward
+
+    def forward(xs):
+        import numpy as np
+
+        if not hasattr(xs, "detach"):
+            return orig_fwd(xs)
+        h = dec.in_proj(xs)
+        h = h.reshape(h.shape[0], -1, hidden)
+        arr = np.ascontiguousarray(h.detach().float().cpu().numpy())
+        try:
+            out = compiled(arr)[0]
+        except Exception as e:
+            log.error("firered redae decoder ov failed, torch fallback: %s", e)
+            return orig_fwd(xs)
+        return dec.istft_head(torch.from_numpy(np.ascontiguousarray(out)))
+
+    dec.forward = forward
+    log.info("firered redae decoder transformer on OpenVINO %s", device)
 
 
 def _install_firered_decode_log(instruct, times):
