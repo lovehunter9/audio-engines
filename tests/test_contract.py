@@ -2597,6 +2597,12 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         from wrapper import tts_ov
         from wrapper.caps import breeze
 
+        load = inspect.getsource(breeze._load)
+        self.assertIn("_register_breeze_tokenizer()", load)
+        reg = inspect.getsource(breeze._register_breeze_tokenizer)
+        self.assertIn("AutoTokenizer.register", reg)
+        self.assertIn("GemmaTokenizerFast", reg)
+        self.assertIn("exist_ok=True", reg)
         src = inspect.getsource(breeze._install_breeze_ov)
         self.assertNotIn("leaving official eager on CPU", src)
         self.assertIn("release_parameters", src)
