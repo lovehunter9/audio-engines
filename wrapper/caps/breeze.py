@@ -989,7 +989,15 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             )
         return wav
 
+    def _skip_codec_state(self, state):
+        # The OV chunk is a stateless T=2 forward. The streaming lane still
+        # copied conv and KV state on every chunk, and that copy sat outside
+        # the quant/pre/tail timer.
+        return None
+
     ExecutionLane.run_step = run_step
+    ExecutionLane.load_request_state = _skip_codec_state
+    ExecutionLane.store_request_state = _skip_codec_state
     log.info(
         "breeze codec codes-to-wav on OpenVINO %s static_t=%d n_q=%d",
         device, example_t, n_q,
