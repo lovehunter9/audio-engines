@@ -2572,6 +2572,27 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         runner.reset()
         self.assertIsNone(runner.prefix)
 
+    def test_release_parameters_drops_storage(self):
+        try:
+            import torch
+            from torch import nn
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        class _M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.Linear(8, 8)
+
+        mod = _M()
+        before = mod.layers.weight.numel()
+        self.assertGreater(before, 0)
+        n = tts_ov.release_parameters(mod.layers, "test")
+        self.assertGreater(n, 0)
+        self.assertEqual(int(mod.layers.weight.numel()), 0)
+        self.assertEqual(tts_ov.release_parameters(None, "empty"), 0)
+
     def test_breeze_install_does_not_swallow_export_failure(self):
         import inspect
         from wrapper import tts_ov
@@ -2579,6 +2600,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 
         src = inspect.getsource(breeze._install_breeze_ov)
         self.assertNotIn("leaving official eager on CPU", src)
+        self.assertIn("release_parameters", src)
+        self.assertIn('getattr(backbone, "layers", None)', src)
         self.assertIn("breeze_backbone_decode", src)
         self.assertIn("compile_causal", src)
         self.assertIn("DeviceKvRunner", src)
@@ -2586,11 +2609,13 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("_install_breeze_depth_ov", src)
         self.assertIn("_install_breeze_codec_ov", src)
         text = inspect.getsource(breeze._install_breeze_text_ov)
+        self.assertIn("release_parameters", text)
         self.assertIn("breeze_text_encoder", text)
         self.assertIn("_batched_text_encoder_forward", text)
         self.assertIn("text_encoder_proj", text)
         self.assertIn("dtype=wdtype", text)
         depth = inspect.getsource(breeze._install_breeze_depth_ov)
+        self.assertIn("release_parameters", depth)
         self.assertIn("breeze_depth_decode", depth)
         self.assertIn("DepthDecoderGraph._full_loop", depth)
         codec = inspect.getsource(breeze._install_breeze_codec_ov)
@@ -2603,6 +2628,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("breeze_codec_tail", codec)
         self.assertIn("ExecutionLane.run_step", codec)
         self.assertIn("compile_static", codec)
+        self.assertIn("release_parameters", codec)
         self.assertIn(".ov-breeze-codec-quant-v9", codec)
         self.assertIn(".ov-breeze-codec-pre-v9", codec)
         self.assertIn(".ov-breeze-codec-tail-v9", codec)
