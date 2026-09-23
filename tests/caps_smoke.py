@@ -718,12 +718,19 @@ def t_diar_speakrs():
         check("diar_speakrs reports the device the engine ran on",
               body["device"] == "cuda", body["device"])
 
-        # This engine cannot stand in for pyannote: speaker-count knobs must 400, not be ignored.
+        # Speaker-count knobs cannot be honoured, so they are dropped -- but never silently.
+        check("diar_speakrs names no ignored hints when none were sent",
+              "ignored_hints" not in body, body.get("ignored_hints"))
         for field in ("num_speakers", "min_speakers", "max_speakers"):
+            sent.clear()
             r = c.post("/v1/audio/diarization", files=WAV, data={field: "3"})
-            check("diar_speakrs refuses %s rather than ignoring it" % field,
-                  r.status_code == 400 and field in r.json()["detail"],
-                  (r.status_code, r.json()))
+            check("diar_speakrs runs with %s rather than refusing it" % field,
+                  r.status_code == 200, (r.status_code, r.text[:160]))
+            check("diar_speakrs names %s as ignored" % field,
+                  r.status_code == 200 and r.json().get("ignored_hints") == {field: "3"},
+                  r.json().get("ignored_hints") if r.status_code == 200 else None)
+            check("diar_speakrs keeps %s away from the engine" % field,
+                  len(sent) == 1 and not any("speakers" in k for k in sent[-1]), sent)
 
         # Seconds on the wire, frames to the engine.
         sent.clear()
