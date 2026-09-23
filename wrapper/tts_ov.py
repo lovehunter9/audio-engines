@@ -518,9 +518,8 @@ def causal_kv_module(inner, with_past, external_position=False):
     """One transformer step with tensor K/V. Never calls official forward or Cache.
 
     external_position puts position_ids on the decode signature, in front of K/V.
-    Breeze's official loop already computed that id; deriving it from the example
-    cache length leaves every new frame at the export position. FireRed stays
-    on the default.
+    Deriving the id from the example cache length leaves every new frame at the
+    export position. Decode callers pass the real id; a static prefill does not.
     """
     import torch
     import torch.nn as nn
@@ -675,7 +674,7 @@ class DeviceKvRunner:
     device-side buffers stay put. Prefill stays official; seed_kv uploads once.
     """
 
-    def __init__(self, decode, n_layers, prefill=None):
+    def __init__(self, decode, n_layers, prefill=None, external_position=False):
         compiled = getattr(decode, "compiled", None)
         if compiled is None:
             raise RuntimeError("DeviceKvRunner needs compile_causal().compiled")
@@ -685,6 +684,7 @@ class DeviceKvRunner:
         self.n_layers = n_layers
         self.kv = None
         self._prefix = 0
+        self.external_position = bool(external_position)
         self.prefill = getattr(prefill, "compiled", None) if prefill is not None else None
         self.pre_req = self.prefill.create_infer_request() if self.prefill is not None else None
 
@@ -730,8 +730,16 @@ class DeviceKvRunner:
         req = self.reqs[self.which]
         req.set_input_tensor(0, ov.Tensor(self._emb))
         req.set_input_tensor(1, ov.Tensor(self._mask))
+        kv_at = 2
+        if self.external_position:
+            # RoPE for this token is the cache length, not the export example.
+            self._pos = np.arange(
+                self._prefix, self._prefix + q, dtype=np.int64
+            ).reshape(1, q)
+            req.set_input_tensor(kv_at, ov.Tensor(self._pos))
+            kv_at += 1
         for i, t in enumerate(self.kv):
-            req.set_input_tensor(2 + i, t)
+            req.set_input_tensor(kv_at + i, t)
         req.infer()
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
