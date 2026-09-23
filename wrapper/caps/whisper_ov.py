@@ -104,6 +104,8 @@ def _load():
         cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_whisper")
         os.makedirs(cache, exist_ok=True)
         pipe = ov_genai.WhisperPipeline(model_dir, device, CACHE_DIR=cache)
+        # The constructor only reads the IR. The first generate compiles on the GPU and is what returns text, so ready stays false until that returns.
+        _warmup(pipe)
         _state.update(pipeline=pipe, device=device, ready=True)
         log.info("WhisperPipeline loaded from %s on %s", model_dir, device)
     except Exception as e:
@@ -148,6 +150,24 @@ def _pcm_list(audio):
     return [float(x) for x in audio]
 
 
+def _max_new_tokens(n_samples):
+    """Decoder steps for this clip. The model cap is 448; a few seconds must not walk all of it."""
+    n = int(float(n_samples) / 16000.0 * 16) + 16
+    if n < 32:
+        n = 32
+    if n > 448:
+        n = 448
+    return n
+
+
+def _warmup(pipe):
+    # 0.4s of silence. First GPU generate compiles; ready waits until it returns.
+    pcm = [0.0] * 6400
+    log.info("whisper warmup generate on GPU")
+    pipe.generate(pcm, task="transcribe", language="en", max_new_tokens=32)
+    log.info("whisper warmup generate returned")
+
+
 def _generate(audio, task, language):
     pipe = _state["pipeline"]
     kw = {"task": task}
@@ -157,6 +177,7 @@ def _generate(audio, task, language):
     if BEAM_SIZE:
         kw["num_beams"] = BEAM_SIZE
     pcm = _pcm_list(audio)
+    kw["max_new_tokens"] = _max_new_tokens(len(pcm))
     log.info("whisper generate n=%d min=%.4f max=%.4f kw=%s",
              len(pcm), min(pcm) if pcm else 0.0, max(pcm) if pcm else 0.0, kw)
     result = pipe.generate(pcm, **kw)

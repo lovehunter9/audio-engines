@@ -323,7 +323,9 @@ def _count_layers(state, prefix):
 
 def _whisper_hf_config(state):
     # Systran config.json is CT2 (alignment_heads / suppress_ids), not transformers.
-    embed = state.get("decoder/embeddings/weight") or state.get("decoder/embeddings")
+    embed = state.get("decoder/embeddings/weight")
+    if embed is None:
+        embed = state.get("decoder/embeddings")
     enc_pos = state.get("encoder/position_encodings")
     dec_pos = state.get("decoder/position_encodings")
     conv1 = state.get("encoder/conv1/weight")
