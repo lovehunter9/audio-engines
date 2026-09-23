@@ -650,7 +650,30 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertTrue(all(isinstance(x, float) for x in seen["raw"]))
         self.assertEqual(seen["kw"].get("task"), "transcribe")
         self.assertEqual(seen["kw"].get("language"), "en")
+        self.assertEqual(seen["kw"].get("max_new_tokens"), 32)
         self.assertNotIn("num_beams", seen["kw"])
+
+    def test_whisperov_token_budget_tracks_duration(self):
+        from wrapper.caps import whisper_ov as w
+
+        self.assertEqual(w._max_new_tokens(3), 32)
+        self.assertEqual(w._max_new_tokens(16000 * 4), 80)
+        self.assertEqual(w._max_new_tokens(16000 * 60), 448)
+
+    def test_whisperov_warmup_runs_a_short_gpu_generate(self):
+        import types
+
+        from wrapper.caps import whisper_ov as w
+
+        seen = {}
+
+        def fake_generate(raw, **kw):
+            seen["n"] = len(raw)
+            seen["kw"] = kw
+
+        w._warmup(types.SimpleNamespace(generate=fake_generate))
+        self.assertEqual(seen["n"], 6400)
+        self.assertEqual(seen["kw"], {"task": "transcribe", "language": "en", "max_new_tokens": 32})
 
     def test_whisper_ir_requires_beam_idx(self):
         from wrapper import ct2_whisper
@@ -787,6 +810,11 @@ class OpenVINOModeTest(unittest.TestCase):
             self.assertEqual(hf["model_type"], "whisper")
             self.assertEqual(hf["encoder_layers"], 1)
             self.assertEqual(hf["num_mel_bins"], 1)
+            # The real CT2 key is an ndarray. `or` raises on it; None-check must not.
+            weight = np.ones((6, 8), np.float32)
+            direct = ct2_whisper._whisper_hf_config({"decoder/embeddings/weight": weight})
+            self.assertEqual(direct["vocab_size"], 6)
+            self.assertEqual(direct["d_model"], 8)
 
     def test_ct2_unfuses_whisper_attention(self):
         try:
@@ -1175,6 +1203,30 @@ class OpenVINOModeTest(unittest.TestCase):
                 f.write("<net><layer name=\"beam_idx\"/><layer name=\"input_ids\"/></net>")
             self.assertFalse(a._looks_like_ov_ir(td))
 
+    def test_align_ov_load_compiles_the_ir(self):
+        import inspect
+        from wrapper.caps import align as a
+
+        src = inspect.getsource(a._load_ov)
+        self.assertIn("compile_model", src)
+        self.assertNotIn("OVModel", src)
+        self.assertNotIn("from_pretrained(model_dir", src)
+        self.assertNotIn("local_files_only", src)
+        self.assertNotIn("optimum", src)
+
+    def test_no_wrapper_imports_optimum_intel(self):
+        root = os.path.join(os.path.dirname(__file__), "..", "wrapper")
+        hits = []
+        for dirpath, _, files in os.walk(root):
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, name)
+                text = open(path, encoding="utf-8").read()
+                if "optimum.intel" in text or "OVModelFor" in text:
+                    hits.append(os.path.relpath(path, root))
+        self.assertEqual(hits, [])
+
     def test_ov_logits_splits_encoder_decoder_and_skips_thinker(self):
         from wrapper.caps import align as a
 
@@ -1200,6 +1252,39 @@ class OpenVINOModeTest(unittest.TestCase):
                 raise TypeError("must not call SpeechSeq2Seq.forward")
 
         self.assertEqual(a._ov_logits(Fake(), {"input_ids": 1, "input_features": 2}), "ok")
+
+    def test_ov_logits_pads_mel_time_to_the_traced_window(self):
+        import numpy as np
+        from wrapper.caps import align as a
+
+        seen = {}
+
+        class Enc:
+            def __call__(self, **kw):
+                seen["shape"] = tuple(np.asarray(kw["input_features"]).shape)
+                return mock.Mock(last_hidden_state="h")
+
+        class Dec:
+            def __call__(self, **kw):
+                return mock.Mock(logits="ok")
+
+        class Fake:
+            encoder = Enc()
+            decoder = Dec()
+
+        raw = {"thinker_config": {"audio_config": {"n_window": 50}}}
+        feats = np.zeros((1, 128, 845), dtype=np.float32)
+        with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
+            self.assertEqual(a._mel_window(), 100)
+            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 80)), 100).shape[-1], 100)
+            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 120)), 100).shape[-1], 200)
+            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 2192)), 100).shape[-1], 2200)
+            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 200)), 100).shape[-1], 200)
+            self.assertEqual(
+                a._ov_logits(Fake(), {"input_ids": np.zeros((1, 3)), "input_features": feats}),
+                "ok",
+            )
+        self.assertEqual(seen["shape"], (1, 128, 900))
 
     def test_align_ov_inputs_accept_the_same_batch_shape_as_cuda(self):
         import numpy as np

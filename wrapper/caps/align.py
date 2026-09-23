@@ -106,7 +106,11 @@ def _xml_has_input(path, name, limit=1048576):
 
 
 def _looks_like_ov_ir(path):
-    """One-shot align IR from the 0.6B snapshot: encoder+decoder, no beam_idx."""
+    """One-shot align IR: encoder+decoder xml, no beam_idx.
+
+    Loaded with ov.Core.read_model. An xml pair is enough; config.json is not
+    what makes the directory an IR.
+    """
     if not path or not os.path.isdir(path):
         return False
     enc = os.path.join(path, "openvino_encoder_model.xml")
@@ -117,7 +121,7 @@ def _looks_like_ov_ir(path):
 
 
 def _ov_export_cmd(src, dest):
-    # Same 0.6B snapshot as NVIDIA; one thinker forward, not ASR generate or *-hf.
+    # optimum traces the ASR encoder so aten::view splits mel time into n_window*2 chunks and folds out the tail pad; a remainder fails shape inference, and _ov_logits pads that axis before infer.
     return [
         "optimum-cli", "export", "openvino",
         "--model", src,
@@ -165,33 +169,98 @@ def _register_qwen3_asr():
     AutoProcessor.register(Qwen3ASRConfig, Qwen3ASRProcessor)
 
 
+def _np_feed(value):
+    import numpy as np
+
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.ascontiguousarray(value)
+
+
+def _compiled_infer(compiled, feed):
+    import openvino as ov
+
+    req = compiled.create_infer_request()
+    for inp in compiled.inputs:
+        arr = _np_feed(feed.get(inp.any_name))
+        if arr is None:
+            continue
+        req.set_tensor(inp.any_name, ov.Tensor(arr))
+    req.infer()
+    return req
+
+
+def _prefer_output(req, compiled, token):
+    import numpy as np
+
+    for out in compiled.outputs:
+        if token in (out.any_name or ""):
+            return np.array(req.get_tensor(out).data, copy=True)
+    return np.array(req.get_output_tensor(0).data, copy=True)
+
+
+class _OvOut:
+    def __init__(self, **kw):
+        self.__dict__.update(kw)
+
+
+class _OvPart:
+    """One compiled IR. Callers pass tensors by port name and read one named field."""
+
+    def __init__(self, compiled, out_token, out_attr):
+        self.compiled = compiled
+        self.out_token = out_token
+        self.out_attr = out_attr
+
+    def __call__(self, **kw):
+        data = _prefer_output(_compiled_infer(self.compiled, kw), self.compiled, self.out_token)
+        return _OvOut(**{self.out_attr: data})
+
+
+class _OvAlign:
+    def __init__(self, encoder, decoder):
+        self.encoder = encoder
+        self.decoder = decoder
+
+
 def _load_ov():
-    from optimum.intel import OVModelForSpeechSeq2Seq
     from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
     from transformers import AutoProcessor
     import json
+    import openvino as ov
 
     _say_config()
     src = _resolve_hf_dir(MODEL_REPO)
     model_dir = _ensure_ov_ir(src)
     device = ovutil.device()
-    _p("loading OpenVINO forced aligner src=%s ir=%s device=%s" % (src, model_dir, device))
+    _p("compiling OpenVINO forced aligner src=%s ir=%s device=%s" % (src, model_dir, device))
     _register_qwen3_asr()
-    kw = dict(device=device)
-    if HF_TOKEN:
-        kw["token"] = HF_TOKEN
-    model = OVModelForSpeechSeq2Seq.from_pretrained(model_dir, **kw)
+    cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_align")
+    os.makedirs(cache, exist_ok=True)
+    core = ov.Core()
+    props = {"CACHE_DIR": cache}
+    enc = core.compile_model(os.path.join(model_dir, "openvino_encoder_model.xml"), device, props)
+    dec = core.compile_model(os.path.join(model_dir, "openvino_decoder_model.xml"), device, props)
+    _p("align encoder inputs=%s outputs=%s" % (
+        [i.any_name for i in enc.inputs], [o.any_name for o in enc.outputs]))
+    _p("align decoder inputs=%s outputs=%s" % (
+        [i.any_name for i in dec.inputs], [o.any_name for o in dec.outputs]))
+    model = _OvAlign(
+        _OvPart(enc, "hidden", "last_hidden_state"),
+        _OvPart(dec, "logits", "logits"),
+    )
+    # Snapshot root, which has config.json. The IR directory is never a Hub repo id.
     processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
-    cfg = getattr(model, "config", None)
-    ts_id = int(getattr(cfg, "timestamp_token_id", 0) or 0)
-    ts_seg = float(getattr(cfg, "timestamp_segment_time", 0) or 0)
     raw = {}
     cfg_path = os.path.join(src, "config.json")
     if os.path.isfile(cfg_path):
         with open(cfg_path) as f:
             raw = json.load(f)
-        ts_id = ts_id or int(raw.get("timestamp_token_id") or 0)
-        ts_seg = ts_seg or float(raw.get("timestamp_segment_time") or 0)
+    thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else {}
+    ts_id = int(raw.get("timestamp_token_id") or thinker.get("timestamp_token_id") or 0)
+    ts_seg = float(raw.get("timestamp_segment_time") or thinker.get("timestamp_segment_time") or 0)
     _state.update(
         model=model,
         processor=processor,
@@ -323,12 +392,50 @@ def _units(res):
              "end": _field(u, "end_time", "end")} for u in (res[0] if res else [])]
 
 
+def _mel_window(raw=None):
+    """Frames per traced encoder chunk: n_window * 2, 100 on this checkpoint."""
+    if raw is None:
+        raw = _state.get("hf_config") or {}
+    thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else raw
+    audio = thinker.get("audio_config") if isinstance(thinker, dict) else {}
+    if not isinstance(audio, dict):
+        audio = {}
+    try:
+        n = int(audio.get("n_window") or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return n * 2 if n > 0 else 100
+
+
+def _pad_mel_to_window(feats, window):
+    """Right-pad mel time so it divides the traced view.
+
+    Eager pads a short tail up to a full chunk of n_window*2. The export
+    kept the view and dropped that pad, so [1,128,845] cannot become
+    [1,128,8,100]. A multiple passes straight through.
+    """
+    import numpy as np
+
+    if feats is None or not hasattr(feats, "shape") or not window or int(window) <= 1:
+        return feats
+    window = int(window)
+    arr = feats.detach().cpu().numpy() if hasattr(feats, "detach") else np.asarray(feats)
+    if arr.ndim < 1:
+        return feats
+    t = int(arr.shape[-1])
+    if t <= 0 or t % window == 0:
+        return feats
+    pad = window - (t % window)
+    out = np.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, pad)])
+    return np.ascontiguousarray(out)
+
+
 def _ov_logits(model, inputs):
     # Split encoder/decoder like official ForcedAligner.forward; thinker(**inputs) double-binds input_ids.
     payload = dict(inputs)
     encoder = getattr(model, "encoder", None)
     decoder = getattr(model, "decoder", None)
-    feats = payload.get("input_features")
+    feats = _pad_mel_to_window(payload.get("input_features"), _mel_window())
     if encoder is None or decoder is None or feats is None:
         raise TypeError("align IR has no encoder/decoder/input_features")
     enc = encoder(
@@ -573,7 +680,7 @@ def _dims():
 
 
 def _dims_from_hf(raw):
-    """OpenVINO's OVModel does not keep thinker_config; the snapshot json still does."""
+    """The compiled IR has no config object; the snapshot json still does."""
     if not raw:
         return None
     try:
