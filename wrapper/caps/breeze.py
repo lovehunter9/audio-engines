@@ -740,7 +740,7 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """Depth transformer on OpenVINO, one token at a time. Sampling stays official.
+    """Depth transformer on OpenVINO, one token at a time. Sampling stays the official multinomial.
 
     A fused frame drew every codebook with its own inverse CDF. Those ids were
     not speech. Prefill is the official two tokens at positions 0 and 1. Each
