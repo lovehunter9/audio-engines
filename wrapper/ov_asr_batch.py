@@ -196,8 +196,10 @@ class Engine:
         import openvino as ov
 
         os.makedirs(cache_dir, exist_ok=True)
-        props = {"CACHE_DIR": cache_dir}
+        # mmap of an intact IR on the hostPath raises SIGBUS (exit 135); read the file instead.
+        props = {"CACHE_DIR": cache_dir, "ENABLE_MMAP": False}
         core = ov.Core()
+        core.set_property({"ENABLE_MMAP": False})
         enc_m = core.read_model(os.path.join(ir_dir, "openvino_encoder_model.xml"))
         try:
             _dynamize_batch(enc_m)
