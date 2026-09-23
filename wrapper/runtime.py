@@ -49,7 +49,13 @@ class Runtime:
         repo, include, exclude = self._hub_spec()
         if not repo:
             return True
-        from huggingface_hub import snapshot_download
+        try:
+            from huggingface_hub import snapshot_download
+        except ImportError:
+            # speakrs images carry no hub client, and their launch script has already waited
+            # for llm-init's sentinel. Raising here killed the boot thread and left the engine
+            # 503 forever; returning False would wait out the hour for a check that cannot run.
+            return True
 
         kw = {
             "local_files_only": True,

@@ -294,6 +294,19 @@ class RuntimeHelperTest(unittest.TestCase):
         engine.state.update(ready=True)
         self.assertTrue(engine.state["ready"])
 
+    def test_snapshot_wait_does_not_need_the_hub_client(self):
+        from wrapper.runtime import Runtime
+
+        with mock.patch.dict(
+            os.environ,
+            {"MODEL_SOURCE": "hf://avencera/speakrs-models --exclude *.mlmodelc/*"},
+            clear=False,
+        ):
+            engine = Runtime()
+        with mock.patch.dict(sys.modules, {"huggingface_hub": None}):
+            self.assertTrue(engine.wait_for_snapshot(timeout_s=0.01, interval_s=0.01))
+        self.assertIsNone(engine.state.get("error"))
+
     def test_runtime_does_not_invent_a_name_or_repo(self):
         from wrapper.runtime import Runtime
 
