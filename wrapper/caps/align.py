@@ -240,7 +240,9 @@ def _load_ov():
     cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache_align")
     os.makedirs(cache, exist_ok=True)
     core = ov.Core()
-    props = {"CACHE_DIR": cache}
+    # mmap of an intact IR on the hostPath raises SIGBUS (exit 135); read the file instead.
+    core.set_property({"ENABLE_MMAP": False})
+    props = {"CACHE_DIR": cache, "ENABLE_MMAP": False}
     enc = core.compile_model(os.path.join(model_dir, "openvino_encoder_model.xml"), device, props)
     dec = core.compile_model(os.path.join(model_dir, "openvino_decoder_model.xml"), device, props)
     _p("align encoder inputs=%s outputs=%s" % (

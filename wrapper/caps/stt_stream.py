@@ -308,8 +308,9 @@ def _load_ov():
     device = _ov_device()
     cache = os.path.join(os.environ.get("HF_HOME") or "/tmp", "openvino_cache")
     os.makedirs(cache, exist_ok=True)
-    _p("ASRPipeline(model=%s, device=%s)" % (model_dir, device))
-    pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache)
+    _p("ASRPipeline(model=%s, device=%s, mmap=off)" % (model_dir, device))
+    # mmap of an intact IR on the hostPath raises SIGBUS (exit 135); read the file instead.
+    pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache, ENABLE_MMAP=False)
     _state["asr"] = pipe
     from .. import ov_asr_batch
 
