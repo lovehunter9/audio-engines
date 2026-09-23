@@ -760,11 +760,11 @@ class DeviceKvRunner:
 def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
     """One audio frame: prefill plus every codebook step, one OpenVINO infer.
 
-    Intel-tts13 spent ~0.59s per frame on 15 separate depth infers.
-    Intel-tts14 kept that cost with a static cache, so the time is the
-    per-call sync, not the changing sequence length. Sampling stays in
-    the graph and uses a uniform drawn by the caller, so the next
-    codebook can stay in the same infer.
+    Fifteen separate depth infers stay near 0.6s a frame; the time is the
+    per-call sync. One uniform row per codebook keeps the next codebook in
+    the same infer. The draw is Gumbel-max, the official multinomial
+    distribution. A boolean CDF reduce compiled to a constant and the codec
+    rendered that as noise.
     """
     import torch
     import torch.nn as nn
@@ -811,9 +811,11 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
             filtered = torch.full_like(filtered, float("-inf")).scatter(
                 0, order, sorted_logits,
             )
-            probs = torch.softmax(filtered, dim=-1)
-            cdf = torch.cumsum(probs, dim=-1)
-            sampled = torch.sum(cdf < u.reshape(()).float()).to(dtype=torch.long)
+            # Gumbel-max is a multinomial draw. A boolean CDF reduce compiled
+            # to a constant and every codebook came out as noise.
+            uu = u.float().reshape(-1).clamp(1e-6, 1.0 - 1e-6)
+            gumbel = -torch.log(-torch.log(uu))
+            sampled = torch.argmax((filtered + gumbel).float()).to(dtype=torch.long)
             greedy = torch.argmax(scores).to(dtype=torch.long)
             take = do_sample.reshape(()).to(dtype=torch.long) != 0
             tok = torch.where(take, sampled, greedy)
