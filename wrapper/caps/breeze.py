@@ -518,7 +518,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     The separate decode graph kept the opening prefill frame and turned every
     later frame into jitter, after the official position was already an input.
     Continuation appends the new token and reruns this prefill. Token i is at
-    index i, which is the position the static graph already applies.
+    index i. Prefixes that fit use a 128-wide static graph; the rest use 320.
+    Both bake positions 0..T-1 and mask off the pad, so the token index holds.
     """
     _cache_backbone_suppress_mask()
     _cache_prompt_encode()
@@ -538,13 +539,21 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     backbone.float()
     src = str(path)
     prefill_t = 320
-    embeds_pre = torch.zeros(1, prefill_t, hidden, dtype=torch.float32)
-    mask_pre = torch.ones(1, prefill_t, dtype=torch.long)
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(src, "breeze_backbone_prefill", ".ov-breeze-v7")
-    prefill = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(backbone, False),
-        (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
-        dynamize_ranks=(),
+    prefill_fit = 128
+
+    def _compile_prefill(width, name, stamp):
+        embeds = torch.zeros(1, width, hidden, dtype=torch.float32)
+        mask = torch.ones(1, width, dtype=torch.long)
+        _, xml, stamp_path = tts_ov.ir_paths(src, name, stamp)
+        return tts_ov.compile_causal(
+            tts_ov.causal_kv_module(backbone, False),
+            (embeds, mask), xml, stamp_path, device,
+            dynamize_ranks=(),
+        )
+
+    prefill = _compile_prefill(prefill_t, "breeze_backbone_prefill", ".ov-breeze-v7")
+    prefill_fit_g = _compile_prefill(
+        prefill_fit, "breeze_backbone_prefill_fit", ".ov-breeze-fit128-v1",
     )
     import gc
     gc.collect()
@@ -557,11 +566,14 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             raise RuntimeError(
                 "breeze ov prefix length %d exceeds static %d" % (n, prefill_t)
             )
-        buf = np.zeros((1, prefill_t, hidden), dtype=np.float32)
+        # Same masked full prefix. The narrow graph skips the 320-wide pad.
+        width = prefill_fit if n <= prefill_fit else prefill_t
+        graph = prefill_fit_g if n <= prefill_fit else prefill
+        buf = np.zeros((1, width, hidden), dtype=np.float32)
         buf[:, :n] = np.ascontiguousarray(emb)
-        mask = np.zeros((1, prefill_t), dtype=np.int64)
+        mask = np.zeros((1, width), dtype=np.int64)
         mask[:, :n] = 1
-        out = prefill(buf, mask)
+        out = graph(buf, mask)
         # Do not assign to `hidden`: that name is the closure width, and
         # any assignment makes the zeros() above an unbound local.
         return torch.from_numpy(np.ascontiguousarray(out[0]))[:, :n]
@@ -585,8 +597,10 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             t0 = time.perf_counter()
             states = _run_prefix(emb)
             log.info(
-                "breeze prefill tokens=%d %.3fs",
-                int(emb.shape[1]), time.perf_counter() - t0,
+                "breeze prefill tokens=%d width=%d %.3fs",
+                int(emb.shape[1]),
+                prefill_fit if int(emb.shape[1]) <= prefill_fit else prefill_t,
+                time.perf_counter() - t0,
             )
         else:
             piece = np.ascontiguousarray(embeds.detach().float().cpu().numpy())

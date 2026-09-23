@@ -550,6 +550,8 @@ def _install_firered_ov(instruct, path, device):
     t = torch.zeros(2, 1, 1, dtype=torch.float32)
     _, dit_xml, dit_stamp = tts_ov.ir_paths(path, "firered_dit", ".ov-firered-v1")
     compiled_dit = tts_ov.compile_module(dit, (x, t), dit_xml, dit_stamp, device)
+    dit_req = compiled_dit.compiled.create_infer_request()
+    dit_shape = (2, t_len, redae + hidden)
     orig_dit = dit.forward
     times = {"prefill": 0.0, "ar": 0.0, "dit": 0.0}
     core._ov_times = times
@@ -557,6 +559,7 @@ def _install_firered_ov(instruct, path, device):
     def dit_forward(x_in=None, t_in=None, **kwargs):
         import time
         import numpy as np
+        import openvino as ov
 
         if x_in is None:
             x_in = kwargs.get("x")
@@ -567,7 +570,14 @@ def _install_firered_ov(instruct, path, device):
         t0 = time.perf_counter()
         xa = np.ascontiguousarray(x_in.detach().float().cpu().numpy())
         ta = np.ascontiguousarray(t_in.detach().float().cpu().numpy())
-        out = compiled_dit(xa, ta)[0]
+        # Official Euler stays in Python. One request avoids a new feed per step.
+        if tuple(xa.shape) != dit_shape or ta.shape != (2, 1, 1):
+            out = compiled_dit(xa, ta)[0]
+        else:
+            dit_req.set_input_tensor(0, ov.Tensor(xa))
+            dit_req.set_input_tensor(1, ov.Tensor(ta))
+            dit_req.infer()
+            out = np.array(dit_req.get_output_tensor(0).data, copy=True)
         times["dit"] += time.perf_counter() - t0
         return torch.from_numpy(np.ascontiguousarray(out)).to(x_in.device)
 
@@ -805,16 +815,20 @@ def _install_firered_backbone(core, path, device):
 
     embeds_q1 = torch.zeros(1, 1, hidden, dtype=torch.float32)
     mask_q1 = torch.ones(1, example_t + 1, dtype=torch.long)
+    # Position is an input. Tracing arange(past) would freeze every token at example_t.
+    pos_q1 = torch.arange(example_t, example_t + 1, dtype=torch.long).unsqueeze(0)
     _, xml, stamp = tts_ov.ir_paths(
-        src, "firered_llm_decode_q1", ".ov-firered-decode-q1-v15"
+        src, "firered_llm_decode_q1", ".ov-firered-decode-q1-v16"
     )
     compiled_q1 = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(inner, True),
-        (embeds_q1, mask_q1, *past), xml, stamp, device,
+        tts_ov.causal_kv_module(inner, True, external_position=True),
+        (embeds_q1, mask_q1, pos_q1, *past), xml, stamp, device,
         dynamize_ranks=(2, 4),
         stateful=False,
     )
-    runner = tts_ov.DeviceKvRunner(compiled_q1, n_layers, prefill=prefill)
+    runner = tts_ov.DeviceKvRunner(
+        compiled_q1, n_layers, prefill=prefill, external_position=True,
+    )
     n_step = {"i": 0}
     times = core._ov_times
 
