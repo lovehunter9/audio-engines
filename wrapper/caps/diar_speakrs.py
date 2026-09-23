@@ -508,14 +508,13 @@ def build_app(supports):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "engine not ready")
         # speakrs derives the speaker count from the clustering; it has no way to be told one.
-        # Refusing beats accepting and ignoring: a caller that asked for three speakers and got
-        # seven would have no way to tell that its constraint was dropped.
-        asked = [n for n, v in (("num_speakers", num_speakers), ("min_speakers", min_speakers),
-                                ("max_speakers", max_speakers)) if v not in (None, "")]
-        if asked:
-            raise HTTPException(status_code=400,
-                                detail="%s: this engine derives the speaker count from clustering "
-                                       "and cannot be constrained to one" % ", ".join(asked))
+        # Refusing used to be the answer, but it failed every meeting whose user typed a count,
+        # so the hints are accepted and dropped -- and named in the reply, so a caller comparing
+        # num_speakers against what it asked for can see the constraint did not hold.
+        ignored = {n: v for n, v in (("num_speakers", num_speakers), ("min_speakers", min_speakers),
+                                     ("max_speakers", max_speakers)) if v not in (None, "")}
+        if ignored:
+            log.warning("ignoring %s: speakrs cannot constrain the speaker count", ignored)
         want_exclusive = EXCLUSIVE if exclusive is None else tasks.truthy(exclusive)
         method = (exclusive_method or "legacy_binary_v1").strip()
         if exclusive_method not in (None, "") and not want_exclusive:
@@ -566,6 +565,8 @@ def build_app(supports):
                 ]
             if "exclusive_evidence" in reply and reply["exclusive_evidence"] is not None:
                 body["exclusive_evidence"] = _exclusive_evidence(reply["exclusive_evidence"])
+            if ignored:
+                body["ignored_hints"] = ignored
             body.update(_effective(tuning))
             return body
 
