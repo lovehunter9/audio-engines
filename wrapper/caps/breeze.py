@@ -740,12 +740,14 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """Depth transformer on OpenVINO. Sampling stays the official multinomial.
+    """Depth transformer on OpenVINO, one token at a time. Sampling stays official.
 
     A fused frame drew every codebook with its own inverse CDF. Those ids were
-    not speech. This graph is only the stack: token i is at position i, which
-    is the cache_position the official loop already uses. The embed, projector,
-    per-codebook head, and _cfg_sample stay in Python. CUDA never calls this.
+    not speech. Prefill is the official two tokens at positions 0 and 1. Each
+    later codebook is one stateful step. The position input is that step's
+    official cache_position; deriving it from the example cache length freezes
+    every codebook at the export position. The embed, projector, per-codebook
+    head, and _cfg_sample stay in Python. CUDA never calls this.
 
     backbone.float() also floats the tied codebook embedding. The depth
     projector stays bf16, and the official embed then dies in
@@ -783,41 +785,48 @@ def _install_breeze_depth_ov(model, path, device):
         )
     cfg = inner.config
     hidden = int(cfg.hidden_size)
-    # max_seq on the official graph is num_codebooks + 1. The spoken prefix
-    # stops at num_codebooks.
-    depth_t = int(cfg.num_codebooks) + 1
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    # Official prefill is exactly two tokens. Decode then walks positions
+    # 2, 3, ... so the example past length is 2, not an empty cache.
     inner.layers.float()
     inner.norm.float()
-    _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_depth_stack", ".ov-breeze-depth-v1")
-    stack = tts_ov.compile_causal(
+    _, pre_xml, pre_stamp = tts_ov.ir_paths(
+        str(path), "breeze_depth_prefill", ".ov-breeze-depth-prefill-v1",
+    )
+    prefill = tts_ov.compile_causal(
         tts_ov.causal_kv_module(inner, False),
         (
-            torch.zeros(1, depth_t, hidden, dtype=torch.float32),
-            torch.ones(1, depth_t, dtype=torch.long),
+            torch.zeros(1, 2, hidden, dtype=torch.float32),
+            torch.ones(1, 2, dtype=torch.long),
         ),
-        xml, stamp, device,
+        pre_xml, pre_stamp, device,
         dynamize_ranks=(),
     )
-
-    def depth_hidden(embs):
-        n = int(embs.shape[1])
-        if embs.shape[0] != 1:
-            raise RuntimeError(
-                "breeze ov depth is compiled for batch=1; got %s" % (tuple(embs.shape),)
-            )
-        if n > depth_t:
-            raise RuntimeError(
-                "breeze ov depth length %d exceeds static %d" % (n, depth_t)
-            )
-        buf = np.zeros((1, depth_t, hidden), dtype=np.float32)
-        buf[:, :n] = np.ascontiguousarray(embs.detach().float().cpu().numpy())
-        mask = np.zeros((1, depth_t), dtype=np.int64)
-        mask[:, :n] = 1
-        out = stack(buf, mask)
-        return torch.from_numpy(np.ascontiguousarray(out[0]))[:, :n]
+    past = []
+    for _ in range(n_layers):
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(
+        str(path), "breeze_depth_decode", ".ov-breeze-depth-decode-v1",
+    )
+    decode = tts_ov.compile_causal(
+        tts_ov.causal_kv_module(inner, True, external_position=True),
+        (
+            torch.zeros(1, 1, hidden, dtype=torch.float32),
+            torch.ones(1, 3, dtype=torch.long),
+            torch.tensor([[2]], dtype=torch.long),
+            *past,
+        ),
+        dec_xml, dec_stamp, device,
+        dynamize_ranks=(2, 4),
+        stateful=True,
+        kv_from=3,
+    )
+    runner = tts_ov.StatefulKvRunner(decode, n_layers)
 
     def full_loop(self):
         t0 = time.perf_counter()
+        runner.reset()
         self.prefill_input_ids[:, 0] = 0
         self.prefill_input_ids[:, 1] = self.first_cb_token_buf
         prefill_embeds = self.embed_tokens(self.prefill_input_ids)
@@ -826,7 +835,15 @@ def _install_breeze_depth_ov(model, path, device):
             backbone_h = self.backbone_hidden_state_projector(backbone_h)
         prefill_embeds[:, 0] = backbone_h
         seq = self.inputs_embeds_projector(prefill_embeds)
-        hidden_states = depth_hidden(seq)
+        if seq.shape[0] != 1 or int(seq.shape[1]) != 2:
+            raise RuntimeError(
+                "breeze ov depth prefill is [1, 2, H]; got %s" % (tuple(seq.shape),)
+            )
+        emb = np.ascontiguousarray(seq.detach().float().cpu().numpy())
+        mask = np.ones((1, 2), dtype=np.int64)
+        out = prefill(emb, mask)
+        hidden_states = torch.from_numpy(np.ascontiguousarray(out[0]))
+        runner.seed_flat([out[i] for i in range(1, 1 + 2 * n_layers)])
         if self._debug_head_input is not None:
             self._debug_head_input[0].copy_(hidden_states[:, 1:, :].float())
         first_logits = self.codebooks_head(
@@ -848,9 +865,8 @@ def _install_breeze_depth_ov(model, path, device):
                 )
             )
             step = self.inputs_embeds_projector(step)
-            seq = torch.cat([seq, step], dim=1)
-            hidden_states = depth_hidden(seq)[:, -1:, :]
             cache_pos = self.decode_cache_positions[cb_idx - 1]
+            hidden_states = runner.step(step, position=cache_pos)
             if self._debug_head_input is not None:
                 self._debug_head_input[cb_idx].copy_(hidden_states.float())
             logits = self.codebooks_head(
@@ -864,17 +880,14 @@ def _install_breeze_depth_ov(model, path, device):
             self._tok_buf.clamp_(0, self.vocab_size - 1)
             self.output_tokens[:, cb_idx] = self._tok_buf
         log.info(
-            "breeze depth codebooks=%d %.3fs",
+            "breeze depth step codebooks=%d %.3fs",
             self.num_decode_codebooks, time.perf_counter() - t0,
         )
 
     DepthDecoderGraph._full_loop = full_loop
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
-    log.info(
-        "breeze depth stack on OpenVINO %s static_t=%d",
-        device, depth_t,
-    )
+    log.info("breeze depth step on OpenVINO %s layers=%d", device, n_layers)
     return depth
 
 
