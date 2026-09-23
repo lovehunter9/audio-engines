@@ -740,19 +740,17 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """Depth transformer on OpenVINO, one token at a time. Sampling stays the official multinomial.
+    """One OpenVINO infer per frame. Sampling stays the official multinomial.
 
-    A fused frame drew every codebook with its own inverse CDF. Those ids were
-    not speech. Prefill is the official two tokens at positions 0 and 1. Each
-    later codebook is one stateful step. The position input is that step's
-    official cache_position; deriving it from the example cache length freezes
-    every codebook at the export position. The embed, projector, per-codebook
-    head, and _cfg_sample stay in Python. CUDA never calls this.
+    Fifteen separate depth calls stay near 0.6s a frame, and a stateful
+    one-token step did not get faster or reach EOS. The frame graph unrolls
+    the official two-token prefill and each later codebook. The draw is
+    Gumbel-max. CUDA never calls this.
 
     backbone.float() also floats the tied codebook embedding. The depth
     projector stays bf16, and the official embed then dies in
     inputs_embeds_projector. Put that shared embedding back on the projector
-    dtype. The projector itself is not cast, and it is not part of this graph.
+    dtype before the frame copies it. The projector itself is not cast.
     """
     import time
 
@@ -785,48 +783,42 @@ def _install_breeze_depth_ov(model, path, device):
         )
     cfg = inner.config
     hidden = int(cfg.hidden_size)
-    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
-    # Official prefill is exactly two tokens. Decode then walks positions
-    # 2, 3, ... so the example past length is 2, not an empty cache.
+    n_layers, _, _ = tts_ov.kv_meta(cfg)
+    n_codebooks = int(
+        getattr(head, "num_codebooks", 0) or getattr(cfg, "num_codebooks", 0) or 0
+    )
+    vocab = int(head.weight.shape[-1])
+    codec_cfg = getattr(getattr(model, "config", None), "codec_config", None)
+    codebook_size = int(getattr(codec_cfg, "codebook_size", vocab) or vocab)
+    n_tokens = n_codebooks - 1
+    if n_tokens < 1:
+        raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
+    # Same f32 stack as the prefix path that already matches the transcript.
     inner.layers.float()
     inner.norm.float()
-    _, pre_xml, pre_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_prefill", ".ov-breeze-depth-prefill-v1",
+    _, frame_xml, frame_stamp = tts_ov.ir_paths(
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v5",
     )
-    prefill = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(inner, False),
+    frame = tts_ov.compile_causal(
+        tts_ov.fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size),
         (
             torch.zeros(1, 2, hidden, dtype=torch.float32),
-            torch.ones(1, 2, dtype=torch.long),
+            torch.ones(1, dtype=torch.float32),
+            torch.ones(1, dtype=torch.long),
+            torch.ones(1, dtype=torch.float32),
+            torch.ones(1, dtype=torch.long),
+            torch.full((n_tokens, vocab), 0.5, dtype=torch.float32),
         ),
-        pre_xml, pre_stamp, device,
+        frame_xml, frame_stamp, device,
         dynamize_ranks=(),
     )
-    past = []
-    for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
-        past.append(torch.zeros(1, n_kv, 2, head_dim, dtype=torch.float32))
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_decode", ".ov-breeze-depth-decode-v1",
-    )
-    decode = tts_ov.compile_causal(
-        tts_ov.causal_kv_module(inner, True, external_position=True),
-        (
-            torch.zeros(1, 1, hidden, dtype=torch.float32),
-            torch.ones(1, 3, dtype=torch.long),
-            torch.tensor([[2]], dtype=torch.long),
-            *past,
-        ),
-        dec_xml, dec_stamp, device,
-        dynamize_ranks=(2, 4),
-        stateful=True,
-        kv_from=3,
-    )
-    runner = tts_ov.StatefulKvRunner(decode, n_layers)
 
     def full_loop(self):
         t0 = time.perf_counter()
-        runner.reset()
+        if int(getattr(self, "batch_size", 1)) != 1:
+            raise RuntimeError(
+                "breeze ov depth is compiled for batch=1; got %s" % self.batch_size
+            )
         self.prefill_input_ids[:, 0] = 0
         self.prefill_input_ids[:, 1] = self.first_cb_token_buf
         prefill_embeds = self.embed_tokens(self.prefill_input_ids)
@@ -839,55 +831,44 @@ def _install_breeze_depth_ov(model, path, device):
             raise RuntimeError(
                 "breeze ov depth prefill is [1, 2, H]; got %s" % (tuple(seq.shape),)
             )
-        emb = np.ascontiguousarray(seq.detach().float().cpu().numpy())
-        mask = np.ones((1, 2), dtype=np.int64)
-        out = prefill(emb, mask)
-        hidden_states = torch.from_numpy(np.ascontiguousarray(out[0]))
-        runner.seed_flat([out[i] for i in range(1, 1 + 2 * n_layers)])
-        if self._debug_head_input is not None:
-            self._debug_head_input[0].copy_(hidden_states[:, 1:, :].float())
-        first_logits = self.codebooks_head(
-            hidden_states[:, 1:, :].float(),
-            cache_position=self.head_prefill_pos,
+        temp = np.ascontiguousarray(
+            self.temperature_buf[:1, 0].detach().float().cpu().numpy()
         )
-        if self.debug_logits is not None:
-            self.debug_logits[0].copy_(first_logits[:, 0, :])
-        self._cfg_sample(first_logits)
-        if self._debug_probs is not None:
-            self._debug_probs[0].copy_(self._debug_probs_slot)
-        self._tok_buf.clamp_(0, self.vocab_size - 1)
-        self.output_tokens[:, 0] = self._tok_buf
-        for cb_idx in range(1, self.num_decode_codebooks):
-            offset_tok = self._tok_buf + self.codebook_offsets[cb_idx]
-            step = self.embed_tokens(
-                offset_tok.unsqueeze(1).clamp_(
-                    0, self.num_codebooks * self.vocab_size - 1
-                )
+        topk = np.ascontiguousarray(
+            self.top_k_buf[:1, 0].detach().cpu().numpy().astype(np.int64)
+        )
+        topp = np.ascontiguousarray(
+            self.top_p_buf[:1, 0].detach().float().cpu().numpy()
+        )
+        dos = np.ascontiguousarray(
+            self.do_sample_buf[:1].detach().cpu().numpy().astype(np.int64)
+        )
+        uniform = np.ascontiguousarray(
+            torch.rand(n_tokens, vocab).numpy().astype(np.float32)
+        )
+        embeds = np.ascontiguousarray(seq.detach().float().cpu().numpy())
+        toks = np.array(
+            frame(embeds, temp, topk, topp, dos, uniform)[0]
+        ).reshape(-1)
+        if int(toks.shape[0]) != int(self.num_decode_codebooks):
+            raise RuntimeError(
+                "breeze depth frame returned %d tokens, expected %d"
+                % (int(toks.shape[0]), int(self.num_decode_codebooks))
             )
-            step = self.inputs_embeds_projector(step)
-            cache_pos = self.decode_cache_positions[cb_idx - 1]
-            hidden_states = runner.step(step, position=cache_pos)
-            if self._debug_head_input is not None:
-                self._debug_head_input[cb_idx].copy_(hidden_states.float())
-            logits = self.codebooks_head(
-                hidden_states.float(), cache_position=cache_pos,
-            )
-            if self.debug_logits is not None:
-                self.debug_logits[cb_idx].copy_(logits[:, 0, :])
-            self._cfg_sample(logits)
-            if self._debug_probs is not None:
-                self._debug_probs[cb_idx].copy_(self._debug_probs_slot)
-            self._tok_buf.clamp_(0, self.vocab_size - 1)
-            self.output_tokens[:, cb_idx] = self._tok_buf
+        for i, tok in enumerate(toks):
+            self.output_tokens[:, i] = int(tok)
         log.info(
-            "breeze depth step codebooks=%d %.3fs",
-            self.num_decode_codebooks, time.perf_counter() - t0,
+            "breeze depth frame codebooks=%d %.3fs",
+            int(toks.shape[0]), time.perf_counter() - t0,
         )
 
     DepthDecoderGraph._full_loop = full_loop
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
-    log.info("breeze depth step on OpenVINO %s layers=%d", device, n_layers)
+    log.info(
+        "breeze depth frame on OpenVINO %s layers=%d codebooks=%d",
+        device, n_layers, n_codebooks,
+    )
     return depth
 
 
