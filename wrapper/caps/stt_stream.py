@@ -878,12 +878,29 @@ def _solve_budget():
 # ⚠️ Called under the same lock as inference, so nothing is mid-allocation when it runs.
 def _drop_cache():
     """Hand the allocator's cached blocks back before retrying. 🔴 A fragmented cache would fail
-    the retry for a SECOND reason; they are a neighbour's: one request went 8290 -> 14460 MiB."""
+    the retry for a SECOND reason; they are a neighbour's: one request went 8290 -> 14460 MiB.
+
+    CUDA gives them back with empty_cache. OpenVINO has no such cache: the blocks sit in the
+    glibc arena and stay charged to this cgroup after the call returns. A call that finished
+    at the limit then OOMKills the next request before that request can plan. malloc_trim is
+    the OV counterpart. It does not run when CUDA emptied its own cache."""
     try:
         import torch
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            return
+    except Exception:
+        pass
+    if not _is_ov():
+        return
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
 
@@ -1949,6 +1966,10 @@ def build_app(supports):
                             MODEL_NAME, len(segs), sum(s for _, _, s in spans), calls, splits,
                             sum(1 for item in out if item and item.get("error")),
                             time.monotonic() - started)
+                        # 🔴 Before the return, while the infer requests are already dead. The next
+                        # request's body is read before it can plan, and a cgroup still at its
+                        # limit kills that read with SIGKILL.
+                        _drop_cache()
                         return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
                     out = []
                     speech_seconds = 0.0
@@ -1979,7 +2000,8 @@ def build_app(supports):
                         "inference_calls=%d split_retries=0 failed=%d max_batch_spans=1 "
                         "duration_seconds=%.3f",
                         MODEL_NAME, len(segs), speech_seconds, inference_calls,
-                        sum(1 for item in out if item.get("error")), time.monotonic() - started)
+                        sum(1 for item in out if item.get("error")),                         time.monotonic() - started)
+                    _drop_cache()
                     return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
 
                 return await tasks.dispatch(async_, "stt", MODEL_NAME, _work_batch,

@@ -1555,3 +1555,45 @@ class OneReadingPerPlanTest(unittest.TestCase):
             _groups, how = m._plan_groups([(i, None, 30.0) for i in range(8)])
         self.assertNotIn("bounded by the container", how,
                          "the line named an account the plan was not solved from")
+
+
+class OpenVINOReturnsTheArenaTest(unittest.TestCase):
+    """A finished OV call must hand glibc pages back. CUDA keeps empty_cache and does not trim."""
+
+    def test_ov_trims_and_cuda_does_not(self):
+        m = _stt()
+        trimmed = []
+        emptied = []
+
+        class _Cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+            @staticmethod
+            def empty_cache():
+                emptied.append(True)
+
+        class _Libc:
+            @staticmethod
+            def malloc_trim(_pad):
+                trimmed.append(True)
+                return 1
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False), \
+                mock.patch.object(m, "_is_ov", return_value=True), \
+                mock.patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=_Cuda)}), \
+                mock.patch("ctypes.CDLL", return_value=_Libc):
+            m._drop_cache()
+        self.assertEqual(trimmed, [True])
+        self.assertEqual(emptied, [])
+
+        trimmed.clear()
+        cuda_on = types.SimpleNamespace(cuda=types.SimpleNamespace(
+            is_available=lambda: True, empty_cache=lambda: emptied.append(True)))
+        with mock.patch.object(m, "_is_ov", return_value=False), \
+                mock.patch.dict(sys.modules, {"torch": cuda_on}), \
+                mock.patch("ctypes.CDLL", return_value=_Libc):
+            m._drop_cache()
+        self.assertEqual(emptied, [True])
+        self.assertEqual(trimmed, [])
