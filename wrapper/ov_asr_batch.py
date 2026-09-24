@@ -8,9 +8,33 @@ MIN_INTEL_GPU_ENCODER_FRAMES = 400
 # Only groups shorter than this get the 16s / 400-frame floor.
 MIN_GROUP_FLOOR_SAMPLES = 64000
 AUDIO_PAD = "<|audio_pad|>"
+# Traced encoder view is n_window*2. A remainder cannot become [1,128,N,100].
+MEL_WINDOW = 100
 # Official Qwen3-ASR hardcodes these; the exported IR has no generation_config.
 EOS_TOKEN_ID = 151643
 IM_END_TOKEN_ID = 151645
+
+
+def pad_mel_time(features, window=MEL_WINDOW):
+    """Right-pad mel time so it divides the traced encoder view.
+
+    Eager pads a short tail up to n_window*2. The export kept the view and
+    dropped that pad, so [1,128,1301] cannot become [1,128,13,100].
+    """
+    import numpy as np
+
+    window = int(window)
+    if features is None or window <= 1:
+        return features
+    arr = np.asarray(features)
+    if arr.ndim < 1:
+        return features
+    t = int(arr.shape[-1])
+    if t <= 0 or t % window == 0:
+        return np.ascontiguousarray(arr)
+    pad = window - (t % window)
+    out = np.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, pad)])
+    return np.ascontiguousarray(out)
 
 
 def extend_audio_tokens(prompt, n):
@@ -291,7 +315,7 @@ class Engine:
         n = int(features.shape[0])
         reqs = []
         for i in range(n):
-            clip = np.ascontiguousarray(features[i:i + 1])
+            clip = pad_mel_time(np.ascontiguousarray(features[i:i + 1]))
             req = self.encoder.create_infer_request()
             req.set_tensor(name, _tensor(clip))
             if "attention_mask" in self._enc_names:

@@ -1023,6 +1023,16 @@ class OpenVINOModeTest(unittest.TestCase):
         finally:
             q._state["asr"] = asr
 
+    def test_ov_pad_mel_time_rounds_up_to_the_traced_window(self):
+        import numpy as np
+        from wrapper.ov_asr_batch import pad_mel_time
+
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 1301))).shape[-1], 1400)
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 489))).shape[-1], 500)
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 400))).shape[-1], 400)
+        kept = np.zeros((1, 128, 80))
+        self.assertEqual(int(pad_mel_time(kept, window=100).shape[-1]), 100)
+
     def test_ov_stack_encoder_hiddens_pads_to_the_intel_floor(self):
         import numpy as np
         from wrapper.ov_asr_batch import MIN_INTEL_GPU_ENCODER_FRAMES, stack_encoder_hiddens

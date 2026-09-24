@@ -1581,6 +1581,39 @@ def _call_group(group, language=None, context=""):
 
 # ⚠️ It re-plans everything outstanding, halves left by an earlier bisection included, so a
 # request narrowing down a span the engine will not take can have it put back with company.
+def _replan_over_budget(todo):
+    """Repack groups still waiting once a measurement has shrunk the budget under them.
+
+    The plan is cut once, at the factory rate. The call that shows the rate is
+    wrong returns, and the next group still has the old size. That group is
+    what the cgroup kills, and an OOMKill is not an exception this loop can catch.
+    """
+    if not todo:
+        return None
+    budget = _budget_now()
+    if not budget or budget <= 0:
+        return None
+    old_max = 0.0
+    over = False
+    for group in todo:
+        cost = grouping.padded_seconds([s for _i, _c, s in group])
+        old_max = max(old_max, cost)
+        if cost > budget:
+            over = True
+    if not over:
+        return None
+    rest = [one for g in todo for one in g]
+    groups, how = _plan_groups(rest)
+    if not groups:
+        return None
+    new_max = max(grouping.padded_seconds([s for _i, _c, s in g]) for g in groups)
+    if new_max >= old_max - 1e-6:
+        return None
+    groups = list(groups)
+    groups.reverse()
+    return groups, how
+
+
 def _smaller_plan(todo, refused):
     """A re-plan of everything still outstanding, but only if it is actually smaller: (stack, how)
     or None. 🔴 This structural check, not the reasoning elsewhere, is what ends the retry."""
@@ -1856,6 +1889,11 @@ def build_app(supports):
                                 for (i, _, _s), (t, lang) in zip(group, pairs):
                                     out[i] = {"text": t, "language": lang}
                                 done += len(group)
+                                shrunk = _replan_over_budget(todo)
+                                if shrunk:
+                                    replans += 1
+                                    todo, how = shrunk
+                                    replanned_how = how
                             except tasks.Cancelled:
                                 raise
                             except Exception as e:

@@ -1335,6 +1335,41 @@ class BothAccountsInOnePlaceTest(unittest.TestCase):
         self.assertGreater(said, 0)
 
 
+class ReplanAfterAMeasurementTest(unittest.TestCase):
+    """A call that proves the factory rate is high must shrink the groups still waiting.
+
+    The cgroup kills the next group. That kill is not an exception, so the
+    outstanding plan has to move before the group runs.
+    """
+
+    def _module(self, budget_seconds):
+        m = _stt()
+        m._resting_bytes = 0
+        m._headroom_bytes = lambda: int(budget_seconds * 6.0 * (2 ** 20) / 0.5)
+        patch = mock.patch.object(m.cgroup, "read",
+                                  lambda: {"current": None, "max": None, "available": None})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return m
+
+    def test_a_group_over_the_new_budget_is_repacked(self):
+        m = self._module(200.0)
+        todo = [[(i, None, 4.0) for i in range(40)]]
+        self.assertGreater(m.grouping.padded_seconds([4.0] * 40), 0)
+        m._headroom_bytes = lambda: int(40.0 * 6.0 * (2 ** 20) / 0.5)
+        shrunk = m._replan_over_budget(todo)
+        self.assertIsNotNone(shrunk)
+        groups, _how = shrunk
+        budget = m._budget_now()
+        for group in groups:
+            self.assertLessEqual(m.grouping.padded_seconds([s for _i, _c, s in group]), budget)
+
+    def test_a_plan_that_still_fits_is_left_alone(self):
+        m = self._module(200.0)
+        todo = [[(i, None, 4.0) for i in range(4)]]
+        self.assertIsNone(m._replan_over_budget(todo))
+
+
 class SmallerPlanLooksAtTheLargestGroupTest(unittest.TestCase):
     """🔴 `pack` sorts longest-span-first, so the FIRST group is headed by the longest span and
     therefore usually holds the FEWEST spans. Reading it said "smaller" while a later group of
