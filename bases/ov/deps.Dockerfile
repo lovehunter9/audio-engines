@@ -59,8 +59,12 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-asr==0.0.6" \
-    && python3 -c "import openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "pyparsing==3.3.2" \
+    && python3 -c "import pyparsing, openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
+assert pyparsing.__version__ == '3.3.2', pyparsing.__version__; \
+print('pyparsing', pyparsing.__version__); \
 print('openvino', openvino.__version__); \
 print('openvino_genai', getattr(openvino_genai, '__version__', 'ok')); \
 print('transformers', transformers.__version__); \
