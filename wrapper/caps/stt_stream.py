@@ -810,8 +810,9 @@ def _headroom_bytes():
     if held is None:
         return None
     if _is_ov():
-        # REQUIRED_GPU_MEMORY is a scheduler tag here; unified memory is the container account.
-        return cgroup.headroom(cgroup.read())
+        # REQUIRED_GPU_MEMORY is a scheduler tag here. iGPU sizes against MemAvailable;
+        # Arc keeps the container account.
+        return cgroup.batch_headroom(cgroup.read(), _gpu_mode())
     hami = _hami_limit_bytes()
     if hami:
         # 🔴 A published limit does not mean the counters were rewritten to respect it (the

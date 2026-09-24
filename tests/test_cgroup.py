@@ -86,6 +86,18 @@ class HeadroomTest(unittest.TestCase):
         self.assertIsNone(
             cgroup.headroom({"current": None, "max": None, "available": None}))
 
+    def test_igpu_batch_uses_the_smaller_of_the_container_and_the_machine(self):
+        snap = {"current": 2, "max": 16, "reclaimable": 0, "available": 5}
+        self.assertEqual(cgroup.batch_headroom(snap, "intel"), 5)
+
+    def test_arc_batch_keeps_the_container_account(self):
+        snap = {"current": 2, "max": 16, "reclaimable": 0, "available": 5}
+        self.assertEqual(cgroup.batch_headroom(snap, "intel-gpu"), 14)
+
+    def test_igpu_without_a_machine_reading_keeps_the_container_account(self):
+        snap = {"current": 2, "max": 16, "reclaimable": 0, "available": None}
+        self.assertEqual(cgroup.batch_headroom(snap, "intel"), 14)
+
 
 if __name__ == "__main__":
     unittest.main()

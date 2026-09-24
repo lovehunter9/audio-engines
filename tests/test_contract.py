@@ -1195,6 +1195,17 @@ class OpenVINOModeTest(unittest.TestCase):
             # 8Gi cgroup minus 3Gi current, not 4Gi tag minus 3Gi current.
             self.assertEqual(a._headroom_bytes(), 5 * 1024 ** 3)
 
+    def test_align_igpu_headroom_is_the_machine_when_it_is_tighter(self):
+        from wrapper.caps import align as a
+        from wrapper import cgroup
+
+        snap = {"current": 1 * 1024 ** 3, "max": 8 * 1024 ** 3, "reclaimable": 0,
+                "available": 3 * 1024 ** 3}
+        with mock.patch.object(a.ovutil, "is_ov", return_value=True), \
+             mock.patch.object(cgroup, "read", return_value=snap), \
+             mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}):
+            self.assertEqual(a._headroom_bytes(), 3 * 1024 ** 3)
+
     def test_align_ov_export_is_one_shot_asr_not_hf(self):
         from wrapper.caps import align as a
 
