@@ -78,6 +78,17 @@ def _rss_kib():
     return "?"
 
 
+def _compile_ir(xml, device, config=None):
+    """Compile a saved IR. mmap of an intact IR on the hostPath raises SIGBUS."""
+    import openvino as ov
+
+    core = ov.Core()
+    core.set_property({"ENABLE_MMAP": False})
+    props = dict(config or {})
+    props["ENABLE_MMAP"] = False
+    return core.compile_model(xml, device, props)
+
+
 def compile_module(mod, example, xml, stamp, device, config=None):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np.
 
@@ -107,8 +118,7 @@ def compile_module(mod, example, xml, stamp, device, config=None):
                 ov_model = ov.convert_model(traced)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
-    core = ov.Core()
-    compiled = core.compile_model(xml, device, config or {})
+    compiled = _compile_ir(xml, device, config)
     log.info("compiled %s on %s", xml, device)
 
     def run(*arrays):
@@ -158,8 +168,7 @@ def compile_static(mod, example, xml, stamp, device):
         log.info("froze %s inputs=%s", xml, mapping)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
-    core = ov.Core()
-    compiled = core.compile_model(xml, device)
+    compiled = _compile_ir(xml, device)
     log.info("compiled static %s on %s", xml, device)
 
     def run(*arrays):
@@ -325,8 +334,7 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
         del ov_model
     import gc
     gc.collect()
-    core = ov.Core()
-    compiled = core.compile_model(
+    compiled = _compile_ir(
         xml,
         device,
         {
@@ -378,10 +386,7 @@ def compile_dyn_last(mod, example, xml, stamp, device):
             ov_model.reshape(mapping)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
-    core = ov.Core()
-    compiled = core.compile_model(
-        xml, device, {"INFERENCE_PRECISION_HINT": "f32"}
-    )
+    compiled = _compile_ir(xml, device, {"INFERENCE_PRECISION_HINT": "f32"})
     log.info("compiled %s on %s inference_precision=f32", xml, device)
 
     def run(*arrays):
