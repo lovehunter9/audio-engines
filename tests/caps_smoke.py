@@ -3102,10 +3102,9 @@ def a_refusal_reshapes_the_rest_of_the_request(c, q, calls):
     # against a card that takes two go 8 -> 4 -> 2, not one group at a time.
     check("the rest of the request was re-planned once per refusal, not halved",
           bool(line) and "re-planned 2 times" in line[0], line)
-    # 🔴 Dropped once per refusal, from the handler: on a shared card the blocks torch
-    # caches are blocks the neighbours cannot have.
-    check("the allocator's cache goes back to the card on every refusal",
-          len(dropped) == 2, dropped)
+    # 🔴 Once per refusal, plus once when the call returns, so the next request is not born at the cgroup limit.
+    check("the allocator's cache goes back on every refusal and when the call finishes",
+          len(dropped) == 3, dropped)
     # 🔴 The size prints as the number it is: 0.2 rounded to "0" reads as a process with
     # nothing left, which is a different situation with a different cause.
     check("auto says the size of the next call, unrounded",

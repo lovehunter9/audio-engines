@@ -86,6 +86,21 @@ class HeadroomTest(unittest.TestCase):
         self.assertIsNone(
             cgroup.headroom({"current": None, "max": None, "available": None}))
 
+    def test_igpu_spends_the_smaller_of_the_machine_and_the_container(self):
+        snap = {"current": 2 * 1024 ** 3, "max": 16 * 1024 ** 3,
+                "reclaimable": 0, "available": 4 * 1024 ** 3}
+        self.assertEqual(cgroup.batch_headroom(snap, "intel"), 4 * 1024 ** 3)
+        # A large machine does not pull the container below its own account.
+        snap["available"] = 60 * 1024 ** 3
+        self.assertEqual(cgroup.batch_headroom(snap, "intel"), 14 * 1024 ** 3)
+
+    def test_arc_and_cuda_ignore_the_machine(self):
+        snap = {"current": 2 * 1024 ** 3, "max": 16 * 1024 ** 3,
+                "reclaimable": 0, "available": 1 * 1024 ** 3}
+        self.assertEqual(cgroup.batch_headroom(snap, "intel-gpu"), 14 * 1024 ** 3)
+        self.assertEqual(cgroup.batch_headroom(snap, "nvidia"), 14 * 1024 ** 3)
+        self.assertEqual(cgroup.batch_headroom(snap, ""), 14 * 1024 ** 3)
+
 
 if __name__ == "__main__":
     unittest.main()

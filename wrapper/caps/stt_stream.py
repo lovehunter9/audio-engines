@@ -810,8 +810,8 @@ def _headroom_bytes():
     if held is None:
         return None
     if _is_ov():
-        # REQUIRED_GPU_MEMORY is a scheduler tag here; unified memory is the container account.
-        return cgroup.headroom(cgroup.read())
+        # REQUIRED_GPU_MEMORY is a scheduler tag. iGPU takes min(container, MemAvailable); Arc keeps the container account.
+        return cgroup.batch_headroom(cgroup.read(), _gpu_mode())
     hami = _hami_limit_bytes()
     if hami:
         # 🔴 A published limit does not mean the counters were rewritten to respect it (the
@@ -844,8 +844,12 @@ def _host_budget():
     KILLS -- OOMKill, not a catchable exception -- so it is priced apart and the smaller wins."""
     per_second = (_host_bytes_a_padded_second
                   or HOST_FLOOR_BYTES_A_PADDED_SECOND * HOST_FLOOR_OVERSHOOT)
-    return grouping.budget_from_bytes(cgroup.headroom(cgroup.read()), per_second,
-                                      fraction=BUDGET_FRACTION)
+    # iGPU only: scale the container rate by the measured correction. Arc and CUDA keep the rate they had.
+    if _is_ov() and _gpu_mode() == "intel" and _scale_seen:
+        per_second *= max(_scale, 1.0)
+    snap = cgroup.read()
+    room = (cgroup.batch_headroom(snap, _gpu_mode()) if _is_ov() else cgroup.headroom(snap))
+    return grouping.budget_from_bytes(room, per_second, fraction=BUDGET_FRACTION)
 
 
 #: The headroom, and the two sides of the budget solved from it. 🔴 Kept so the health line quotes
@@ -880,6 +884,19 @@ def _drop_cache():
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            return
+    except Exception:
+        pass
+    if not _is_ov():
+        return
+    # OpenVINO leaves blocks in the glibc arena; malloc_trim hands them back so the next request is not OOM-killed.
+    import gc
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
     except Exception:
         pass
 
@@ -959,6 +976,9 @@ def _budget_now():
     elif budget is None and host is not None and _is_ov():
         # Intel unified memory: the container account IS the card; NVIDIA must not stand in.
         budget = host
+    # iGPU only, before the first measurement: quarter the budget so a 4x miss still fits. Arc and CUDA are unchanged.
+    if _is_ov() and _gpu_mode() == "intel" and _scale_seen == 0 and budget:
+        budget /= 4.0
     return budget
 
 
@@ -1581,6 +1601,34 @@ def _call_group(group, language=None, context=""):
 
 # ⚠️ It re-plans everything outstanding, halves left by an earlier bisection included, so a
 # request narrowing down a span the engine will not take can have it put back with company.
+def _replan_over_budget(todo):
+    """Repack waiting groups once a measurement shrinks the budget, before the cgroup OOMKills a group this loop cannot catch."""
+    if not todo:
+        return None
+    budget = _budget_now()
+    if not budget or budget <= 0:
+        return None
+    old_max = 0.0
+    over = False
+    for group in todo:
+        cost = grouping.padded_seconds([s for _i, _c, s in group])
+        old_max = max(old_max, cost)
+        if cost > budget:
+            over = True
+    if not over:
+        return None
+    rest = [one for g in todo for one in g]
+    groups, how = _plan_groups(rest)
+    if not groups:
+        return None
+    new_max = max(grouping.padded_seconds([s for _i, _c, s in g]) for g in groups)
+    if new_max >= old_max - 1e-6:
+        return None
+    groups = list(groups)
+    groups.reverse()
+    return groups, how
+
+
 def _smaller_plan(todo, refused):
     """A re-plan of everything still outstanding, but only if it is actually smaller: (stack, how)
     or None. 🔴 This structural check, not the reasoning elsewhere, is what ends the retry."""
@@ -1856,6 +1904,12 @@ def build_app(supports):
                                 for (i, _, _s), (t, lang) in zip(group, pairs):
                                     out[i] = {"text": t, "language": lang}
                                 done += len(group)
+                                shrunk = (_replan_over_budget(todo)
+                                          if _is_ov() and _gpu_mode() == "intel" else None)
+                                if shrunk:
+                                    replans += 1
+                                    todo, how = shrunk
+                                    replanned_how = how
                             except tasks.Cancelled:
                                 raise
                             except Exception as e:
@@ -1901,6 +1955,8 @@ def build_app(supports):
                             MODEL_NAME, len(segs), sum(s for _, _, s in spans), calls, splits,
                             sum(1 for item in out if item and item.get("error")),
                             time.monotonic() - started)
+                        # 🔴 Hand the arena back before return: the next body is read before it can plan, and a full cgroup SIGKILLs that read.
+                        _drop_cache()
                         return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
                     out = []
                     speech_seconds = 0.0
@@ -1932,6 +1988,7 @@ def build_app(supports):
                         "duration_seconds=%.3f",
                         MODEL_NAME, len(segs), speech_seconds, inference_calls,
                         sum(1 for item in out if item.get("error")), time.monotonic() - started)
+                    _drop_cache()
                     return {"model": MODEL_NAME, "mode": "stt", "batch": True, "results": out}
 
                 return await tasks.dispatch(async_, "stt", MODEL_NAME, _work_batch,
