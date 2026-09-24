@@ -844,6 +844,10 @@ def _host_budget():
     KILLS -- OOMKill, not a catchable exception -- so it is priced apart and the smaller wins."""
     per_second = (_host_bytes_a_padded_second
                   or HOST_FLOOR_BYTES_A_PADDED_SECOND * HOST_FLOOR_OVERSHOOT)
+    # iGPU only. Arc (intel-gpu) and CUDA keep the container rate they already had.
+    # On iGPU the cgroup is what OOMKills, and that measurement is `_scale`.
+    if _is_ov() and _gpu_mode() == "intel" and _scale_seen:
+        per_second *= max(_scale, 1.0)
     return grouping.budget_from_bytes(cgroup.headroom(cgroup.read()), per_second,
                                       fraction=BUDGET_FRACTION)
 
@@ -959,6 +963,11 @@ def _budget_now():
     elif budget is None and host is not None and _is_ov():
         # Intel unified memory: the container account IS the card; NVIDIA must not stand in.
         budget = host
+    # iGPU only, and only before the first measurement. Arc and CUDA are unchanged.
+    # Half the headroom survives a 2x miss; the first group is cut before any reading
+    # exists. A 4x miss still fits. A later call replaces this and recuts what is waiting.
+    if _is_ov() and _gpu_mode() == "intel" and _scale_seen == 0 and budget:
+        budget /= 4.0
     return budget
 
 
@@ -1889,7 +1898,8 @@ def build_app(supports):
                                 for (i, _, _s), (t, lang) in zip(group, pairs):
                                     out[i] = {"text": t, "language": lang}
                                 done += len(group)
-                                shrunk = _replan_over_budget(todo)
+                                shrunk = (_replan_over_budget(todo)
+                                          if _is_ov() and _gpu_mode() == "intel" else None)
                                 if shrunk:
                                     replans += 1
                                     todo, how = shrunk

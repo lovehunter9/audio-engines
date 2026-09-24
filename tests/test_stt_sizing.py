@@ -1364,6 +1364,23 @@ class ReplanAfterAMeasurementTest(unittest.TestCase):
         for group in groups:
             self.assertLessEqual(m.grouping.padded_seconds([s for _i, _c, s in group]), budget)
 
+    def test_an_unmeasured_ov_budget_is_a_quarter_of_the_factory_one(self):
+        env = {"AUDIO_BASE": "ov", "OLARES_GPU_MODE": "intel",
+               "MODEL_SUPPORTS": "stt,stt_stream", "ENGINE_ARGS": ""}
+        with mock.patch.dict(os.environ, env, clear=False):
+            m = importlib.reload(importlib.import_module("wrapper.caps.stt_stream"))
+            self.addCleanup(lambda: _stt())
+            m._resting_bytes = 0
+            m._headroom_bytes = lambda: int(200.0 * 6.0 * (2 ** 20) / 0.5)
+            m._scale_seen = 0
+            with mock.patch.object(m.cgroup, "read",
+                                   lambda: {"current": None, "max": None, "available": None}):
+                self.assertAlmostEqual(m._budget_now(), 50.0, places=3)
+                m._gpu_mode = lambda: "intel-gpu"
+                self.assertAlmostEqual(m._budget_now(), 200.0, places=3)
+                m._gpu_mode = lambda: "nvidia"
+                self.assertAlmostEqual(m._budget_now(), 200.0, places=3)
+
     def test_a_plan_that_still_fits_is_left_alone(self):
         m = self._module(200.0)
         todo = [[(i, None, 4.0) for i in range(4)]]
