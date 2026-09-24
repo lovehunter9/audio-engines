@@ -74,3 +74,14 @@ def headroom(snapshot):
         cur -= snapshot.get("reclaimable") or 0
         return max(0, cap - cur)
     return snapshot.get("available")
+
+
+def batch_headroom(snapshot, gpu_mode=""):
+    """Bytes a batch may spend. iGPU takes min(container headroom, MemAvailable); Arc and everything else keep headroom."""
+    room = headroom(snapshot)
+    if (gpu_mode or "").strip().lower() != "intel":
+        return room
+    avail = snapshot.get("available")
+    if room is None or avail is None:
+        return room
+    return min(room, avail)

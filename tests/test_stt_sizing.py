@@ -1335,6 +1335,54 @@ class BothAccountsInOnePlaceTest(unittest.TestCase):
         self.assertGreater(said, 0)
 
 
+class ReplanAfterAMeasurementTest(unittest.TestCase):
+    """A measured rate that is high must shrink the groups still waiting, before the cgroup OOMKills one this loop cannot catch."""
+
+    def _module(self, budget_seconds):
+        m = _stt()
+        m._resting_bytes = 0
+        m._headroom_bytes = lambda: int(budget_seconds * 6.0 * (2 ** 20) / 0.5)
+        patch = mock.patch.object(m.cgroup, "read",
+                                  lambda: {"current": None, "max": None, "available": None})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return m
+
+    def test_a_group_over_the_new_budget_is_repacked(self):
+        m = self._module(200.0)
+        todo = [[(i, None, 4.0) for i in range(40)]]
+        self.assertGreater(m.grouping.padded_seconds([4.0] * 40), 0)
+        m._headroom_bytes = lambda: int(40.0 * 6.0 * (2 ** 20) / 0.5)
+        shrunk = m._replan_over_budget(todo)
+        self.assertIsNotNone(shrunk)
+        groups, _how = shrunk
+        budget = m._budget_now()
+        for group in groups:
+            self.assertLessEqual(m.grouping.padded_seconds([s for _i, _c, s in group]), budget)
+
+    def test_an_unmeasured_ov_budget_is_a_quarter_of_the_factory_one(self):
+        env = {"AUDIO_BASE": "ov", "OLARES_GPU_MODE": "intel",
+               "MODEL_SUPPORTS": "stt,stt_stream", "ENGINE_ARGS": ""}
+        with mock.patch.dict(os.environ, env, clear=False):
+            m = importlib.reload(importlib.import_module("wrapper.caps.stt_stream"))
+            self.addCleanup(lambda: _stt())
+            m._resting_bytes = 0
+            m._headroom_bytes = lambda: int(200.0 * 6.0 * (2 ** 20) / 0.5)
+            m._scale_seen = 0
+            with mock.patch.object(m.cgroup, "read",
+                                   lambda: {"current": None, "max": None, "available": None}):
+                self.assertAlmostEqual(m._budget_now(), 50.0, places=3)
+                m._gpu_mode = lambda: "intel-gpu"
+                self.assertAlmostEqual(m._budget_now(), 200.0, places=3)
+                m._gpu_mode = lambda: "nvidia"
+                self.assertAlmostEqual(m._budget_now(), 200.0, places=3)
+
+    def test_a_plan_that_still_fits_is_left_alone(self):
+        m = self._module(200.0)
+        todo = [[(i, None, 4.0) for i in range(4)]]
+        self.assertIsNone(m._replan_over_budget(todo))
+
+
 class SmallerPlanLooksAtTheLargestGroupTest(unittest.TestCase):
     """🔴 `pack` sorts longest-span-first, so the FIRST group is headed by the longest span and
     therefore usually holds the FEWEST spans. Reading it said "smaller" while a later group of
@@ -1503,3 +1551,45 @@ class OneReadingPerPlanTest(unittest.TestCase):
             _groups, how = m._plan_groups([(i, None, 30.0) for i in range(8)])
         self.assertNotIn("bounded by the container", how,
                          "the line named an account the plan was not solved from")
+
+
+class OpenVINOReturnsTheArenaTest(unittest.TestCase):
+    """A finished OV call must hand glibc pages back. CUDA keeps empty_cache and does not trim."""
+
+    def test_ov_trims_and_cuda_does_not(self):
+        m = _stt()
+        trimmed = []
+        emptied = []
+
+        class _Cuda:
+            @staticmethod
+            def is_available():
+                return False
+
+            @staticmethod
+            def empty_cache():
+                emptied.append(True)
+
+        class _Libc:
+            @staticmethod
+            def malloc_trim(_pad):
+                trimmed.append(True)
+                return 1
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov"}, clear=False), \
+                mock.patch.object(m, "_is_ov", return_value=True), \
+                mock.patch.dict(sys.modules, {"torch": types.SimpleNamespace(cuda=_Cuda)}), \
+                mock.patch("ctypes.CDLL", return_value=_Libc):
+            m._drop_cache()
+        self.assertEqual(trimmed, [True])
+        self.assertEqual(emptied, [])
+
+        trimmed.clear()
+        cuda_on = types.SimpleNamespace(cuda=types.SimpleNamespace(
+            is_available=lambda: True, empty_cache=lambda: emptied.append(True)))
+        with mock.patch.object(m, "_is_ov", return_value=False), \
+                mock.patch.dict(sys.modules, {"torch": cuda_on}), \
+                mock.patch("ctypes.CDLL", return_value=_Libc):
+            m._drop_cache()
+        self.assertEqual(emptied, [True])
+        self.assertEqual(trimmed, [])

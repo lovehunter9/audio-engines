@@ -1023,6 +1023,16 @@ class OpenVINOModeTest(unittest.TestCase):
         finally:
             q._state["asr"] = asr
 
+    def test_ov_pad_mel_time_rounds_up_to_the_traced_window(self):
+        import numpy as np
+        from wrapper.ov_asr_batch import pad_mel_time
+
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 1301))).shape[-1], 1400)
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 489))).shape[-1], 500)
+        self.assertEqual(pad_mel_time(np.zeros((1, 128, 400))).shape[-1], 400)
+        kept = np.zeros((1, 128, 80))
+        self.assertEqual(int(pad_mel_time(kept, window=100).shape[-1]), 100)
+
     def test_ov_stack_encoder_hiddens_pads_to_the_intel_floor(self):
         import numpy as np
         from wrapper.ov_asr_batch import MIN_INTEL_GPU_ENCODER_FRAMES, stack_encoder_hiddens
@@ -1194,6 +1204,21 @@ class OpenVINOModeTest(unittest.TestCase):
              mock.patch("wrapper.gpu._quota_bytes", return_value=4 * 1024 ** 3):
             # 8Gi cgroup minus 3Gi current, not 4Gi tag minus 3Gi current.
             self.assertEqual(a._headroom_bytes(), 5 * 1024 ** 3)
+
+    def test_align_igpu_headroom_is_the_smaller_of_machine_and_container(self):
+        from wrapper.caps import align as a
+        from wrapper import cgroup
+
+        snap = {"current": 3 * 1024 ** 3, "max": 16 * 1024 ** 3,
+                "reclaimable": 0, "available": 4 * 1024 ** 3}
+        with mock.patch.object(a.ovutil, "is_ov", return_value=True), \
+             mock.patch.object(cgroup, "read", return_value=snap), \
+             mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}, clear=False):
+            self.assertEqual(a._headroom_bytes(), 4 * 1024 ** 3)
+        with mock.patch.object(a.ovutil, "is_ov", return_value=True), \
+             mock.patch.object(cgroup, "read", return_value=snap), \
+             mock.patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}, clear=False):
+            self.assertEqual(a._headroom_bytes(), 13 * 1024 ** 3)
 
     def test_align_ov_export_is_one_shot_asr_not_hf(self):
         from wrapper.caps import align as a
