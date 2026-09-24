@@ -810,8 +810,9 @@ def _headroom_bytes():
     if held is None:
         return None
     if _is_ov():
-        # REQUIRED_GPU_MEMORY is a scheduler tag here; unified memory is the container account.
-        return cgroup.headroom(cgroup.read())
+        # REQUIRED_GPU_MEMORY is a scheduler tag here. iGPU takes the smaller of the
+        # container and MemAvailable; Arc keeps the container account.
+        return cgroup.batch_headroom(cgroup.read(), _gpu_mode())
     hami = _hami_limit_bytes()
     if hami:
         # 🔴 A published limit does not mean the counters were rewritten to respect it (the
@@ -848,8 +849,9 @@ def _host_budget():
     # On iGPU the cgroup is what OOMKills, and that measurement is `_scale`.
     if _is_ov() and _gpu_mode() == "intel" and _scale_seen:
         per_second *= max(_scale, 1.0)
-    return grouping.budget_from_bytes(cgroup.headroom(cgroup.read()), per_second,
-                                      fraction=BUDGET_FRACTION)
+    snap = cgroup.read()
+    room = (cgroup.batch_headroom(snap, _gpu_mode()) if _is_ov() else cgroup.headroom(snap))
+    return grouping.budget_from_bytes(room, per_second, fraction=BUDGET_FRACTION)
 
 
 #: The headroom, and the two sides of the budget solved from it. 🔴 Kept so the health line quotes

@@ -783,14 +783,14 @@ def _headroom_bytes():
     Returns None, not 0, when no authority can be read: a quota that is spoken for is a
     real zero, and the two need different answers downstream.
 
-    OpenVINO has no CUDA counter: unified memory is the container account.
-    REQUIRED_GPU_MEMORY is a scheduler tag there, not an isolated heap. Mixing
-    that tag with cgroup current (grant minus held) priced JFK×8 as eight
-    singleton calls. Same account as ASR: the container's own headroom.
+    OpenVINO has no CUDA counter. REQUIRED_GPU_MEMORY is a scheduler tag there,
+    not an isolated heap. iGPU sizes against the smaller of the container and
+    MemAvailable, same as ASR. Arc keeps the container account.
     """
     global _no_grant_logged
     if ovutil.is_ov():
-        return cgroup.headroom(cgroup.read())
+        return cgroup.batch_headroom(
+            cgroup.read(), os.environ.get("OLARES_GPU_MODE") or "")
     import torch
 
     from .. import gpu
