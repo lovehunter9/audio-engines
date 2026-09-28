@@ -243,40 +243,44 @@ def _load_ov():
     # mmap of an intact IR on the hostPath raises SIGBUS (exit 135); read the file instead.
     core.set_property({"ENABLE_MMAP": False})
     props = {"CACHE_DIR": cache, "ENABLE_MMAP": False}
-    enc = core.compile_model(os.path.join(model_dir, "openvino_encoder_model.xml"), device, props)
-    dec = core.compile_model(os.path.join(model_dir, "openvino_decoder_model.xml"), device, props)
-    _p("align encoder inputs=%s outputs=%s" % (
-        [i.any_name for i in enc.inputs], [o.any_name for o in enc.outputs]))
-    _p("align decoder inputs=%s outputs=%s" % (
-        [i.any_name for i in dec.inputs], [o.any_name for o in dec.outputs]))
-    model = _OvAlign(
-        _OvPart(enc, "hidden", "last_hidden_state"),
-        _OvPart(dec, "logits", "logits"),
-    )
-    # Snapshot root, which has config.json. The IR directory is never a Hub repo id.
-    processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
-    raw = {}
-    cfg_path = os.path.join(src, "config.json")
-    if os.path.isfile(cfg_path):
-        with open(cfg_path) as f:
-            raw = json.load(f)
-    thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else {}
-    ts_id = int(raw.get("timestamp_token_id") or thinker.get("timestamp_token_id") or 0)
-    ts_seg = float(raw.get("timestamp_segment_time") or thinker.get("timestamp_segment_time") or 0)
-    _state.update(
-        model=model,
-        processor=processor,
-        aligner_processor=Qwen3ForceAlignProcessor(),
-        timestamp_token_id=ts_id,
-        timestamp_segment_time=ts_seg,
-        hf_config=raw,
-        device=device,
-        backend="openvino",
-    )
-    _d = _dims()
-    _rebind_span_limit(_d)
-    _reset_peak()
-    _calibrate()
+    # Hold the lock through calibration: that first GPU run must finish before the next engine compiles.
+    from ..ov_compile_lock import gpu_compile
+
+    with gpu_compile(device):
+        enc = core.compile_model(os.path.join(model_dir, "openvino_encoder_model.xml"), device, props)
+        dec = core.compile_model(os.path.join(model_dir, "openvino_decoder_model.xml"), device, props)
+        _p("align encoder inputs=%s outputs=%s" % (
+            [i.any_name for i in enc.inputs], [o.any_name for o in enc.outputs]))
+        _p("align decoder inputs=%s outputs=%s" % (
+            [i.any_name for i in dec.inputs], [o.any_name for o in dec.outputs]))
+        model = _OvAlign(
+            _OvPart(enc, "hidden", "last_hidden_state"),
+            _OvPart(dec, "logits", "logits"),
+        )
+        # Snapshot root, which has config.json. The IR directory is never a Hub repo id.
+        processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
+        raw = {}
+        cfg_path = os.path.join(src, "config.json")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path) as f:
+                raw = json.load(f)
+        thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else {}
+        ts_id = int(raw.get("timestamp_token_id") or thinker.get("timestamp_token_id") or 0)
+        ts_seg = float(raw.get("timestamp_segment_time") or thinker.get("timestamp_segment_time") or 0)
+        _state.update(
+            model=model,
+            processor=processor,
+            aligner_processor=Qwen3ForceAlignProcessor(),
+            timestamp_token_id=ts_id,
+            timestamp_segment_time=ts_seg,
+            hf_config=raw,
+            device=device,
+            backend="openvino",
+        )
+        _d = _dims()
+        _rebind_span_limit(_d)
+        _reset_peak()
+        _calibrate()
     _state["ready"] = True
     log.info("Qwen3-ForcedAligner %s loaded (openvino %s)", MODEL_REPO, device)
 
