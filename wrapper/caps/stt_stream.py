@@ -310,14 +310,18 @@ def _load_ov():
     os.makedirs(cache, exist_ok=True)
     _p("ASRPipeline(model=%s, device=%s, mmap=off)" % (model_dir, device))
     # mmap of an intact IR on the hostPath raises SIGBUS (exit 135); read the file instead.
-    pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache, ENABLE_MMAP=False)
-    _state["asr"] = pipe
-    from .. import ov_asr_batch
+    from ..ov_compile_lock import gpu_compile
 
-    _state["ov_batch"] = ov_asr_batch.Engine.load(model_dir, src, device, cache)
-    _state["backend"] = "openvino"
-    _say_repetition_once()
-    _warmup()
+    # Hold the lock through both compiles and the warmup. The IR export above stays outside it.
+    with gpu_compile(device):
+        pipe = ov_genai.ASRPipeline(model_dir, device, CACHE_DIR=cache, ENABLE_MMAP=False)
+        _state["asr"] = pipe
+        from .. import ov_asr_batch
+
+        _state["ov_batch"] = ov_asr_batch.Engine.load(model_dir, src, device, cache)
+        _state["backend"] = "openvino"
+        _say_repetition_once()
+        _warmup()
     _state["ready"] = True
     _p("engine READY: %s (openvino %s)" % (MODEL_REPO, device))
     log.info("openvino-genai ASR loaded: %s device=%s", MODEL_REPO, device)

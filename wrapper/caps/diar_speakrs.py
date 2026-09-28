@@ -297,6 +297,12 @@ TUNABLES = {
 _state = _runtime.state
 
 
+def _openvino_gpu_mode():
+    """OpenVINO aimed at a GPU. `openvino:CPU` is the processor and is left on the CUDA start path's shape: one start, no compile lock."""
+    mode = (EXECUTION_MODE or "").strip().lower()
+    return mode.startswith("openvino") and "cpu" not in mode
+
+
 class _Child:
     """The speakrs engine process, and the one-job-at-a-time protocol spoken to it.
 
@@ -330,6 +336,12 @@ class _Child:
         self._seq = 0
 
     def start(self):
+        # OpenVINO GPU starts once under the compile lock and retries a single startup SIGSEGV. CUDA starts once.
+        if _openvino_gpu_mode():
+            return self._start_openvino()
+        return self._start_once()
+
+    def _popen(self):
         log.info("starting engine: %s", " ".join(self._argv))
         self._proc = subprocess.Popen(
             self._argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -340,12 +352,60 @@ class _Child:
             # from the reaper, and it has to treat one of them wrongly.
             start_new_session=True,
         )
+        return self._proc
+
+    def _arm_reap(self):
         threading.Thread(target=self._reap, daemon=True).start()
+
+    def _start_once(self):
+        self._popen()
+        self._arm_reap()
         hello = self._readline("startup")
         if not hello.get("ready"):
             raise RuntimeError(hello.get("error") or "engine failed to load the model")
         log.info("engine ready on %s in %.1fs", hello.get("device"), hello.get("load_seconds") or 0)
         return hello
+
+    def _start_openvino(self):
+        """Compile under the shared GPU lock, and replace one startup SIGSEGV with a second child instead of a kube restart."""
+        from ..ov_compile_lock import gpu_compile
+
+        with gpu_compile("GPU"):
+            for attempt in (1, 2):
+                self._popen()
+                try:
+                    hello = self._readline("startup")
+                except RuntimeError:
+                    rc = self._proc.poll()
+                    if rc is None:
+                        self._arm_reap()
+                        raise
+                    rc = self._proc.wait()
+                    if attempt == 1 and rc == -11:
+                        log.error("engine process exited with code -11 during startup; "
+                                  "starting it once more")
+                        continue
+                    self._exit_like_reap(rc)
+                    raise RuntimeError("engine process exited with code %d" % rc)
+                if not hello.get("ready"):
+                    self._arm_reap()
+                    raise RuntimeError(hello.get("error") or "engine failed to load the model")
+                self._arm_reap()
+                log.info("engine ready on %s in %.1fs",
+                         hello.get("device"), hello.get("load_seconds") or 0)
+                return hello
+        raise RuntimeError("engine failed to load the model")
+
+    def _exit_like_reap(self, rc):
+        """The same exit _reap uses, for a child that died before the reaper was armed."""
+        _state["ready"] = False
+        _state["error"] = "engine process exited with code %d" % rc
+        if _stopping.is_set():
+            log.info("engine process exited with code %d during shutdown", rc)
+            return
+        log.error("engine process exited with code %d; exiting so the container is restarted", rc)
+        time.sleep(_EXIT_GRACE_S)
+        _exit(watchdog.EXIT_CODE)
 
     def _reap(self):
         """A child that dies takes the engine with it, and nothing here can put it back.
