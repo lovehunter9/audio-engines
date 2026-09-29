@@ -4,6 +4,7 @@ import json
 import glob
 import asyncio
 import logging
+import threading
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -52,8 +53,14 @@ WINDOW_SEC = 60.0
 OVERLAP_SEC = 12.0
 
 _state = _runtime.state
-# Sortformer's diarize() is blocking and not concurrency-safe, so inference is serialized.
-_infer_lock = asyncio.Lock()
+# Sortformer's diarize() is blocking and not concurrency-safe. A threading lock so an
+# offline POST on the task worker and this socket can share one gate.
+_infer_lock = threading.Lock()
+
+
+def _call_locked(fn, *args):
+    with _infer_lock:
+        return fn(*args)
 
 
 def _p(msg):
@@ -298,11 +305,10 @@ async def _run_streaming(ws):
         await ws.send_text(json.dumps({"type": kind, "segments": segs, "speakers": speakers}))
 
     # Pre-flight: prove the streaming API works BEFORE consuming client audio.
-    async with _infer_lock:
-        try:
-            await asyncio.to_thread(_selftest)
-        except Exception as e:
-            raise _FallbackToWindow("%s: %s" % (type(e).__name__, e))
+    try:
+        await asyncio.to_thread(_call_locked, _selftest)
+    except Exception as e:
+        raise _FallbackToWindow("%s: %s" % (type(e).__name__, e))
     _p("streaming path active (chunk=%d frames rc=%d keep=%d chunks frame=%.3fs n_spk=%d)"
        % (CS, rc_frames, keep_chunks, frame_sec, n_spk))
 
@@ -335,14 +341,12 @@ async def _run_streaming(ws):
         total_new += int(seg.shape[0])
         if new_samples >= step_samples:
             new_samples = 0
-            async with _infer_lock:
-                await asyncio.to_thread(_process)
+            await asyncio.to_thread(_call_locked, _process)
             if total_new - last_emit >= step_samples:
                 last_emit = total_new
                 await _send("partial")
     # Feed the remaining chunks, accepting rc=0 on the trailing one.
-    async with _infer_lock:
-        await asyncio.to_thread(_process, True)
+    await asyncio.to_thread(_call_locked, _process, True)
     await _send("final")
     await _send_closed(ws, total_new)
     await ws.close()
@@ -402,8 +406,7 @@ async def _run_window(ws):
         # Diarize only the active window, returning canonical absolute-time segments.
         if buf.shape[0] < min_samples:
             return []
-        async with _infer_lock:
-            local = await asyncio.to_thread(_diarize, buf)   # times relative to buf[0]
+        local = await asyncio.to_thread(_call_locked, _diarize, buf)   # times relative to buf[0]
         local_abs = [{"start": s["start"] + base_offset, "end": s["end"] + base_offset,
                       "speaker": s["speaker"]} for s in local]
         return _relabel(local_abs)

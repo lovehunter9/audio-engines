@@ -32,6 +32,11 @@ BASES = {
     "nemo": [
         (("diar_stream",), "diar_stream"),
     ],
+    # Nemotron 3: one Sortformer checkpoint, offline diarize() and the streaming step API.
+    # Its own image because audio-nemo is the 26.02 training container, which this does not use.
+    "nemotron": [
+        (("diar", "diar_stream"), "diar_nemotron"),
+    ],
     # speakrs: the pyannote community-1 pipeline rewritten in Rust, inference on ONNX Runtime.
     # A separate image because its dependencies share nothing with the torch stack, per the one
     # image per engine family rule. pyannote keeps its own diar: which of the two an installation
@@ -89,6 +94,7 @@ FAMILIES = {
     "embed": "pyannote",
     "enhance": "speechbrain",
     "diar_stream": "nemo-sortformer",
+    "diar_nemotron": "nemotron-3-diarization",
     "tts": "qwen3-tts",
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
@@ -144,6 +150,14 @@ _MOUNTS = {
          "Speech enhancement / denoise (16k mono, format=wav|flac|ogg, default wav)", True),
     ],
     ("diar_stream", "diar_stream"): [
+        ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
+    ],
+    ("diar_nemotron", "diar"): [
+        ("POST", "/v1/audio/diarization",
+         "Speaker diarization (who spoke when; up to 8 arrival-order channels, overlap kept)",
+         True),
+    ],
+    ("diar_nemotron", "diar_stream"): [
         ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
     ],
     ("tts", "tts"): [

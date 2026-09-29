@@ -927,6 +927,50 @@ def t_diar_stream_offline():
           "shared cache" in err and "offline" in err, err[:160])
 
 
+def t_diar_nemotron_offline():
+    """Same offline-cache rule as diar_stream, on the Nemotron checkpoint."""
+    from wrapper.caps import diar_nemotron
+    from wrapper.caps import diar_stream
+
+    fetched = []
+    mods = {
+        "torch": {"cuda": types.SimpleNamespace(is_available=lambda: False)},
+        "nemo": {},
+        "nemo.collections": {},
+        "nemo.collections.asr": {},
+        "nemo.collections.asr.models": {
+            "SortformerEncLabelModel": types.SimpleNamespace(
+                restore_from=lambda **k: None,
+                from_pretrained=lambda *a, **k: fetched.append(a) or None)},
+    }
+    saved = {name: sys.modules.get(name) for name in mods}
+    for name, attrs in mods.items():
+        mod = types.ModuleType(name)
+        for key, value in attrs.items():
+            setattr(mod, key, value)
+        sys.modules[name] = mod
+
+    real_find = diar_nemotron._find_nemo
+    saved_state, saved_lock = diar_stream._state, diar_stream._infer_lock
+    diar_nemotron._find_nemo = lambda: None
+    try:
+        diar_nemotron._state["error"] = None
+        diar_nemotron._load()
+    finally:
+        diar_nemotron._find_nemo = real_find
+        diar_stream._state, diar_stream._infer_lock = saved_state, saved_lock
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+    check("diar_nemotron does not reach for the hub when the cache is empty",
+          fetched == [], fetched)
+    err = diar_nemotron._state["error"] or ""
+    check("diar_nemotron fails naming the empty cache rather than reaching for the hub",
+          "shared cache" in err and "offline" in err, err[:160])
+
+
 def t_embed():
     from fastapi.testclient import TestClient
     from wrapper.caps import embed
@@ -5861,6 +5905,7 @@ def main():
                            ("diar_speakrs openvino models dir",
                             t_diar_speakrs_openvino_models_dir, "speakrs"),
                            ("diar_stream offline", t_diar_stream_offline, "nemo"),
+                           ("diar_nemotron offline", t_diar_nemotron_offline, "nemotron"),
                            ("align batching", t_align_batching, "qwen")):
         print("\n[%s]" % name)
         os.environ["AUDIO_BASE"] = base

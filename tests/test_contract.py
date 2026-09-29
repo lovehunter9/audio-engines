@@ -32,6 +32,10 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("diar_stream", "diar_stream", "WS", "/v1/audio/diarize/stream"): {
         "async_supported": False,
     },
+    ("diar_nemotron", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
+    ("diar_nemotron", "diar_stream", "WS", "/v1/audio/diarize/stream"): {
+        "async_supported": False,
+    },
     ("embed", "speaker_embed", "POST", "/v1/audio/embeddings"): {
         "async_supported": True,
     },
@@ -460,6 +464,12 @@ class RuntimeHelperTest(unittest.TestCase):
             "diar_stream": {
                 "supports": ["diar_stream"],
                 "watchdog": "streaming sortformer",
+                "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
+                "disable_ws_ping": True,
+            },
+            "diar_nemotron": {
+                "supports": ["diar", "diar_stream"],
+                "watchdog": "nemotron diarization",
                 "state": {"ready": False, "error": None, "model": None, "device": "cpu"},
                 "disable_ws_ping": True,
             },
@@ -2280,7 +2290,7 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
 
     def test_torch_install_and_cuda_strip_share_one_run(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
-        for name in ("pyannote", "firered", "breeze", "qwen"):
+        for name in ("pyannote", "firered", "breeze", "qwen", "nemotron"):
             path = os.path.join(root, name, "deps.Dockerfile")
             with open(path) as fh:
                 text = fh.read()
@@ -2330,6 +2340,111 @@ class SlimRuntimeRecipeTest(unittest.TestCase):
             "cuda-toolkit",
             "triton",
         ])
+
+
+class NemotronRecipeTest(unittest.TestCase):
+    """Nemotron 3 rides NeMo's Sortformer, on its own CUDA runtime, not the NGC image."""
+
+    ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def test_official_latency_presets(self):
+        from wrapper.caps.diar_nemotron import _PRESETS
+
+        want = {"high": 30.4, "low": 1.04, "verylow": 0.64, "ultralow": 0.32}
+        self.assertEqual(set(_PRESETS), set(want))
+        for name, (chunk, right, *_rest) in _PRESETS.items():
+            self.assertAlmostEqual((chunk + right) * 0.08, want[name], places=2)
+
+    def test_image_is_not_the_training_container(self):
+        path = os.path.join(self.ROOT, "bases/nemotron/deps.Dockerfile")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        froms = "\n".join(line for line in text.splitlines() if line.startswith("FROM "))
+        self.assertNotIn("nvidia-nemo", froms)
+        self.assertNotIn("nvcr.io", froms)
+        self.assertIn('nemo-toolkit[asr]==3.0.0', text)
+        self.assertNotIn("onnx==", text)
+
+    def test_every_flag_is_claimed_before_the_leftovers_are_reported(self):
+        path = os.path.join(self.ROOT, "wrapper/caps/diar_nemotron.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        warn = text.index("_args.warn_unclaimed(")
+        for needle in (
+            '--latency-preset',
+            '--chunk-len',
+            '--right-context',
+            '--fifo-len',
+            '--update-period',
+            '--spkcache-len',
+            "BOUNDS = Bounds(",
+        ):
+            self.assertLess(text.index(needle), warn, needle)
+
+    def test_preset_and_upload_bounds_come_from_engine_args(self):
+        from wrapper.caps import diar_nemotron
+
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {"ENGINE_ARGS": "--latency-preset low --max-audio-seconds 90 --max-upload-mb 8"},
+                clear=False,
+            ):
+                mod = importlib.reload(diar_nemotron)
+                self.assertEqual(mod._preset, "low")
+                self.assertEqual(mod.CHUNK_LEN, 9)
+                self.assertEqual(mod.RIGHT_CONTEXT, 4)
+                self.assertEqual(mod.BOUNDS.seconds, 90.0)
+                self.assertEqual(mod.BOUNDS.megabytes, 8.0)
+                self.assertEqual(mod._args.passthrough(), [])
+        finally:
+            with mock.patch.dict(os.environ, {"ENGINE_ARGS": ""}, clear=False):
+                importlib.reload(diar_nemotron)
+
+    def test_both_caps_and_the_shared_surface_are_declared(self):
+        from fastapi.testclient import TestClient
+
+        from wrapper.caps import diar_nemotron
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AUDIO_BASE": "nemotron",
+                "MODEL_SUPPORTS": "supports_diar,supports_diar_stream",
+                "MODEL_NAME": "nemotron-3",
+            },
+            clear=False,
+        ):
+            app = diar_nemotron.build_app(["diar", "diar_stream"])
+        with TestClient(app) as client:
+            self.assertEqual(client.get("/health").status_code, 503)
+            self.assertEqual(client.get("/healthz").status_code, 503)
+            self.assertEqual(client.get("/readyz").status_code, 503)
+            self.assertEqual(client.get("/v1/models").status_code, 503)
+            self.assertEqual(client.get("/api/engine-capacity").json(), {"max_concurrency": 1})
+            spec = client.get("/api/engine-spec").json()
+            body = client.get("/metrics").text
+        self.assertEqual(spec["implements"], ["diar", "diar_stream"])
+        self.assertEqual(spec["declares"], ["diar", "diar_stream"])
+        self.assertEqual(spec["serves"], ["diar", "diar_stream"])
+        by_op = {row["operation_id"]: row for row in spec["endpoints"]}
+        self.assertEqual(by_op["audio.diarize"]["method"], "POST")
+        self.assertEqual(by_op["audio.diarize"]["path"], "/v1/audio/diarization")
+        self.assertTrue(by_op["audio.diarize"]["available"])
+        self.assertTrue(by_op["audio.diarize"]["async_supported"])
+        self.assertEqual(by_op["audio.diarize.stream"]["method"], "WS")
+        self.assertEqual(by_op["audio.diarize.stream"]["path"], "/v1/audio/diarize/stream")
+        self.assertTrue(by_op["audio.diarize.stream"]["available"])
+        self.assertFalse(by_op["audio.diarize.stream"]["async_supported"])
+        gauges = {
+            line.split()[0]
+            for line in body.splitlines()
+            if line and not line.startswith("#")
+        }
+        self.assertEqual(
+            gauges,
+            {"gpu_present", "gpu_mem_used_bytes", "gpu_mem_total_bytes", "gpu_util_ratio"},
+        )
 
 
 class BaseRegistrationTests(unittest.TestCase):
