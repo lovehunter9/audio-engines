@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import unittest
@@ -2362,8 +2363,39 @@ class NemotronRecipeTest(unittest.TestCase):
         froms = "\n".join(line for line in text.splitlines() if line.startswith("FROM "))
         self.assertNotIn("nvidia-nemo", froms)
         self.assertNotIn("nvcr.io", froms)
-        self.assertIn('nemo-toolkit[asr]==3.0.0', text)
+        # 3.0.0 has no rope TransformerEncoder; the pinned Speech commit does, on compiled FlexAttention.
+        self.assertRegex(text, r"ARG NEMO_REF=[0-9a-f]{40}\n")
+        self.assertIn("NVIDIA-NeMo/Speech/archive/${NEMO_REF}.tar.gz", text)
+        self.assertNotIn("nemo-toolkit[asr]==", text)
+        self.assertIn("self_attention_model='rope'", text)
+        self.assertLess(text.index("sh /tmp/strip_unused_cuda.sh"), text.index('"${TRITON}"'))
+        self.assertIn("gcc libc6-dev", text)
         self.assertNotIn("onnx==", text)
+
+    def test_repo_id_drops_llm_init_flags_and_stays_in_its_own_snapshots(self):
+        from wrapper.caps import diar_nemotron
+
+        cache = tempfile.mkdtemp()
+        try:
+            other = os.path.join(cache, "models--nvidia--diar_sortformer", "snapshots", "a")
+            os.makedirs(other)
+            open(os.path.join(other, "other.nemo"), "w").close()
+            env = {
+                "MODEL_SOURCE": "hf://nvidia/Nemotron-3-Diarization --include Nemotron-3-Diarization.nemo",
+                "HF_HUB_CACHE": cache,
+            }
+            with mock.patch.dict(os.environ, env, clear=False):
+                mod = importlib.reload(diar_nemotron)
+                self.assertEqual(mod.MODEL_REPO, "nvidia/Nemotron-3-Diarization")
+                self.assertIsNone(mod._find_nemo())
+                mine = os.path.join(cache, "models--nvidia--Nemotron-3-Diarization", "snapshots", "b")
+                os.makedirs(mine)
+                open(os.path.join(mine, "Nemotron-3-Diarization.nemo"), "w").close()
+                self.assertEqual(mod._find_nemo(), os.path.join(mine, "Nemotron-3-Diarization.nemo"))
+        finally:
+            shutil.rmtree(cache, ignore_errors=True)
+            with mock.patch.dict(os.environ, {"MODEL_SOURCE": ""}, clear=False):
+                importlib.reload(diar_nemotron)
 
     def test_every_flag_is_claimed_before_the_leftovers_are_reported(self):
         path = os.path.join(self.ROOT, "wrapper/caps/diar_nemotron.py")
