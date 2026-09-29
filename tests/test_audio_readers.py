@@ -112,6 +112,7 @@ class WhoMeasuresWhat(unittest.TestCase):
                                      "three readers cannot measure is one the engine fails "
                                      "on by itself"),
         "diar": (("Bounds",), "shared upload guard"),
+        "diar_nemotron": (("Bounds",), "shared upload guard"),
         "diar_speakrs": (("Bounds",), "shared upload guard"),
         "embed": (("Bounds",), "shared upload guard"),
         "enhance": (("Bounds",), "shared upload guard"),
