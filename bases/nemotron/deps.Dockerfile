@@ -18,6 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 # The rope encoder runs torch.compile(flex_attention) on CUDA; the shared strip drops triton, so torch's own pin goes back after it.
+# Jammy's pip 22.0.2 reads no Requires-Dist from the Speech source wheel (Metadata-Version 2.4), so pip is upgraded first.
 RUN set -eux; \
     if [ "${TARGETARCH}" = "arm64" ]; then \
         IDX=https://download.pytorch.org/whl/cu130; \
@@ -28,6 +29,7 @@ RUN set -eux; \
         python3 python3-pip ffmpeg libsndfile1 ca-certificates; \
     rm -rf /var/lib/apt/lists/*; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
+    python3 -m pip install --no-cache-dir -U pip; \
     python3 -m pip install --no-cache-dir \
         torch torchaudio --index-url "${IDX}"; \
     python3 -m pip freeze | grep -E '^(torch|torchaudio)==' > /tmp/torch.pin; \

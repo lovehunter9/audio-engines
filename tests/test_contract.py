@@ -2367,6 +2367,7 @@ class NemotronRecipeTest(unittest.TestCase):
         self.assertRegex(text, r"ARG NEMO_REF=[0-9a-f]{40}\n")
         self.assertIn("NVIDIA-NeMo/Speech/archive/${NEMO_REF}.tar.gz", text)
         self.assertNotIn("nemo-toolkit[asr]==", text)
+        self.assertLess(text.index("pip install --no-cache-dir -U pip"), text.index("NVIDIA-NeMo/Speech/archive"))
         self.assertIn("self_attention_model='rope'", text)
         self.assertLess(text.index("sh /tmp/strip_unused_cuda.sh"), text.index('"${TRITON}"'))
         self.assertIn("gcc libc6-dev", text)
