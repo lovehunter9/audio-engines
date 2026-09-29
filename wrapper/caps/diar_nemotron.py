@@ -20,7 +20,8 @@ log = logging.getLogger("audio-diar-nemotron")
 
 _runtime = Runtime(model=None, device="cpu")
 MODEL_NAME = _runtime.model_name
-MODEL_REPO = _runtime.model_repo
+# MODEL_SOURCE carries llm-init flags (--include ...) after the repo id.
+MODEL_REPO = (_runtime.model_repo.split() or [""])[0]
 PORT = _runtime.port
 
 # Official input-buffer configs, 80 ms frames: (chunk, right context, fifo, update, speaker cache).
@@ -63,13 +64,10 @@ def _bind_stream():
 def _find_nemo():
     cache = (os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
              or "/cache/hf/hub")
+    # Only this repo's snapshots: the hub cache is shared, and another model's .nemo would load silently.
     repo = "models--" + MODEL_REPO.replace("/", "--")
-    for pat in (os.path.join(cache, repo, "snapshots", "*", "*.nemo"),
-                os.path.join(cache, "**", "*.nemo")):
-        hits = sorted(glob.glob(pat, recursive=True))
-        if hits:
-            return hits[0]
-    return None
+    hits = sorted(glob.glob(os.path.join(cache, repo, "snapshots", "*", "*.nemo")))
+    return hits[0] if hits else None
 
 
 def _load():
