@@ -44,6 +44,11 @@ RIGHT_CONTEXT = _args.count("--right-context", _base[1])
 FIFO_LEN = _args.count("--fifo-len", _base[2])
 UPDATE_PERIOD = _args.count("--update-period", _base[3])
 SPKCACHE_LEN = _args.count("--spkcache-len", _base[4])
+# Same meaning as pyannote's: fill a same-speaker pause shorter than off, then drop a turn shorter than on.
+MIN_DURATION_OFF = _args.number("--min-duration-off", 0.8)
+MIN_DURATION_ON = _args.number("--min-duration-on", 0.0)
+# Sortformer keeps its neighbour-only merge; Nemotron binds True.
+PER_SPEAKER = False
 _args.warn_unclaimed(log)
 
 STEP_SEC = 2.0   # partial every N s of audio
@@ -176,8 +181,46 @@ def _merge_segments(segs, gap=0.8):
     return out
 
 
-def _preds_to_segments(preds, frame_sec, thr=0.5):
-    # preds [T, n_spk] of activity per 80ms frame; AOSC pins column k to one speaker, so no remap.
+def _seconds(value, default, name):
+    # A per-request knob: absent means the engine's value, anything else must be a finite >= 0.
+    if value is None or str(value).strip() == "":
+        return float(default)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a number of seconds, got %r" % (name, value))
+    if not (v >= 0.0 and v != float("inf")):
+        raise ValueError("%s must be a finite number of seconds >= 0, got %r" % (name, value))
+    return v
+
+
+def _fill_pauses(segs, off):
+    # Each speaker on its own, like pyannote's min_duration_off: another voice in the pause does not block it.
+    by = {}
+    for s in sorted(segs, key=lambda x: (x["start"], x["end"])):
+        run = by.setdefault(s["speaker"], [])
+        if run and s["start"] - run[-1]["end"] <= off:
+            run[-1]["end"] = max(run[-1]["end"], s["end"])
+        else:
+            run.append({"start": round(float(s["start"]), 3),
+                        "end": round(float(s["end"]), 3), "speaker": s["speaker"]})
+    return sorted((x for run in by.values() for x in run), key=lambda x: (x["start"], x["end"]))
+
+
+def _tidy(segs, off, on):
+    out = _fill_pauses(segs, off) if PER_SPEAKER else _merge_segments(segs, gap=off)
+    return [s for s in out if s["end"] - s["start"] >= on] if on > 0 else out
+
+
+def _frame_sec(model, sub):
+    # A high-resolution head emits one row per output_subsampling_factor 10ms frames, not per encoder frame.
+    if getattr(model, "high_resolution", False):
+        return max(1, int(getattr(model, "output_subsampling_factor", 1) or 1)) * 0.01
+    return sub * 0.01
+
+
+def _preds_to_segments(preds, frame_sec, off=None, on=None, thr=0.5):
+    # preds [T, n_spk] of activity per frame_sec row; AOSC pins column k to one speaker, so no remap.
     out = []
     if preds is None or getattr(preds, "size", 0) == 0:
         return out
@@ -198,7 +241,8 @@ def _preds_to_segments(preds, frame_sec, thr=0.5):
                 i = j + 1
             else:
                 i += 1
-    return _merge_segments(out)
+    return _tidy(out, MIN_DURATION_OFF if off is None else off,
+                 MIN_DURATION_ON if on is None else on)
 
 
 def _diarize(buf):
@@ -206,6 +250,12 @@ def _diarize(buf):
     model = _state["model"]
     res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
     return _parse_segments(res[0] if res else [])
+
+
+def _start_knobs(obj, knobs):
+    # Per-connection overrides ride on the start message; a bad one ends the socket with an error.
+    knobs["off"] = _seconds(obj.get("min_duration_off"), knobs["off"], "min_duration_off")
+    knobs["on"] = _seconds(obj.get("min_duration_on"), knobs["on"], "min_duration_on")
 
 
 class _FallbackToWindow(Exception):
@@ -231,7 +281,7 @@ async def _run_streaming(ws):
     device = _state["device"]
     n_spk = _state["n_spk"]
     sub = _state["subsampling"]
-    frame_sec = sub * 0.01                      # 80ms output frame (sub * 10ms hop)
+    frame_sec = _frame_sec(model, sub)          # seconds per row of total_preds
     hop = 160                                   # samples per 10ms preprocessor frame @16k
     CS = max(1, int(sm.chunk_len) * sub)        # feat frames committed per chunk
     CRs = int(getattr(sm, "chunk_right_context", 0)) * sub   # feat frames of right context
@@ -242,6 +292,7 @@ async def _run_streaming(ws):
     keep_chunks = max(8, int(WINDOW_SEC * 16000) // chunk_audio)
     sample_rate = 16000
     buf = np.zeros((0,), dtype="float32")
+    knobs = {"off": MIN_DURATION_OFF, "on": MIN_DURATION_ON}
     ss = {"state": None, "preds": None}
     st = {"base_chunks": 0, "committed": 0}      # chunks dropped from buf front / total fed
 
@@ -297,7 +348,7 @@ async def _run_streaming(ws):
         if p is None or p.shape[1] == 0:
             return []
         arr = p[0].detach().float().cpu().numpy()
-        return _preds_to_segments(arr, frame_sec)
+        return _preds_to_segments(arr, frame_sec, knobs["off"], knobs["on"])
 
     async def _send(kind):
         segs = await asyncio.to_thread(_segments)
@@ -328,6 +379,7 @@ async def _run_streaming(ws):
             t = obj.get("type")
             if t == "start":
                 sample_rate = int(obj.get("sample_rate") or 16000)
+                _start_knobs(obj, knobs)
                 continue
             if t in ("stop", "done", "finish"):
                 break
@@ -369,6 +421,7 @@ async def _run_window(ws):
     overlap_ref = []         # ABS canonical segs over the retained tail (remap ref)
     win_map = {}             # local spk -> canonical spk for the CURRENT window
     canon = {"n": 0}         # next canonical speaker index
+    knobs = {"off": MIN_DURATION_OFF, "on": MIN_DURATION_ON}
 
     def _relabel(local_abs):
         # Window labels are AOSC-stable, so after a roll anchor them by max overlap with the tail.
@@ -422,7 +475,7 @@ async def _run_window(ws):
             if s["start"] < boundary:
                 committed.append({"start": s["start"], "end": min(s["end"], boundary),
                                   "speaker": s["speaker"]})
-        committed = _merge_segments(committed)
+        committed = _tidy(committed, knobs["off"], 0.0)
         overlap_ref = [{"start": max(s["start"], boundary), "end": s["end"],
                         "speaker": s["speaker"]} for s in cur if s["end"] > boundary]
         base_offset = boundary
@@ -430,7 +483,7 @@ async def _run_window(ws):
         win_map = {}   # rebuilt on the next _current() via overlap_ref
 
     async def _send(kind, cur):
-        full = _merge_segments(committed + cur)
+        full = _tidy(committed + cur, knobs["off"], knobs["on"])
         speakers = sorted({s["speaker"] for s in full})
         await ws.send_text(json.dumps({"type": kind, "segments": full, "speakers": speakers}))
 
@@ -447,6 +500,7 @@ async def _run_window(ws):
             t = obj.get("type")
             if t == "start":
                 sample_rate = int(obj.get("sample_rate") or 16000)
+                _start_knobs(obj, knobs)
                 continue
             if t in ("stop", "done", "finish"):
                 break
