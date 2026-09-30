@@ -571,6 +571,12 @@ Latency presets are the model's 80 ms-frame configs, via `ENGINE_ARGS
 five `--chunk-len` / `--right-context` / `--fifo-len` / `--update-period` /
 `--spkcache-len` overrides). Arrival order, at most 8 channels, overlap kept.
 `num_speakers` and `exclusive` are accepted on the form and ignored.
+The checkpoint emits one row per 10 ms (`high_resolution`) and marks word-level
+activity, so both paths fill a same-speaker pause shorter than
+`--min-duration-off` (default **1.25** s, per speaker as in pyannote) and then drop
+turns shorter than `--min-duration-on` (default 0). One job overrides either with
+the form fields `min_duration_off` / `min_duration_on`, one socket with the same
+keys on its `start` message; the POST response echoes both.
 
 **`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
 other bases apply: no KV cache, no autoregression, and `generate()` denoises a

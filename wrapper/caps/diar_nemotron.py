@@ -44,9 +44,18 @@ RIGHT_CONTEXT = _args.count("--right-context", _base[1])
 FIFO_LEN = _args.count("--fifo-len", _base[2])
 UPDATE_PERIOD = _args.count("--update-period", _base[3])
 SPKCACHE_LEN = _args.count("--spkcache-len", _base[4])
+# The model marks word-level activity; 1.25s bridges it to turn-level on AMI, offline and streaming alike.
+MIN_DURATION_OFF = _args.number("--min-duration-off", 1.25)
+MIN_DURATION_ON = _args.number("--min-duration-on", 0.0)
 # Claimed before warn_unclaimed: a flag read after that line is logged as one this engine ignores.
 BOUNDS = Bounds(_args, seconds=14400)
 _args.warn_unclaimed(log)
+try:
+    MIN_DURATION_OFF = stream._seconds(MIN_DURATION_OFF, 1.25, "--min-duration-off")
+    MIN_DURATION_ON = stream._seconds(MIN_DURATION_ON, 0.0, "--min-duration-on")
+except ValueError as e:
+    log.warning("%s; using 1.25 / 0", e)
+    MIN_DURATION_OFF, MIN_DURATION_ON = 1.25, 0.0
 _state = _runtime.state
 _infer_lock = threading.Lock()
 
@@ -59,6 +68,9 @@ def _bind_stream():
     # The socket runner lives in diar_stream and reads that module's globals.
     stream._state = _state
     stream._infer_lock = _infer_lock
+    stream.MIN_DURATION_OFF = MIN_DURATION_OFF
+    stream.MIN_DURATION_ON = MIN_DURATION_ON
+    stream.PER_SPEAKER = True
 
 
 def _find_nemo():
@@ -135,9 +147,16 @@ def build_app(supports):
     @app.post("/v1/audio/diarization")
     async def diarize(file: UploadFile = File(...), num_speakers: str = Form(default=None),
                       exclusive: str = Form(default=None),
+                      min_duration_off: str = Form(default=None),
+                      min_duration_on: str = Form(default=None),
                       async_: str = Form(default=None, alias="async")):
         if not _state["ready"]:
             raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
+        try:
+            off = stream._seconds(min_duration_off, MIN_DURATION_OFF, "min_duration_off")
+            on = stream._seconds(min_duration_on, MIN_DURATION_ON, "min_duration_on")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         if num_speakers or (exclusive is not None and tasks.truthy(exclusive)):
             log.info("num_speakers/exclusive are pyannote knobs; this checkpoint ignores them")
         path, _seconds = await BOUNDS.spill(
@@ -149,12 +168,13 @@ def build_app(supports):
             dur = float(audio.shape[0]) / 16000.0
             ctx.meter(input_seconds=dur)
             res = _state["model"].diarize(audio=[audio], batch_size=1, sample_rate=16000)
-            segs = stream._parse_segments(res[0] if res else [])
+            segs = stream._tidy(stream._parse_segments(res[0] if res else []), off, on)
             speakers = sorted({s["speaker"] for s in segs})
             ctx.progress(ratio=1.0, stage="done")
             return {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
                     "num_speakers": len(speakers), "speakers": speakers,
-                    "num_segments": len(segs), "segments": segs, "exclusive": False}
+                    "num_segments": len(segs), "segments": segs, "exclusive": False,
+                    "min_duration_off": off, "min_duration_on": on}
 
         return await tasks.dispatch(async_, "diar", MODEL_NAME, _work, gate=_infer_lock,
                                     cleanup=lambda: unlink(path), fail="diarization failed")
