@@ -31,12 +31,13 @@ def gone(path):
 
 
 # Never mapped: cuDNN's legacy sub-libraries (torch drives the graph API), profiler and linalg libs.
+# triton/backends/amd stays: triton imports every backend package when it enumerates them.
 for pat in ("nvidia/cudnn/lib/libcudnn_adv.so*", "nvidia/cudnn/lib/libcudnn_ops.so*",
             "nvidia/cudnn/lib/libcudnn_cnn.so*", "nvidia/cudnn/lib/libcudnn_ext.so*",
             "nvidia/*/lib/libnvperf_host.so*", "nvidia/*/lib/libnvperf_target.so*",
             "nvidia/*/lib/libcheckpoint.so*", "nvidia/*/lib/libcufftw.so*",
             "torch/lib/libtorch_cuda_linalg.so",
-            "triton/backends/amd", "triton/backends/nvidia/lib/cupti*",
+            "triton/backends/nvidia/lib/cupti*",
             "triton/backends/nvidia/bin/cuobjdump*", "triton/backends/nvidia/bin/nvdisasm*"):
     for path in glob.glob(os.path.join(site, pat)):
         gone(path)
