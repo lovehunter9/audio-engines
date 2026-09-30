@@ -17,6 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_ROOT_USER_ACTION=ignore
 
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
+COPY bases/nemotron/slim.sh /tmp/nemotron_slim.sh
 # The rope encoder runs torch.compile(flex_attention) on CUDA; the shared strip drops triton, so torch's own pin goes back after it.
 # Jammy's pip 22.0.2 reads no Requires-Dist from the Speech source wheel (Metadata-Version 2.4), so pip is upgraded first.
 RUN set -eux; \
@@ -41,7 +42,8 @@ RUN set -eux; \
     TRITON=$(python3 -c "import importlib.metadata as m; print(next(r.split(';')[0].strip() for r in (m.requires('torch') or []) if r.startswith(('triton', 'pytorch-triton'))))"); \
     python3 -m pip install --no-cache-dir --no-deps \
         --index-url "${IDX}" --extra-index-url https://pypi.org/simple "${TRITON}"; \
-    rm -f /tmp/strip_unused_cuda.sh /tmp/torch.pin
+    sh /tmp/nemotron_slim.sh; \
+    rm -f /tmp/strip_unused_cuda.sh /tmp/nemotron_slim.sh /tmp/torch.pin
 
 FROM ${TARGETARCH} AS release
 ARG TARGETARCH
