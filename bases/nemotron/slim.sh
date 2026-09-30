@@ -43,7 +43,9 @@ for pat in ("nvidia/cudnn/lib/libcudnn_adv.so*", "nvidia/cudnn/lib/libcudnn_ops.
         gone(path)
 
 
-def symbols(path):
+def symbols(path, prefix):
+    # Only the library's own API: amd64 cusparseLt also exports its static libstdc++, and a stub
+    # of std::string would interpose on every other library's.
     out = subprocess.check_output(["readelf", "-W", "--dyn-syms", path], text=True)
     funcs, objs = set(), {}
     for line in out.splitlines():
@@ -51,7 +53,7 @@ def symbols(path):
         if len(f) < 8 or f[6] == "UND" or f[4] not in ("GLOBAL", "WEAK"):
             continue
         name = f[7].split("@")[0]
-        if not name.isidentifier() or name in ("_init", "_fini"):
+        if not name.startswith(prefix) or not name.isidentifier():
             continue
         if f[3] == "FUNC":
             funcs.add(name)
@@ -60,11 +62,11 @@ def symbols(path):
     return sorted(funcs), objs
 
 
-def stub(real):
+def stub(real, prefix):
     # Same file name, so torch's RPATH still resolves it; any call aborts loudly instead of computing nothing.
     global freed
     soname = os.path.basename(real)
-    funcs, objs = symbols(real)
+    funcs, objs = symbols(real, prefix)
     src = tempfile.NamedTemporaryFile("w", suffix=".c", delete=False)
     src.write("#include <stdio.h>\n#include <stdlib.h>\n")
     src.write("static void die(const char *f) { fprintf(stderr, \"[nemotron-slim] stubbed %s called\\n\", f); abort(); }\n")
@@ -83,11 +85,12 @@ def stub(real):
 
 
 # Mapped because libtorch_cuda links them, never called: sparse and semi-structured kernels, curand.
-for pat in ("nvidia/cusparselt/lib/libcusparseLt.so*", "nvidia/*/lib/libcusparse.so*",
-            "nvidia/*/lib/libcurand.so*"):
+for pat, prefix in (("nvidia/cusparselt/lib/libcusparseLt.so*", "cusparseLt"),
+                    ("nvidia/*/lib/libcusparse.so*", "cusparse"),
+                    ("nvidia/*/lib/libcurand.so*", "curand")):
     for path in glob.glob(os.path.join(site, pat)):
         if not os.path.islink(path):
-            stub(path)
+            stub(path, prefix)
 
 print("nemotron slim freed %.0f MB" % (freed / 1e6))
 PY
