@@ -576,7 +576,12 @@ activity, so both paths fill a same-speaker pause shorter than
 `--min-duration-off` (default **1.25** s, per speaker as in pyannote) and then drop
 turns shorter than `--min-duration-on` (default 0). One job overrides either with
 the form fields `min_duration_off` / `min_duration_on`, one socket with the same
-keys on its `start` message; the POST response echoes both.
+keys on its `start` message; the POST response echoes both. The POST does not read
+the clip as one array: ffmpeg decodes it in 60 s blocks into the same bounded
+streaming runner the socket uses, which hands NeMo an empty `total_preds` each
+step and keeps turns instead, so GPU and host memory stay flat at any length and
+`--max-audio-seconds` / `--max-upload-mb` default to 0 (no cap). The inference lock
+is taken per chunk, so a long job does not stall live sockets.
 
 **`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
 other bases apply: no KV cache, no autoregression, and `generate()` denoises a

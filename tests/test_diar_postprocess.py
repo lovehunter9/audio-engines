@@ -155,5 +155,80 @@ class OfflineEndpointTest(unittest.TestCase):
         self.assertEqual(self.post(min_duration_off="-1").status_code, 400)
 
 
+class RunsTest(unittest.TestCase):
+    """Turns built chunk by chunk must equal the ones read off the whole array at once."""
+
+    @staticmethod
+    def whole(rows, frame_sec):
+        r = stream._Runs(rows.shape[1], frame_sec)
+        r.add(rows)
+        return sorted((s["start"], s["end"], s["speaker"]) for s in r.segments())
+
+    def test_a_single_block_reads_each_run(self):
+        import numpy as np
+
+        rows = np.zeros((10, 2), dtype="float32")
+        rows[2:5, 0] = 0.9
+        rows[7:10, 1] = 0.6
+        self.assertEqual(self.whole(rows, 0.01),
+                         [(0.02, 0.05, "spk_0"), (0.07, 0.1, "spk_1")])
+
+    def test_any_split_gives_the_same_turns(self):
+        import numpy as np
+
+        rng = np.random.default_rng(7)
+        for trial in range(40):
+            T, S = int(rng.integers(1, 400)), int(rng.integers(1, 5))
+            # Sticky activity so runs cross block edges, which is the case being guarded.
+            rows = (rng.random((T, S)) < 0.5).astype("float32")
+            for k in range(S):
+                for t in range(1, T):
+                    if rng.random() < 0.8:
+                        rows[t, k] = rows[t - 1, k]
+            want = self.whole(rows, 0.01)
+            r = stream._Runs(S, 0.01)
+            cuts = sorted(set(int(c) for c in rng.integers(0, T + 1, size=int(rng.integers(0, 8)))))
+            prev = 0
+            for c in cuts + [T]:
+                r.add(rows[prev:c])
+                prev = c
+            got = sorted((s["start"], s["end"], s["speaker"]) for s in r.segments())
+            self.assertEqual(got, want, "trial %d cuts %s" % (trial, cuts))
+
+
+@unittest.skipUnless(__import__("shutil").which("ffmpeg"), "ffmpeg not installed")
+class PcmBlocksTest(unittest.TestCase):
+    def test_blocks_cover_the_whole_clip_resampled_to_16k(self):
+        import tempfile
+        from wrapper.caps import diar_nemotron as nm
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            buf = io.BytesIO()
+            with wave.open(buf, "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(8000)
+                w.writeframes(b"\x10\x00\x20\x00" * 8000 * 5)
+            f.write(buf.getvalue())
+        try:
+            blocks = list(nm._pcm_blocks(f.name, seconds=2.0))
+            self.assertEqual([len(b) for b in blocks[:2]], [32000, 32000])
+            self.assertAlmostEqual(sum(len(b) for b in blocks) / 16000.0, 5.0, places=1)
+        finally:
+            os.unlink(f.name)
+
+    def test_an_undecodable_upload_raises(self):
+        import tempfile
+        from wrapper.caps import diar_nemotron as nm
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"not audio at all" * 100)
+        try:
+            with self.assertRaises(RuntimeError):
+                list(nm._pcm_blocks(f.name))
+        finally:
+            os.unlink(f.name)
+
+
 if __name__ == "__main__":
     unittest.main()

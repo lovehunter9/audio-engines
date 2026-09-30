@@ -77,7 +77,9 @@ class Bounds:
         passed through rather than refused -- an engine may still read it -- and then bills as
         unmeasured, which is why the miss is logged.
         """
-        path, size, over = await spill_upload(file, max_bytes=int(self.megabytes * MIB))
+        # 0 (or less) means no bound, for engines whose memory does not grow with the clip.
+        cap = int(self.megabytes * MIB) if self.megabytes > 0 else None
+        path, size, over = await spill_upload(file, max_bytes=cap)
         if over:
             raise HTTPException(
                 status_code=413,
@@ -85,7 +87,7 @@ class Bounds:
                        % self.megabytes)
         # Header reads and ffprobe are both blocking, and this runs on the event loop.
         seconds = await asyncio.to_thread(duration, path)
-        if seconds is not None and seconds > self.seconds:
+        if seconds is not None and self.seconds > 0 and seconds > self.seconds:
             unlink(path)
             raise HTTPException(
                 status_code=413,

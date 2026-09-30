@@ -1825,6 +1825,20 @@ class UploadBoundsTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("9000s", refused.exception.detail)
         self.assertIn("60s", refused.exception.detail)
 
+    async def test_zero_means_no_bound(self):
+        """For an engine that decodes and infers chunk by chunk, length is not a memory risk."""
+        from wrapper import limits
+        from wrapper.audioio import unlink
+
+        bounds = self._bounds("--max-upload-mb 0 --max-audio-seconds 0")
+        with mock.patch("wrapper.limits.duration", return_value=10 ** 6):
+            path, seconds = await bounds.spill(_FakeUpload(total=3 * limits.MIB))
+        try:
+            self.assertEqual(seconds, 10 ** 6)
+            self.assertTrue(os.path.exists(path))
+        finally:
+            unlink(path)
+
     async def test_an_unmeasurable_container_is_passed_through_rather_than_refused(self):
         """A reader that cannot measure a file is not evidence about the engine that decodes it."""
         from wrapper.audioio import unlink

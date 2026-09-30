@@ -3,6 +3,9 @@ import glob
 import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, WebSocket, WebSocketDisconnect
@@ -11,7 +14,7 @@ from .. import hfgate
 from .. import tasks
 from ..gpu import mount_metrics
 from ..contract import register, EngineArgs
-from ..audioio import decode, resample_linear, unlink
+from ..audioio import decode, pcm16_to_float32, resample_linear, unlink
 from ..limits import Bounds
 from ..runtime import Runtime
 from . import diar_stream as stream
@@ -48,7 +51,8 @@ SPKCACHE_LEN = _args.count("--spkcache-len", _base[4])
 MIN_DURATION_OFF = _args.number("--min-duration-off", 1.25)
 MIN_DURATION_ON = _args.number("--min-duration-on", 0.0)
 # Claimed before warn_unclaimed: a flag read after that line is logged as one this engine ignores.
-BOUNDS = Bounds(_args, seconds=14400)
+# Offline decodes and infers chunk by chunk, so memory does not grow with length: 0 = no cap.
+BOUNDS = Bounds(_args, seconds=0, megabytes=0)
 _args.warn_unclaimed(log)
 try:
     MIN_DURATION_OFF = stream._seconds(MIN_DURATION_OFF, 1.25, "--min-duration-off")
@@ -71,6 +75,7 @@ def _bind_stream():
     stream.MIN_DURATION_OFF = MIN_DURATION_OFF
     stream.MIN_DURATION_ON = MIN_DURATION_ON
     stream.PER_SPEAKER = True
+    stream.BOUNDED_PREDS = True
 
 
 def _find_nemo():
@@ -137,6 +142,60 @@ def _mono16k(path):
     return resample_linear(arr, int(sr))
 
 
+# Offline feeds this much decoded audio per step; the streamer keeps only its bounded window.
+BLOCK_SEC = 60.0
+
+
+def _pcm_blocks(path, seconds=BLOCK_SEC):
+    # Mono 16k float32 blocks straight out of ffmpeg, so no clip is ever decoded whole.
+    if not shutil.which("ffmpeg"):
+        yield _mono16k(path)
+        return
+    n = int(16000 * seconds) * 2
+    with tempfile.TemporaryFile() as err:
+        p = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-vn", "-ac", "1",
+                              "-ar", "16000", "-f", "s16le", "-"],
+                             stdout=subprocess.PIPE, stderr=err)
+        try:
+            while True:
+                data = p.stdout.read(n)
+                if not data:
+                    break
+                yield pcm16_to_float32(data)
+        finally:
+            p.stdout.close()
+            rc = p.wait()
+        if rc != 0:
+            err.seek(0)
+            raise RuntimeError("ffmpeg could not decode the upload: %s"
+                               % err.read().decode("utf-8", "replace").strip()[-300:])
+
+
+def _diarize_chunked(ctx, path, seconds):
+    # The streaming runner in bounded mode: flat GPU and host memory at any length.
+    st = stream._Streamer(bounded=True)
+    fed = 0
+    for block in _pcm_blocks(path):
+        ctx.checkpoint()
+        st.feed(block)
+        fed += int(block.shape[0])
+        with _infer_lock:
+            st.step()
+        if seconds:
+            ctx.progress(ratio=min(0.99, fed / 16000.0 / seconds), stage="diarize")
+    with _infer_lock:
+        st.step(final=True)
+    return st.segments(), fed / 16000.0
+
+
+def _diarize_whole(path):
+    # Only when this NeMo build lacks the step API: the model reads the clip as one array.
+    audio = _mono16k(path)
+    with _infer_lock:
+        res = _state["model"].diarize(audio=[audio], batch_size=1, sample_rate=16000)
+    return stream._parse_segments(res[0] if res else []), float(audio.shape[0]) / 16000.0
+
+
 def build_app(supports):
     app = FastAPI(title="audio-nemotron (Nemotron 3 Diarization)")
     mount_metrics(app)
@@ -159,16 +218,16 @@ def build_app(supports):
             raise HTTPException(status_code=400, detail=str(e))
         if num_speakers or (exclusive is not None and tasks.truthy(exclusive)):
             log.info("num_speakers/exclusive are pyannote knobs; this checkpoint ignores them")
-        path, _seconds = await BOUNDS.spill(
-            file, "this model reads the clip as one array")
+        path, seconds = await BOUNDS.spill(file, "this deployment caps clip length")
 
         def _work(ctx):
-            ctx.progress(ratio=0.0, stage="decode")
-            audio = _mono16k(path)
-            dur = float(audio.shape[0]) / 16000.0
+            ctx.progress(ratio=0.0, stage="diarize")
+            if _state.get("streaming_ok"):
+                raw, dur = _diarize_chunked(ctx, path, seconds)
+            else:
+                raw, dur = _diarize_whole(path)
             ctx.meter(input_seconds=dur)
-            res = _state["model"].diarize(audio=[audio], batch_size=1, sample_rate=16000)
-            segs = stream._tidy(stream._parse_segments(res[0] if res else []), off, on)
+            segs = stream._tidy(raw, off, on)
             speakers = sorted({s["speaker"] for s in segs})
             ctx.progress(ratio=1.0, stage="done")
             return {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
@@ -176,7 +235,8 @@ def build_app(supports):
                     "num_segments": len(segs), "segments": segs, "exclusive": False,
                     "min_duration_off": off, "min_duration_on": on}
 
-        return await tasks.dispatch(async_, "diar", MODEL_NAME, _work, gate=_infer_lock,
+        # The lock is taken per chunk, so an hours-long job does not stall live sockets.
+        return await tasks.dispatch(async_, "diar", MODEL_NAME, _work,
                                     cleanup=lambda: unlink(path), fail="diarization failed")
 
     @app.websocket("/v1/audio/diarize/stream")
