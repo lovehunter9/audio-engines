@@ -2389,6 +2389,9 @@ class QwenOvPublishTest(unittest.TestCase):
         self.assertIn("FROM ubuntu:24.04", deps)
         self.assertIn("openvino-genai", deps)
         self.assertIn("qwen-asr==0.0.6", deps)
+        # torch comes from the CPU index before anything that depends on it, or pip pulls CUDA.
+        self.assertIn("--index-url https://download.pytorch.org/whl/cpu", deps)
+        self.assertLess(deps.index("download.pytorch.org/whl/cpu"), deps.index("optimum-intel.git"))
         self.assertNotIn("apply_qwen3_asr_batch.py", deps)
         self.assertNotIn("COPY wrapper", deps)
         self.assertNotIn("cmake", deps)
