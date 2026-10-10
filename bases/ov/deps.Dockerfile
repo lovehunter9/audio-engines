@@ -41,6 +41,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
+# optimum-intel needs torch to export the IR. The default Linux wheel drags ~3 GB of CUDA
+# libraries no Intel GPU can use; installed first from the CPU index, later installs keep it.
+RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        --index-url https://download.pytorch.org/whl/cpu "torch==2.14.1"
+
 # Wheels only. Grouping, budget and B>1 decode live in the wrapper.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
@@ -56,14 +61,17 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "safetensors>=0.8.0" \
         "transformers>=5.13,<5.14" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
+        "git+https://github.com/openvino-dev-samples/optimum-intel.git@4ca1144eafc3ef7d3d805a99c7b92953441437e5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-asr==0.0.6" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "pyparsing==3.3.2" \
-    && python3 -c "import pyparsing, openvino, openvino_genai, optimum, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+    && ! python3 -m pip list 2>/dev/null | grep -i '^nvidia-' \
+    && python3 -c "import pyparsing, openvino, openvino_genai, optimum, torch, transformers, qwen_asr, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForQwen3ASRForcedAligner; \
 assert pyparsing.__version__ == '3.3.2', pyparsing.__version__; \
+assert torch.version.cuda is None, torch.__version__; \
+print('torch', torch.__version__); \
 print('pyparsing', pyparsing.__version__); \
 print('openvino', openvino.__version__); \
 print('openvino_genai', getattr(openvino_genai, '__version__', 'ok')); \

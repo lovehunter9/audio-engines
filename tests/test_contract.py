@@ -1268,13 +1268,16 @@ class OpenVINOModeTest(unittest.TestCase):
     def test_ov_logits_splits_encoder_decoder_and_skips_thinker(self):
         from wrapper.caps import align as a
 
+        import numpy as np
+
         class Enc:
             def __call__(self, **kw):
-                return mock.Mock(last_hidden_state="h")
+                b, _, t = kw["input_features"].shape
+                return mock.Mock(last_hidden_state=np.zeros((b, t // 100 * 13, 2)))
 
         class Dec:
             def __call__(self, **kw):
-                if kw.get("encoder_hidden_states") == "h" and kw.get("input_ids") == 1:
+                if kw.get("encoder_hidden_states").shape == (1, 13, 2) and kw.get("input_ids") is ids:
                     return mock.Mock(logits="ok")
                 raise TypeError("bad decoder args %s" % kw)
 
@@ -1289,40 +1292,183 @@ class OpenVINOModeTest(unittest.TestCase):
             def __call__(self, **kw):
                 raise TypeError("must not call SpeechSeq2Seq.forward")
 
-        self.assertEqual(a._ov_logits(Fake(), {"input_ids": 1, "input_features": 2}), "ok")
+        raw = {"thinker_config": {"audio_token_id": 7, "audio_config": {"n_window": 50}}}
+        ids = np.array([[1] + [7] * 13 + [2]])
+        feats = np.zeros((1, 128, 100), dtype=np.float32)
+        with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
+            self.assertEqual(a._ov_logits(Fake(), {"input_ids": ids, "input_features": feats}), "ok")
 
-    def test_ov_logits_pads_mel_time_to_the_traced_window(self):
+    def test_ov_encoder_sees_one_attention_window_of_whole_chunks(self):
         import numpy as np
         from wrapper.caps import align as a
 
-        seen = {}
+        shapes = []
 
         class Enc:
             def __call__(self, **kw):
-                seen["shape"] = tuple(np.asarray(kw["input_features"]).shape)
-                return mock.Mock(last_hidden_state="h")
+                b, _, t = kw["input_features"].shape
+                shapes.append((b, t))
+                return mock.Mock(last_hidden_state=np.zeros((b, t // 100 * 13, 2)))
+
+        raw = {"thinker_config": {"audio_config": {"n_window": 50, "n_window_infer": 800}}}
+        feats = np.zeros((1, 128, 845), dtype=np.float32)
+        with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
+            self.assertEqual(a._attention_window(), 800)
+            hidden, counts = a._encode_ov(Enc(), feats, None)
+        self.assertEqual(sorted(shapes), [(1, 100), (1, 800)])
+        # The processor's placeholder count for 845 frames: 8 * 13 + 6.
+        self.assertEqual(hidden.shape, (1, 110, 2))
+        self.assertEqual(counts, [110])
+
+    def test_ov_clip_encodes_the_same_alone_and_in_a_batch(self):
+        """A clip's audio vectors must not depend on what it is batched with.
+
+        The fake encoder answers with each window's length and sum, so a clip that
+        was encoded against padding, or against more than its own window, differs.
+        """
+        import numpy as np
+        from wrapper.caps import align as a
+
+        class Enc:
+            def __call__(self, **kw):
+                x = kw["input_features"]
+                b, _, t = x.shape
+                out = np.zeros((b, t // 100 * 13, 2))
+                out[:, :, 0] = t
+                out[:, :, 1] = x.sum(axis=(1, 2))[:, None]
+                return mock.Mock(last_hidden_state=out)
+
+        rng = np.random.default_rng(0)
+        lengths = [1730, 260]
+        clips = [rng.standard_normal((128, n)).astype(np.float32) for n in lengths]
+        width = max(lengths)
+        batch = np.zeros((2, 128, width), dtype=np.float32)
+        mask = np.zeros((2, width), dtype=np.int64)
+        for i, c in enumerate(clips):
+            batch[i, :, :c.shape[1]] = c
+            mask[i, :c.shape[1]] = 1
+        raw = {"thinker_config": {"audio_config": {"n_window": 50, "n_window_infer": 800}}}
+        with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
+            together, counts = a._encode_ov(Enc(), batch, mask)
+            alone = [a._encode_ov(Enc(), c[None], None)[0][0] for c in clips]
+        self.assertEqual(counts, [len(x) for x in alone])
+        for i, x in enumerate(alone):
+            # Row i starts with its own vectors; the rewired decoder reads nothing past them.
+            np.testing.assert_array_equal(together[i, :len(x)], x)
+            self.assertFalse(together[i, len(x):].any())
+
+    def test_ov_logits_reads_each_rows_length_from_the_processors_mask(self):
+        """The processor's key is feature_attention_mask; a wrong key encodes every row at full width."""
+        import numpy as np
+        from wrapper.caps import align as a
+
+        class Enc:
+            def __call__(self, **kw):
+                b, _, t = kw["input_features"].shape
+                return mock.Mock(last_hidden_state=np.ones((b, t // 100 * 13, 2)))
+
+        seen = {}
 
         class Dec:
             def __call__(self, **kw):
+                seen["hidden"] = kw["encoder_hidden_states"]
                 return mock.Mock(logits="ok")
 
         class Fake:
             encoder = Enc()
             decoder = Dec()
 
-        raw = {"thinker_config": {"audio_config": {"n_window": 50}}}
-        feats = np.zeros((1, 128, 845), dtype=np.float32)
+        raw = {"thinker_config": {"audio_token_id": 7, "audio_config": {"n_window": 50}}}
+        ids = np.array([[1] + [7] * 13 + [0] * 13 + [2], [1] + [7] * 26 + [2]])
+        feats = np.zeros((2, 128, 200), dtype=np.float32)
+        mask = np.zeros((2, 200), dtype=np.int64)
+        mask[0, :100] = 1
+        mask[1, :] = 1
         with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
-            self.assertEqual(a._mel_window(), 100)
-            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 80)), 100).shape[-1], 100)
-            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 120)), 100).shape[-1], 200)
-            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 2192)), 100).shape[-1], 2200)
-            self.assertEqual(a._pad_mel_to_window(np.zeros((1, 128, 200)), 100).shape[-1], 200)
-            self.assertEqual(
-                a._ov_logits(Fake(), {"input_ids": np.zeros((1, 3)), "input_features": feats}),
-                "ok",
-            )
-        self.assertEqual(seen["shape"], (1, 128, 900))
+            out = a._ov_logits(Fake(), {"input_ids": ids, "input_features": feats,
+                                        "feature_attention_mask": mask})
+            with self.assertRaisesRegex(RuntimeError, "no feature_attention_mask"):
+                a._ov_logits(Fake(), {"input_ids": ids, "input_features": feats})
+        self.assertEqual(out, "ok")
+        self.assertEqual(seen["hidden"].shape, (2, 26, 2))
+        self.assertFalse(seen["hidden"][0, 13:].any())
+
+    def test_align_ov_pads_text_on_the_right(self):
+        """The decoder IR takes no attention_mask; left pads would be attended."""
+        import numpy as np
+        from wrapper.caps import align as a
+
+        seen = {}
+
+        def processor(**kw):
+            seen.update(kw)
+            raise RuntimeError("stop after the processor")
+
+        aligner = mock.Mock()
+        aligner.encode_timestamp.return_value = (["w"], "prompt")
+        with mock.patch.dict(a._state, {"processor": processor, "aligner_processor": aligner}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, "stop after the processor"):
+                a._align_ov([(np.zeros(1600, np.float32), 16000)] * 2, ["a", "b c"], ["Chinese"] * 2)
+        self.assertEqual(seen.get("padding_side"), "right")
+
+    @unittest.skipUnless(importlib.util.find_spec("openvino"), "needs openvino")
+    def test_rewired_align_decoder_reads_each_rows_own_audio(self):
+        """The export's merge, rebuilt small: flatten [B,T,H], unsqueeze, expand, gather per row.
+
+        As exported, encoder_hidden_states is [?,?,?]; the hidden width is only known
+        after _rewire_decoder pins it, which is what lets keep_encoder_hidden_batch match.
+        """
+        import numpy as np
+        import openvino as ov
+        from openvino import opset13 as op
+        from wrapper.caps import align as a
+
+        h = 4
+        hidden = op.parameter(ov.PartialShape([-1, -1, -1]), ov.Type.f32, name="encoder_hidden_states")
+        index = op.parameter(ov.PartialShape([-1, -1]), ov.Type.i64, name="input_ids")
+        width = op.gather(op.shape_of(hidden), op.constant([2]), op.constant(0))
+        flat = op.reshape(hidden, op.concat([op.constant([-1], ov.Type.i64), width], 0), False)
+        one = op.unsqueeze(flat, op.constant(0))
+        rows = op.gather(op.shape_of(index), op.constant([0]), op.constant(0))
+        tail = op.gather(op.shape_of(one), op.constant([1, 2]), op.constant(0))
+        expanded = op.broadcast(one, op.concat([rows, tail], 0))
+        idx = op.broadcast(op.unsqueeze(index, op.constant(2)),
+                           op.concat([op.shape_of(index), op.constant([h], ov.Type.i64)], 0))
+        out = op.gather_elements(expanded, idx, 1)
+        model = ov.Model([out], [hidden, index])
+
+        a._rewire_decoder(model, h)
+        compiled = ov.Core().compile_model(model, "CPU")
+        feats = np.arange(2 * 3 * h, dtype=np.float32).reshape(2, 3, h)
+        ids = np.array([[0, 1, 2], [0, 1, 2]], dtype=np.int64)
+        got = compiled({"encoder_hidden_states": feats, "input_ids": ids})[0]
+        np.testing.assert_array_equal(got, feats)
+
+    def test_rewire_refuses_a_config_without_the_audio_width(self):
+        from wrapper.caps import align as a
+
+        with self.assertRaisesRegex(RuntimeError, "output_dim"):
+            a._rewire_decoder(mock.Mock(), a._audio_hidden({"thinker_config": {"audio_config": {}}}))
+
+    def test_ov_logits_refuses_vectors_that_do_not_fill_the_placeholders(self):
+        import numpy as np
+        from wrapper.caps import align as a
+
+        class Enc:
+            def __call__(self, **kw):
+                b, _, t = kw["input_features"].shape
+                return mock.Mock(last_hidden_state=np.zeros((b, t // 100 * 13, 2)))
+
+        class Fake:
+            encoder = Enc()
+            decoder = mock.Mock(side_effect=AssertionError("decoder must not run"))
+
+        raw = {"thinker_config": {"audio_token_id": 7, "audio_config": {"n_window": 50}}}
+        ids = np.array([[1] + [7] * 12 + [2]])
+        feats = np.zeros((1, 128, 100), dtype=np.float32)
+        with mock.patch.dict(a._state, {"hf_config": raw}, clear=False):
+            with self.assertRaisesRegex(RuntimeError, r"\[13\] audio vectors for \[12\] placeholders"):
+                a._ov_logits(Fake(), {"input_ids": ids, "input_features": feats})
 
     def test_align_ov_inputs_accept_the_same_batch_shape_as_cuda(self):
         import numpy as np
@@ -2243,6 +2389,9 @@ class QwenOvPublishTest(unittest.TestCase):
         self.assertIn("FROM ubuntu:24.04", deps)
         self.assertIn("openvino-genai", deps)
         self.assertIn("qwen-asr==0.0.6", deps)
+        # torch comes from the CPU index before anything that depends on it, or pip pulls CUDA.
+        self.assertIn("--index-url https://download.pytorch.org/whl/cpu", deps)
+        self.assertLess(deps.index("download.pytorch.org/whl/cpu"), deps.index("optimum-intel.git"))
         self.assertNotIn("apply_qwen3_asr_batch.py", deps)
         self.assertNotIn("COPY wrapper", deps)
         self.assertNotIn("cmake", deps)
