@@ -121,7 +121,7 @@ def _looks_like_ov_ir(path):
 
 
 def _ov_export_cmd(src, dest):
-    # optimum traces the ASR encoder so aten::view splits mel time into n_window*2 chunks and folds out the tail pad; a remainder fails shape inference, and _ov_logits pads that axis before infer.
+    # optimum traces the ASR encoder so aten::view splits mel time into n_window*2 chunks; a remainder fails shape inference, so _encode_ov pads each window to whole chunks.
     return [
         "optimum-cli", "export", "openvino",
         "--model", src,
@@ -225,6 +225,34 @@ class _OvAlign:
         self.decoder = decoder
 
 
+def _audio_hidden(raw):
+    """Width of the decoder's encoder_hidden_states: the audio projector's output_dim."""
+    try:
+        return int(_audio_config(raw)[1].get("output_dim") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _rewire_decoder(dec_m, hidden):
+    """Make each batch row read its own audio, as ov_asr_batch does for ASR.
+
+    The exported decoder flattens [B,T,H] and gathers each row's audio from index 0 of
+    the flat sequence, so every row read clip 0. keep_encoder_hidden_batch cuts the
+    flatten out, but it finds it by a static hidden width, and this export leaves
+    encoder_hidden_states fully dynamic, so the width is pinned first.
+    """
+    if hidden <= 0:
+        raise RuntimeError("align config has no audio_config.output_dim to pin the decoder input")
+    import openvino as ov
+    from ..ov_asr_batch import keep_encoder_hidden_batch
+
+    dec_m.reshape({"encoder_hidden_states": ov.PartialShape([-1, -1, hidden])})
+    if keep_encoder_hidden_batch(dec_m) <= 0:
+        raise RuntimeError(
+            "align decoder IR is missing the encoder flatten Unsqueeze; "
+            "refusing a compile that would align every span against clip 0")
+
+
 def _load_ov():
     from qwen_asr.inference.qwen3_forced_aligner import Qwen3ForceAlignProcessor
     from transformers import AutoProcessor
@@ -246,9 +274,18 @@ def _load_ov():
     # Hold the lock through calibration: that first GPU run must finish before the next engine compiles.
     from ..ov_compile_lock import gpu_compile
 
+    # Snapshot root, which has config.json. The IR directory is never a Hub repo id.
+    raw = {}
+    cfg_path = os.path.join(src, "config.json")
+    if os.path.isfile(cfg_path):
+        with open(cfg_path) as f:
+            raw = json.load(f)
+
     with gpu_compile(device):
         enc = core.compile_model(os.path.join(model_dir, "openvino_encoder_model.xml"), device, props)
-        dec = core.compile_model(os.path.join(model_dir, "openvino_decoder_model.xml"), device, props)
+        dec_m = core.read_model(os.path.join(model_dir, "openvino_decoder_model.xml"))
+        _rewire_decoder(dec_m, _audio_hidden(raw))
+        dec = core.compile_model(dec_m, device, props)
         _p("align encoder inputs=%s outputs=%s" % (
             [i.any_name for i in enc.inputs], [o.any_name for o in enc.outputs]))
         _p("align decoder inputs=%s outputs=%s" % (
@@ -257,13 +294,7 @@ def _load_ov():
             _OvPart(enc, "hidden", "last_hidden_state"),
             _OvPart(dec, "logits", "logits"),
         )
-        # Snapshot root, which has config.json. The IR directory is never a Hub repo id.
         processor = AutoProcessor.from_pretrained(src, fix_mistral_regex=True)
-        raw = {}
-        cfg_path = os.path.join(src, "config.json")
-        if os.path.isfile(cfg_path):
-            with open(cfg_path) as f:
-                raw = json.load(f)
         thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else {}
         ts_id = int(raw.get("timestamp_token_id") or thinker.get("timestamp_token_id") or 0)
         ts_seg = float(raw.get("timestamp_segment_time") or thinker.get("timestamp_segment_time") or 0)
@@ -400,60 +431,118 @@ def _units(res):
 
 def _mel_window(raw=None):
     """Frames per traced encoder chunk: n_window * 2, 100 on this checkpoint."""
-    if raw is None:
-        raw = _state.get("hf_config") or {}
-    thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else raw
-    audio = thinker.get("audio_config") if isinstance(thinker, dict) else {}
-    if not isinstance(audio, dict):
-        audio = {}
     try:
-        n = int(audio.get("n_window") or 0)
+        n = int(_audio_config(raw)[1].get("n_window") or 0)
     except (TypeError, ValueError):
         n = 0
     return n * 2 if n > 0 else 100
 
 
-def _pad_mel_to_window(feats, window):
-    """Right-pad mel time so it divides the traced view.
+def _audio_config(raw=None):
+    if raw is None:
+        raw = _state.get("hf_config") or {}
+    thinker = raw.get("thinker_config") if isinstance(raw.get("thinker_config"), dict) else raw
+    audio = thinker.get("audio_config") if isinstance(thinker, dict) else {}
+    return (thinker if isinstance(thinker, dict) else {}), (audio if isinstance(audio, dict) else {})
 
-    Eager pads a short tail up to a full chunk of n_window*2. The export
-    kept the view and dropped that pad, so [1,128,845] cannot become
-    [1,128,8,100]. A multiple passes straight through.
+
+def _attention_window(raw=None):
+    """Mel frames one encoder attention window spans: n_window_infer, 800 (8 s) on this checkpoint.
+
+    A config without it gets Qwen3ASRAudioEncoderConfig's default, as the PyTorch encoder would.
+    """
+    chunk = _mel_window(raw)
+    n = int(_audio_config(raw)[1].get("n_window_infer") or 400)
+    if n < chunk or n % chunk:
+        raise RuntimeError("n_window_infer=%d is not a whole number of %d-frame chunks" % (n, chunk))
+    return n
+
+
+def _post_cnn_length(frames):
+    # Three k=3 s=2 p=1 convolutions; the processor counts audio placeholders the same way.
+    for _ in range(3):
+        frames = (frames - 1) // 2 + 1 if frames > 0 else 0
+    return frames
+
+
+def _encode_ov(encoder, feats, mask):
+    """Each clip's audio vectors at the start of its own row: [batch, longest, hidden].
+
+    _load_ov rewires the decoder to read row b's placeholders from row b. Each clip is
+    cut into n_window_infer windows and each window is encoded at its own length rounded
+    up to one chunk, because the exported encoder has no attention mask: whatever is in
+    the input, padding included, is attended.
+    Encoding the padded batch as one window let short clips attend to padding and long
+    ones attend past 8 s, so a clip's timestamps depended on what it was batched with.
     """
     import numpy as np
 
-    if feats is None or not hasattr(feats, "shape") or not window or int(window) <= 1:
-        return feats
-    window = int(window)
-    arr = feats.detach().cpu().numpy() if hasattr(feats, "detach") else np.asarray(feats)
-    if arr.ndim < 1:
-        return feats
-    t = int(arr.shape[-1])
-    if t <= 0 or t % window == 0:
-        return feats
-    pad = window - (t % window)
-    out = np.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, pad)])
-    return np.ascontiguousarray(out)
+    feats = feats.detach().cpu().numpy() if hasattr(feats, "detach") else np.asarray(feats)
+    if mask is not None:
+        mask = mask.detach().cpu().numpy() if hasattr(mask, "detach") else np.asarray(mask)
+    chunk = _mel_window()
+    window = _attention_window()
+    per_chunk = _post_cnn_length(chunk)
+    pieces = []  # (padded mel window, valid post-CNN vectors per chunk)
+    owner = []  # row each piece belongs to
+    for i in range(feats.shape[0]):
+        n = int(mask[i].sum()) if mask is not None else int(feats.shape[-1])
+        for start in range(0, n, window):
+            valid = min(window, n - start)
+            w = feats[i, :, start:start + valid]
+            padded = -(-valid // chunk) * chunk
+            if padded != valid:
+                w = np.pad(w, [(0, 0), (0, padded - valid)])
+            keep = [_post_cnn_length(min(chunk, valid - c)) for c in range(0, valid, chunk)]
+            pieces.append((w, keep))
+            owner.append(i)
+    # Windows of equal length share one call; only a clip's last window is short.
+    hidden = [None] * len(pieces)
+    for length in sorted({w.shape[-1] for w, _ in pieces}):
+        idx = [k for k, (w, _) in enumerate(pieces) if w.shape[-1] == length]
+        batch = np.ascontiguousarray(np.stack([pieces[k][0] for k in idx]))
+        out = encoder(input_features=batch).last_hidden_state
+        out = out.detach().cpu().numpy() if hasattr(out, "detach") else np.asarray(out)
+        for row, k in enumerate(idx):
+            hidden[k] = out[row]
+    rows = [[] for _ in range(feats.shape[0])]
+    for (_, keep), h, row in zip(pieces, hidden, owner):
+        for c, k in enumerate(keep):
+            rows[row].append(h[c * per_chunk:c * per_chunk + k])
+    rows = [np.concatenate(r) for r in rows]
+    out = np.zeros((len(rows), max(r.shape[0] for r in rows), rows[0].shape[-1]), dtype=rows[0].dtype)
+    for i, r in enumerate(rows):
+        out[i, :r.shape[0]] = r
+    return out, [r.shape[0] for r in rows]
 
 
 def _ov_logits(model, inputs):
     # Split encoder/decoder like official ForcedAligner.forward; thinker(**inputs) double-binds input_ids.
+    import numpy as np
+
     payload = dict(inputs)
     encoder = getattr(model, "encoder", None)
     decoder = getattr(model, "decoder", None)
-    feats = _pad_mel_to_window(payload.get("input_features"), _mel_window())
+    feats = payload.get("input_features")
     if encoder is None or decoder is None or feats is None:
         raise TypeError("align IR has no encoder/decoder/input_features")
-    enc = encoder(
-        input_features=feats,
-        attention_mask=payload.get("input_features_mask"),
-    )
-    hidden = enc.last_hidden_state if hasattr(enc, "last_hidden_state") else enc[0]
-    dec = decoder(
-        input_ids=payload.get("input_ids"),
-        encoder_hidden_states=hidden,
-        attention_mask=payload.get("attention_mask"),
-    )
+    # Qwen3ASRProcessor names the mel mask feature_attention_mask. Without it every row
+    # encodes as long as the longest, and the placeholder check below refuses the call.
+    mask = payload.get("feature_attention_mask")
+    if mask is None and int(getattr(feats, "shape", (1,))[0]) > 1:
+        raise RuntimeError("align ov got a batch with no feature_attention_mask")
+    hidden, counts = _encode_ov(encoder, feats, mask)
+    input_ids = payload.get("input_ids")
+    audio_id = _audio_config()[0].get("audio_token_id")
+    if audio_id is None:
+        raise RuntimeError("align ov: config has no thinker_config.audio_token_id")
+    ids = input_ids.detach().cpu().numpy() if hasattr(input_ids, "detach") else np.asarray(input_ids)
+    placeholders = [int(n) for n in (ids.reshape(len(counts), -1) == int(audio_id)).sum(axis=1)]
+    if placeholders != counts:
+        raise RuntimeError("align ov encoded %s audio vectors for %s placeholders"
+                           % (counts, placeholders))
+    # No attention_mask: the decoder IR has no such input (_align_ov pads text on the right).
+    dec = decoder(input_ids=input_ids, encoder_hidden_states=hidden)
     return dec.logits
 
 
@@ -532,11 +621,15 @@ def _align_ov(audio, text, language):
         wl, prompt = _state["aligner_processor"].encode_timestamp(one, ovutil.language(lang))
         word_lists.append(wl)
         prompts.append(prompt)
+    # Right, not the processor's default left: the exported decoder has no attention_mask
+    # input, so a left-padded row attends to its pads and its positions shift by their count.
+    # Right pads sit after every real token, where causal attention never looks.
     inputs = _state["processor"](
         text=prompts,
         audio=wavs,
         return_tensors="pt",
         padding=True,
+        padding_side="right",
     )
     logits = _ov_logits(_state["model"], inputs)
     ts_id = _state["timestamp_token_id"]
