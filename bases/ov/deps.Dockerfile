@@ -56,7 +56,7 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "safetensors>=0.8.0" \
         "transformers>=5.13,<5.14" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        "git+https://github.com/openvino-dev-samples/optimum-intel.git@add-qwen3-asr-hf-and-forced-aligner" \
+        "git+https://github.com/openvino-dev-samples/optimum-intel.git@4ca1144eafc3ef7d3d805a99c7b92953441437e5" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-asr==0.0.6" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
