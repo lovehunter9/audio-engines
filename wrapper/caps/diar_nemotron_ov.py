@@ -8,7 +8,7 @@ import os
 
 log = logging.getLogger("audio-diar-nemotron-ov")
 
-_STAMP = "nemotron-ov1"
+_STAMP = "nemotron-ov2"
 _BASE = "nemotron-ov"
 
 
@@ -162,18 +162,21 @@ def _compile(core, module, cache, name, dev, example):
 
 
 def _dynamic(exported):
+    # reshape wants {input: PartialShape}. A list is one shape, so a PartialShape in that list
+    # is read as a dimension and rejected. Batch stays 1; only the time axis is dynamic.
     import openvino as ov
 
-    shapes = []
+    shapes = {}
     for port in exported.inputs:
         rank = len(port.partial_shape)
         dims = []
         for i in range(rank):
-            if i == 0 or (rank >= 2 and i == 1):
-                dims.append(ov.Dimension.dynamic())
+            dim = port.partial_shape[i]
+            if rank >= 2 and i == 1:
+                dims.append(-1)
             else:
-                dims.append(port.partial_shape[i])
-        shapes.append(ov.PartialShape(dims))
+                dims.append(-1 if not dim.is_static else dim.get_length())
+        shapes[port.get_any_name()] = ov.PartialShape(dims)
     exported.reshape(shapes)
 
 
