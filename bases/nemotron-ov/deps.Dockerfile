@@ -45,7 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 # CPU torch: the image exports IR on first load. Inference is OpenVINO. Do not install a CUDA wheel.
-RUN python3 -m pip install --no-cache-dir -U pip \
+# Noble's pip is a Debian package with no RECORD, so -U pip cannot uninstall it. NeMo's wheel
+# is Metadata-Version 2.4, which pip 24.0 does not read; overlay pip>=24.1 instead.
+RUN python3 -m pip install --no-cache-dir --ignore-installed 'pip>=24.1' \
     && python3 -m pip install --no-cache-dir \
         torch torchaudio --index-url https://download.pytorch.org/whl/cpu \
     && python3 -m pip freeze | grep -E '^(torch|torchaudio)==' > /tmp/torch.pin \
