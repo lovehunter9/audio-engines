@@ -232,6 +232,7 @@ passes. For the same reason the build's final import check must go **through**
 | `speakrs-ov` | `beclab/audio-speakrs-ov` | `diar` | the same speakrs, on ONNX Runtime's OpenVINO provider for Intel GPUs (amd64 only) | in progress |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
 | `nemotron` | `beclab/audio-nemotron` | `diar`, `diar_stream` | NeMo Sortformer on a CUDA runtime (`nemo-toolkit[asr]`), not the NGC training image | in progress |
+| `nemotron-ov` | `beclab/audio-nemotron-ov` | `diar`, `diar_stream` | the same Sortformer, acoustic and transformer encoders on OpenVINO (Intel GPU, amd64 only) | in progress |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `qwen3ttsov` | `beclab/audio-qwen3tts-ov` | `tts`, `tts_clone` | Qwen3-TTS on OpenVINO (Intel iGPU / Arc, amd64); same HTTP as `qwen3tts` | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |

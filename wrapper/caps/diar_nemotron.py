@@ -123,6 +123,11 @@ def _load():
         _state["streaming_ok"] = bool(
             hasattr(sm, "init_streaming_state") and hasattr(sm, "streaming_feat_loader")
             and hasattr(model, "forward_streaming_step") and hasattr(model, "preprocessor"))
+        # CUDA image leaves AUDIO_BASE=nemotron, so this import and the method swap never run there.
+        if (os.environ.get("AUDIO_BASE") or "").strip() == "nemotron-ov":
+            from .diar_nemotron_ov import install as _install_ov
+
+            dev = _install_ov(model)
         _state["model"], _state["device"], _state["ready"] = model, dev, True
         _p("streaming API present=%s n_spk=%d preset=%s (chunk=%d rc=%d fifo=%d up=%d cache=%d)"
            % (_state["streaming_ok"], _state["n_spk"], _preset,
@@ -272,4 +277,9 @@ def build_app(supports):
 
 def run(supports):
     _p("diar_nemotron starting; model=%s port=%s preset=%s" % (MODEL_REPO, PORT, _preset))
-    _runtime.serve(supports, _load, build_app, "nemotron diarization", disable_ws_ping=True)
+    extra = {}
+    if (os.environ.get("AUDIO_BASE") or "").strip() == "nemotron-ov":
+        # First boot exports the IRs. The CUDA image does not take this branch, so its 1800s stays.
+        extra["timeout_s"] = 7200.0
+    _runtime.serve(supports, _load, build_app, "nemotron diarization",
+                   disable_ws_ping=True, **extra)

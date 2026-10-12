@@ -1,0 +1,45 @@
+# nemotron-ov CI: triggers only; the build is the shared build-image.yml.
+#
+# Sibling of nemotron-ci. Separate because the repository differs (audio-nemotron-ov) and
+# build-image.yml takes one repo per call. Do not add this base to nemotron-ci.yml.
+name: nemotron-ov-ci
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/nemotron-ov/**'
+      - '.github/workflows/nemotron-ov-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nemotron-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: nemotron-ov
+      repo: audio-nemotron-ov
+      # amd64 only. The Intel compute-runtime debs in the deps image are amd64.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
