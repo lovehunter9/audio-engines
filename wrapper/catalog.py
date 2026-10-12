@@ -37,6 +37,11 @@ BASES = {
     "nemotron": [
         (("diar", "diar_stream"), "diar_nemotron"),
     ],
+    # Intel sibling. Same module; the image bakes AUDIO_BASE=nemotron-ov and the cap swaps in
+    # OpenVINO only then. A missing key here makes app.py exit with "the image is built wrong".
+    "nemotron-ov": [
+        (("diar", "diar_stream"), "diar_nemotron"),
+    ],
     # speakrs: the pyannote community-1 pipeline rewritten in Rust, inference on ONNX Runtime.
     # A separate image because its dependencies share nothing with the torch stack, per the one
     # image per engine family rule. pyannote keeps its own diar: which of the two an installation
