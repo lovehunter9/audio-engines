@@ -8,7 +8,7 @@ import os
 
 log = logging.getLogger("audio-diar-nemotron-ov")
 
-_STAMP = "nemotron-ov2"
+_STAMP = "nemotron-ov3"
 _BASE = "nemotron-ov"
 
 
@@ -57,9 +57,9 @@ def install(model):
             self.has_proj = proj is not None
 
         def forward(self, emb, length):
-            # forward_internal skips @typecheck on forward, which tracing cannot enter.
-            hidden, hidden_len = self.encoder.forward_internal(
-                emb, length, bypass_pre_encode=True)
+            # forward_internal builds a FlexAttention block mask. That call does not trace
+            # (unordered_map::at). Same blocks, RoPE and norms; attention is the matmul form.
+            hidden, hidden_len = _acoustic_hidden(self.encoder, emb, length)
             hidden = hidden.transpose(1, 2)
             if self.has_proj:
                 hidden = self.proj(hidden)
@@ -78,6 +78,12 @@ def install(model):
     pre = _compile(core, Pre(), cache, "pre", dev, _zeros(feat, 160))
     with torch.inference_mode():
         emb, elen = model._call_pre_encode(*_zeros(feat, 160))
+    tail = int(getattr(model.encoder, "causal_tail_len", 0) or 0)
+    if tail:
+        raise RuntimeError(
+            "OpenVINO acoustic export expects causal_tail_len 0, got %s" % tail)
+    # RoPE slices a cos/sin buffer. Extend it before tracing so a longer stream still fits.
+    model.encoder.update_max_seq_length(4096, emb.device)
     acoustic = _compile(core, Acoustic(), cache, "acoustic", dev, (emb, elen))
     transformer = None
     if model.transformer_encoder is not None:
@@ -120,6 +126,52 @@ def install(model):
     model.forward_infer = forward_infer
     log.info("OpenVINO encoders installed on %s", dev)
     return dev
+
+
+def _math_attn(attn, x, length, causal):
+    import torch
+
+    batches, steps, _ = x.shape
+    heads, dim = attn.n_heads, attn.head_dim
+    qkv = attn.w_qkv(x).view(batches, steps, 3, heads, dim).permute(2, 0, 3, 1, 4)
+    query, key, value = qkv.unbind(0)
+    if attn.qk_norm:
+        query = attn.q_norm(query).to(dtype=value.dtype)
+        key = attn.k_norm(key).to(dtype=value.dtype)
+    if attn.rope is not None:
+        query, key = attn.rope(query, key)
+    scores = torch.matmul(query, key.transpose(-1, -2)) * (dim ** -0.5)
+    index = torch.arange(steps, device=x.device)
+    valid = index.unsqueeze(0) < length.to(dtype=torch.int64).unsqueeze(1)
+    fill = torch.finfo(scores.dtype).min
+    scores = scores.masked_fill(~valid[:, None, None, :], fill)
+    if causal:
+        allow = index.unsqueeze(1) >= index.unsqueeze(0)
+        scores = scores.masked_fill(~allow.view(1, 1, steps, steps), fill)
+    weights = torch.softmax(scores, dim=-1)
+    mixed = torch.matmul(weights, value)
+    mixed = mixed.transpose(1, 2).contiguous().view(batches, steps, attn.d_model)
+    return attn.out_proj(mixed)
+
+
+def _acoustic_hidden(encoder, emb, length):
+    import torch
+
+    hidden = emb
+    if encoder.self_attention_model == "rope":
+        if encoder.xscale:
+            hidden = hidden * encoder.xscale
+        hidden = encoder.dropout_pre_encoder(hidden)
+    hidden = encoder.embed_norm(hidden)
+    causal = encoder.attn_mode == "causal"
+    for layer in encoder.layers:
+        attended = _math_attn(layer.attn, layer.norm1(hidden), length, causal)
+        hidden = hidden + layer.drop(attended)
+        hidden = hidden + layer.drop(layer.ffn(layer.norm2(hidden)))
+    hidden = encoder.final_norm(hidden)
+    if encoder.out_proj is not None:
+        hidden = encoder.out_proj(hidden)
+    return hidden.transpose(1, 2), length.to(dtype=torch.int64)
 
 
 def _feat_dim(model):
