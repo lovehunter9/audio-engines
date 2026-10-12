@@ -124,15 +124,22 @@ def _load():
             hasattr(sm, "init_streaming_state") and hasattr(sm, "streaming_feat_loader")
             and hasattr(model, "forward_streaming_step") and hasattr(model, "preprocessor"))
         # CUDA image leaves AUDIO_BASE=nemotron, so this import and the method swap never run there.
+        ov_dev = None
         if (os.environ.get("AUDIO_BASE") or "").strip() == "nemotron-ov":
             from .diar_nemotron_ov import install as _install_ov
 
-            dev = _install_ov(model)
+            ov_dev = _install_ov(model)
+            # "GPU" is an OpenVINO device. NeMo builds the speaker cache with torch.zeros,
+            # which rejects that string. Tensors stay on CPU; the compiled encoders use the GPU.
+            dev = "cpu"
         _state["model"], _state["device"], _state["ready"] = model, dev, True
         _p("streaming API present=%s n_spk=%d preset=%s (chunk=%d rc=%d fifo=%d up=%d cache=%d)"
            % (_state["streaming_ok"], _state["n_spk"], _preset,
               CHUNK_LEN, RIGHT_CONTEXT, FIFO_LEN, UPDATE_PERIOD, SPKCACHE_LEN))
-        _p("engine READY: %s on %s" % (MODEL_REPO, dev))
+        if ov_dev is None:
+            _p("engine READY: %s on %s" % (MODEL_REPO, dev))
+        else:
+            _p("engine READY: %s on OpenVINO %s" % (MODEL_REPO, ov_dev))
     except Exception as e:
         _state["error"] = hfgate.explain(MODEL_REPO, e)
         _p("engine load FAILED: %s" % e)
