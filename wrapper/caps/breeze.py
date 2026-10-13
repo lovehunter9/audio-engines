@@ -541,7 +541,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     prefill_t = 320
     prefill_fit = 128
 
-    def _compile_prefill(width, name, stamp):
+    def _compile_prefill(width, name, stamp, compile_graph=True):
         embeds = torch.zeros(1, width, hidden, dtype=torch.float32)
         mask = torch.ones(1, width, dtype=torch.long)
         _, xml, stamp_path = tts_ov.ir_paths(src, name, stamp)
@@ -549,14 +549,24 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             tts_ov.causal_kv_module(backbone, False),
             (embeds, mask), xml, stamp_path, device,
             dynamize_ranks=(),
+            compile_graph=compile_graph,
         )
 
+    # Both widths are exported before either one is compiled onto the GPU.
+    # Compiling the 320 graph while the fp32 weights were still resident is
+    # where Intel-tts33 exited, before the text encoder and depth stack.
+    _compile_prefill(
+        prefill_t, "breeze_backbone_prefill", ".ov-breeze-v7", compile_graph=False,
+    )
+    _compile_prefill(
+        prefill_fit, "breeze_backbone_prefill_fit", ".ov-breeze-fit128-v1",
+        compile_graph=False,
+    )
+    tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     prefill = _compile_prefill(prefill_t, "breeze_backbone_prefill", ".ov-breeze-v7")
     prefill_fit_g = _compile_prefill(
         prefill_fit, "breeze_backbone_prefill_fit", ".ov-breeze-fit128-v1",
     )
-    import gc
-    gc.collect()
     prefix = {"emb": None}
     orig_bb = backbone.forward
 
@@ -675,8 +685,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     BackboneGraph.prefill_kv = prefill_kv
     BackboneGraph._decode_step = decode_step
     log.info("breeze backbone full-prefix on OpenVINO %s", device)
-    # Layer stack is in the OV blob. embed_tokens / lm_head stay for the Python loop.
-    tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     _install_breeze_text_ov(model, path, device)
     _install_breeze_depth_ov(model, path, device)
     _install_breeze_codec_ov(audio_tokenizer, path, device)

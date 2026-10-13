@@ -82,11 +82,14 @@ def _compile_ir(xml, device, config=None):
     """Compile a saved IR. mmap of an intact IR on the hostPath raises SIGBUS."""
     import openvino as ov
 
+    from .ov_compile_lock import gpu_compile
+
     core = ov.Core()
     core.set_property({"ENABLE_MMAP": False})
     props = dict(config or {})
     props["ENABLE_MMAP"] = False
-    return core.compile_model(xml, device, props)
+    with gpu_compile(device):
+        return core.compile_model(xml, device, props)
 
 
 def compile_module(mod, example, xml, stamp, device, config=None):
@@ -311,14 +314,20 @@ def patch_stateful_kv(ov_model, kv_from=2):
 
 
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
-                   stateful=False, kv_from=2):
-    """Like compile_module, but dynamize the time axis before save."""
+                   stateful=False, kv_from=2, compile_graph=True):
+    """Like compile_module, but dynamize the time axis before save.
+
+    compile_graph=False writes the IR and returns. The caller can drop the
+    torch weights before the GPU compile, which is the resident set that
+    killed Breeze once both prefills were on the device.
+    """
     import numpy as np
     import openvino as ov
     import torch
 
     os.makedirs(os.path.dirname(xml), exist_ok=True)
-    if not (os.path.isfile(xml) and os.path.isfile(stamp)):
+    wrote = not (os.path.isfile(xml) and os.path.isfile(stamp))
+    if wrote:
         if not isinstance(example, (tuple, list)):
             example = (example,)
         log.info("exporting %s example=%s stateful=%s", xml, [tuple(t.shape) for t in example], stateful)
@@ -332,6 +341,9 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
+    if not compile_graph:
+        log.info("%s %s; GPU compile deferred", "exported" if wrote else "found", xml)
+        return None
     import gc
     gc.collect()
     compiled = _compile_ir(
