@@ -518,8 +518,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     The separate decode graph kept the opening prefill frame and turned every
     later frame into jitter, after the official position was already an input.
     Continuation appends the new token and reruns this prefill. Token i is at
-    index i. Prefixes that fit use a 128-wide static graph; the rest use 320.
-    Both bake positions 0..T-1 and mask off the pad, so the token index holds.
+    index i. One 320-wide graph serves every prefix; the pad is masked off, so
+    the token index holds. A second 128-wide copy left no room in the 24Gi
+    cgroup for the text encoder.
     """
     _cache_backbone_suppress_mask()
     _cache_prompt_encode()
@@ -539,7 +540,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     backbone.float()
     src = str(path)
     prefill_t = 320
-    prefill_fit = 128
 
     def _compile_prefill(width, name, stamp, compile_graph=True):
         embeds = torch.zeros(1, width, hidden, dtype=torch.float32)
@@ -552,21 +552,13 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             compile_graph=compile_graph,
         )
 
-    # Both widths are exported before either one is compiled onto the GPU.
-    # Compiling the 320 graph while the fp32 weights were still resident is
-    # where Intel-tts33 exited, before the text encoder and depth stack.
+    # Export while the weights are still loaded, drop them, then compile.
+    # Two resident graphs filled the 24Gi cgroup before the text encoder.
     _compile_prefill(
         prefill_t, "breeze_backbone_prefill", ".ov-breeze-v7", compile_graph=False,
     )
-    _compile_prefill(
-        prefill_fit, "breeze_backbone_prefill_fit", ".ov-breeze-fit128-v1",
-        compile_graph=False,
-    )
     tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     prefill = _compile_prefill(prefill_t, "breeze_backbone_prefill", ".ov-breeze-v7")
-    prefill_fit_g = _compile_prefill(
-        prefill_fit, "breeze_backbone_prefill_fit", ".ov-breeze-fit128-v1",
-    )
     prefix = {"emb": None}
     orig_bb = backbone.forward
 
@@ -576,9 +568,9 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             raise RuntimeError(
                 "breeze ov prefix length %d exceeds static %d" % (n, prefill_t)
             )
-        # Same masked full prefix. The narrow graph skips the 320-wide pad.
-        width = prefill_fit if n <= prefill_fit else prefill_t
-        graph = prefill_fit_g if n <= prefill_fit else prefill
+        # Same masked full prefix. Short prompts use the 320 graph and mask the pad.
+        width = prefill_t
+        graph = prefill
         buf = np.zeros((1, width, hidden), dtype=np.float32)
         buf[:, :n] = np.ascontiguousarray(emb)
         mask = np.zeros((1, width), dtype=np.int64)
@@ -609,7 +601,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             log.info(
                 "breeze prefill tokens=%d width=%d %.3fs",
                 int(emb.shape[1]),
-                prefill_fit if int(emb.shape[1]) <= prefill_fit else prefill_t,
+                prefill_t,
                 time.perf_counter() - t0,
             )
         else:
