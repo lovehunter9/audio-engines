@@ -226,7 +226,9 @@ def _dynamize_time(ov_model, ranks=(2, 3, 4)):
         rank = shape.rank.get_length()
         if rank not in ranks:
             continue
-        if rank == 2 or rank == 3:
+        if rank == 1:
+            shape[0] = -1
+        elif rank == 2 or rank == 3:
             shape[1] = -1
         elif rank == 4:
             shape[2] = -1
@@ -630,9 +632,13 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
 
 
 def _scatter_slot(past, value, slot):
-    """Write one new key/value into a fixed time axis. The cache shape stays put."""
-    idx = slot.reshape(1, 1, 1, 1).expand(
-        value.shape[0], value.shape[1], 1, value.shape[3]
+    """Write new keys into a fixed time axis. slot is one index per new token.
+
+    The cache length stays max_t. A Python arange of the example width would
+    freeze that width, so the indices come in as a tensor.
+    """
+    idx = slot.reshape(1, 1, -1, 1).expand(
+        value.shape[0], value.shape[1], value.shape[2], value.shape[3]
     )
     return past.scatter(2, idx, value)
 
@@ -667,7 +673,9 @@ def _layer_fixed(layer, hidden, rope, attention_mask, slot, pk, pv):
     v_rep = _repeat_kv(v, n_rep)
     scale = float(getattr(attn, "scaling", head_dim ** -0.5))
     scores = torch.matmul(q, k_rep.transpose(2, 3)) * scale
-    keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, -1)
+    # [1, q, max_t] -> [1, 1, q, max_t]. The mask is an input, so q is not a
+    # constant baked from the export example.
+    keep = attention_mask.to(dtype=torch.bool).unsqueeze(1)
     scores = scores.masked_fill(~keep, torch.finfo(hidden.dtype).min)
     probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
     out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
@@ -677,7 +685,11 @@ def _layer_fixed(layer, hidden, rope, attention_mask, slot, pk, pv):
 
 
 def causal_fixed_slot_module(inner, max_t):
-    """One token, one fixed cache. A second backbone graph is a second weight copy."""
+    """Fixed cache, variable query length. One compiled graph holds the weights.
+
+    Prefill feeds the whole prefix in one call. Decode feeds one token. A
+    second backbone graph would be a second copy of the weights.
+    """
     import torch.nn as nn
 
     if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
@@ -896,23 +908,26 @@ class FixedSlotRunner:
         self.which = 0
 
     def step(self, embeds):
+        return self._infer(embeds)
+
+    def _infer(self, embeds):
         import numpy as np
         import openvino as ov
         import torch
 
-        if int(embeds.shape[1]) != 1:
+        q = int(embeds.shape[1])
+        if q < 1:
+            raise RuntimeError("fixed slot infer needs at least one token")
+        if self.slot + q > self.max_t:
             raise RuntimeError(
-                "fixed slot step expects one token, got %s" % (tuple(embeds.shape),)
-            )
-        if self.slot >= self.max_t:
-            raise RuntimeError(
-                "fixed slot %d exceeds %d" % (self.slot, self.max_t)
+                "fixed slot %d+%d exceeds %d" % (self.slot, q, self.max_t)
             )
         self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
-        self._mask = np.zeros((1, self.max_t), dtype=np.int64)
-        self._mask[0, : self.slot + 1] = 1
-        self._pos = np.array([[self.slot]], dtype=np.int64)
-        self._slot = np.array([self.slot], dtype=np.int64)
+        self._mask = np.zeros((1, q, self.max_t), dtype=np.int64)
+        for i in range(q):
+            self._mask[0, i, : self.slot + i + 1] = 1
+        self._pos = np.arange(self.slot, self.slot + q, dtype=np.int64).reshape(1, q)
+        self._slot = np.arange(self.slot, self.slot + q, dtype=np.int64)
         req = self.reqs[self.which]
         req.set_input_tensor(0, ov.Tensor(self._emb))
         req.set_input_tensor(1, ov.Tensor(self._mask))
@@ -923,17 +938,12 @@ class FixedSlotRunner:
         req.infer()
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
-        self.slot += 1
+        self.slot += q
         self.which ^= 1
         return hidden
 
     def prefill(self, embeds):
-        import torch
-
-        cols = []
-        for i in range(int(embeds.shape[1])):
-            cols.append(self.step(embeds[:, i:i + 1]))
-        return torch.cat(cols, dim=1)
+        return self._infer(embeds)
 
 
 def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):

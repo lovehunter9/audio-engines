@@ -516,9 +516,10 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     """Text, backbone, depth, and codec on OpenVINO. Backbone has one graph.
 
     Replaying the 320-wide prefix on every new token was about 1.5s a step.
-    A second compiled backbone is another copy of the weights and OOM'd the
-    iGPU machine. This graph writes token i at slot i, which is its position,
-    and the cache shape stays 320. One infer per token, one weight copy.
+    Walking that prefix one token at a time was still about 28s. A second
+    compiled backbone is another copy of the weights and OOM'd the iGPU
+    machine. This one graph writes the whole prefix in one call, then one
+    token per decode step. Token i is slot i, and the cache shape stays 320.
     """
     _cache_backbone_suppress_mask()
     _cache_prompt_encode()
@@ -542,24 +543,26 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, max_t, head_dim, dtype=torch.float32))
         past.append(torch.zeros(1, n_kv, max_t, head_dim, dtype=torch.float32))
-    embeds = torch.zeros(1, 1, hidden, dtype=torch.float32)
-    mask = torch.ones(1, max_t, dtype=torch.long)
-    pos = torch.zeros(1, 1, dtype=torch.long)
-    slot = torch.zeros(1, dtype=torch.long)
-    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v1")
+    # Trace a short query, then let q vary. q=1 would bake a one-token scatter.
+    example_q = 8
+    embeds = torch.zeros(1, example_q, hidden, dtype=torch.float32)
+    mask = torch.ones(1, example_q, max_t, dtype=torch.long)
+    pos = torch.arange(example_q, dtype=torch.long).unsqueeze(0)
+    slot = torch.arange(example_q, dtype=torch.long)
+    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v2")
     example = (embeds, mask, pos, slot, *past)
     # Export while the weights are still loaded, drop them, then compile once.
     tts_ov.compile_causal(
         tts_ov.causal_fixed_slot_module(backbone, max_t),
         example, xml, stamp, device,
-        dynamize_ranks=(),
+        dynamize_ranks=(1, 2, 3),
         compile_graph=False,
     )
     tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     compiled = tts_ov.compile_causal(
         tts_ov.causal_fixed_slot_module(backbone, max_t),
         example, xml, stamp, device,
-        dynamize_ranks=(),
+        dynamize_ranks=(1, 2, 3),
     )
     runner = tts_ov.FixedSlotRunner(compiled, n_layers, max_t, n_kv, head_dim)
     orig_bb = backbone.forward

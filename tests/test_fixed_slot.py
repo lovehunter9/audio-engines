@@ -79,8 +79,8 @@ class FixedSlotMatchTest(unittest.TestCase):
             cache = [torch.zeros(1, 2, 8, 8) for _ in range(4)]
             got = []
             for i in range(5):
-                mask = torch.zeros(1, 8, dtype=torch.long)
-                mask[0, : i + 1] = 1
+                mask = torch.zeros(1, 1, 8, dtype=torch.long)
+                mask[0, 0, : i + 1] = 1
                 out = slot(
                     emb[:, i:i + 1],
                     mask,
@@ -100,36 +100,57 @@ class FixedSlotMatchTest(unittest.TestCase):
                 cache[2 * layer + 1][:, :, :5], whole[2 + 2 * layer], atol=1e-5, rtol=1e-5,
             ))
 
+    @unittest.skipUnless(_HAS_TORCH, "needs torch")
+    def test_one_prefill_matches_full(self):
+        inner = _build()
+        full = tts_ov.causal_kv_module(inner, False).eval()
+        slot = tts_ov.causal_fixed_slot_module(inner, 8).eval()
+        emb = torch.randn(1, 5, 32)
+        mask = torch.zeros(1, 5, 8, dtype=torch.long)
+        for i in range(5):
+            mask[0, i, : i + 1] = 1
+        with torch.inference_mode():
+            whole = full(emb, torch.ones(1, 5, dtype=torch.long))
+            out = slot(
+                emb, mask,
+                torch.arange(5).unsqueeze(0),
+                torch.arange(5),
+                *[torch.zeros(1, 2, 8, 8) for _ in range(4)],
+            )
+        self.assertTrue(torch.allclose(out[0], whole[0], atol=1e-5, rtol=1e-5))
+
     @unittest.skipUnless(_HAS_TORCH and _HAS_OV, "needs torch and openvino")
     def test_compiled_slot_matches_torch(self):
         inner = _build()
         slot = tts_ov.causal_fixed_slot_module(inner, 8).eval()
-        emb = torch.randn(1, 5, 32)
+        emb = torch.randn(1, 6, 32)
         past = [torch.zeros(1, 2, 8, 8) for _ in range(4)]
         with tempfile.TemporaryDirectory() as tmp:
             _, xml, stamp = tts_ov.ir_paths(tmp, "slot", ".ov-slot-test")
             compiled = tts_ov.compile_causal(
                 slot,
                 (
-                    torch.zeros(1, 1, 32),
-                    torch.ones(1, 8, dtype=torch.long),
-                    torch.zeros(1, 1, dtype=torch.long),
-                    torch.zeros(1, dtype=torch.long),
+                    torch.zeros(1, 4, 32),
+                    torch.ones(1, 4, 8, dtype=torch.long),
+                    torch.arange(4).unsqueeze(0),
+                    torch.arange(4),
                     *past,
                 ),
                 xml, stamp, "CPU",
-                dynamize_ranks=(),
+                dynamize_ranks=(1, 2, 3),
             )
             runner = tts_ov.FixedSlotRunner(compiled, 2, 8, 2, 8)
             with torch.inference_mode():
-                got = runner.prefill(emb)
+                got = runner.prefill(emb[:, :5])
+                nxt = runner.step(emb[:, 5:6])
                 whole = tts_ov.causal_kv_module(inner, False)(
-                    emb, torch.ones(1, 5, dtype=torch.long),
+                    emb, torch.ones(1, 6, dtype=torch.long),
                 )
-        self.assertEqual(runner.slot, 5)
-        # A frozen slot or position blows up by the second token. OpenVINO's
-        # f32 path sits a few 1e-4 away from torch on every token.
-        self.assertTrue(torch.allclose(got, whole[0], atol=1e-3, rtol=1e-3))
+        self.assertEqual(runner.slot, 6)
+        # Export width is 4. A frozen width fails the 5-token prefill or the
+        # following 1-token step. OpenVINO's f32 path sits near 1e-3 of torch.
+        joined = torch.cat([got, nxt], dim=1)
+        self.assertTrue(torch.allclose(joined, whole[0], atol=1e-3, rtol=1e-3))
 
 
 if __name__ == "__main__":
