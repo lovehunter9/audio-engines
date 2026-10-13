@@ -213,6 +213,119 @@ def _tidy(segs, off, on):
     return [s for s in out if s["end"] - s["start"] >= on] if on > 0 else out
 
 
+# A frame at or above this is speech. Same cut _Runs uses, so exclusive and ordinary
+# timelines agree on which frames contain a voice.
+_ACTIVITY = 0.5
+# Activities are in 0..1. A lead smaller than this is a tie: keep the speaker already going.
+_TIE_MARGIN = 0.05
+_DECISIONS = ("unique_support", "tie_continuity", "deterministic_fallback")
+
+
+def _exclusive_decision(counts):
+    best = _DECISIONS[0]
+    for name in _DECISIONS[1:]:
+        if counts[name] > counts[best]:
+            best = name
+    return best
+
+
+def exclusive_timeline(rows, frame_sec, off, on):
+    """Collapse per-frame activities into one non-overlapping timeline and its evidence.
+
+    `rows` is [frames, speakers] in the same order `_Runs` consumed. Note's evidence_v3
+    asks for this shape (`exclusive_method=score_aware_v1`): `segments` and
+    `exclusive_evidence.segments` share start, end, speaker, and order. A clear lead is
+    unique_support. A close call keeps whoever was already talking (tie_continuity).
+    Otherwise the louder channel wins, and a lower index breaks an equal tie
+    (deterministic_fallback). A same-speaker gap no longer than `off` is bridged only
+    when nobody else holds it.
+    """
+    n = 0 if rows is None else len(rows)
+    if n == 0:
+        return [], []
+    width = len(rows[0])
+    if width == 0:
+        return [], []
+
+    def blank():
+        return {"counts": {name: 0 for name in _DECISIONS}, "support": [0.0] * width}
+
+    def accrue(run, kind, sc):
+        run["counts"][kind] += 1
+        for k in range(width):
+            run["support"][k] += float(sc[k])
+
+    runs = []
+    prev = None
+    for i in range(n):
+        sc = rows[i]
+        active = []
+        for k in range(width):
+            v = float(sc[k])
+            if v >= _ACTIVITY:
+                active.append((v, k))
+        if not active:
+            continue
+        active.sort(key=lambda item: (-item[0], item[1]))
+        top_v, top_k = active[0]
+        if len(active) == 1 or top_v - active[1][0] >= _TIE_MARGIN:
+            winner, kind = top_k, "unique_support"
+        else:
+            second_k = active[1][1]
+            prev_v = float(sc[prev]) if prev is not None else -1.0
+            if prev is not None and prev_v >= _ACTIVITY and prev in (top_k, second_k):
+                winner, kind = prev, "tie_continuity"
+            else:
+                winner, kind = top_k, "deterministic_fallback"
+        if runs and runs[-1]["spk"] == winner and runs[-1]["end"] == i:
+            runs[-1]["end"] = i + 1
+            accrue(runs[-1], kind, sc)
+        else:
+            run = blank()
+            run["start"], run["end"], run["spk"] = i, i + 1, winner
+            accrue(run, kind, sc)
+            runs.append(run)
+        prev = winner
+
+    merged = []
+    for run in runs:
+        gap = (run["start"] - merged[-1]["end"]) * frame_sec if merged else None
+        if merged and merged[-1]["spk"] == run["spk"] and gap <= off:
+            m = merged[-1]
+            m["end"] = run["end"]
+            for name in _DECISIONS:
+                m["counts"][name] += run["counts"][name]
+            for k in range(width):
+                m["support"][k] += run["support"][k]
+        else:
+            merged.append(run)
+
+    segments, evidence = [], []
+    for run in merged:
+        start = round(run["start"] * frame_sec, 3)
+        end = round(run["end"] * frame_sec, 3)
+        if on > 0 and end - start < on:
+            continue
+        speaker = "spk_%d" % run["spk"]
+        others = [(run["support"][k], k) for k in range(width) if k != run["spk"]]
+        runner_sum, runner_k = max(others) if others else (0.0, None)
+        runner = "spk_%d" % runner_k if runner_k is not None and runner_sum > 0 else ""
+        seg = {"start": start, "end": end, "speaker": speaker}
+        segments.append(seg)
+        evidence.append({
+            "ordinal": len(evidence),
+            "start": seg["start"], "end": seg["end"], "speaker": seg["speaker"],
+            "support_sum": run["support"][run["spk"]],
+            "runner_up_speaker": runner,
+            "runner_up_support_sum": runner_sum if runner else 0.0,
+            "unique_support_frames": run["counts"]["unique_support"],
+            "tie_continuity_frames": run["counts"]["tie_continuity"],
+            "deterministic_fallback_frames": run["counts"]["deterministic_fallback"],
+            "decision": _exclusive_decision(run["counts"]),
+        })
+    return segments, evidence
+
+
 def _frame_sec(model, sub):
     # A high-resolution head emits one row per output_subsampling_factor 10ms frames, not per encoder frame.
     if getattr(model, "high_resolution", False):
@@ -297,7 +410,7 @@ class _Streamer:
 
     HOP = 160                                   # samples per 10ms preprocessor frame @16k
 
-    def __init__(self, bounded=False):
+    def __init__(self, bounded=False, keep_scores=False):
         model = _state["model"]
         self.model, self.sm, self.device = model, model.sortformer_modules, _state["device"]
         self.n_spk = _state["n_spk"]
@@ -309,6 +422,8 @@ class _Streamer:
         # Enough for stable normalization plus left context, trimmed each step.
         self.keep_chunks = max(8, int(WINDOW_SEC * 16000) // self.chunk_audio)
         self.bounded = bounded
+        # Offline exclusive reconstruction needs the activities. Streaming does not keep them.
+        self.keep_scores = keep_scores
         self.reset()
 
     def reset(self):
@@ -322,6 +437,7 @@ class _Streamer:
         self.base_chunks = 0                    # chunks dropped from buf front
         self.committed = 0                      # chunks fed in total
         self.runs = _Runs(self.n_spk, self.frame_sec)
+        self.score_rows = []
 
     def feed(self, samples):
         import numpy as np
@@ -358,7 +474,10 @@ class _Streamer:
                     left_offset=lo, right_offset=ro)
                 if not self.bounded:
                     self.preds = out
-                self.runs.add(out[0, before:].detach().float().cpu().numpy())
+                rows = out[0, before:].detach().float().cpu().numpy().copy()
+                self.runs.add(rows)
+                if self.keep_scores and rows.size:
+                    self.score_rows.append(rows)
                 self.committed += 1
         # Trim behind the committed frontier, chunk-aligned so the feature grid never shifts.
         max_base = self.committed - self.keep_chunks
@@ -377,6 +496,14 @@ class _Streamer:
 
     def segments(self):
         return self.runs.segments()
+
+    def scores(self):
+        # [frames, speakers], concatenated in the order runs.add saw them.
+        import numpy as np
+
+        if not self.score_rows:
+            return np.zeros((0, self.n_spk), dtype="float32")
+        return np.concatenate(self.score_rows, axis=0)
 
 
 async def _run_streaming(ws):
