@@ -144,6 +144,44 @@ class OfflineEndpointTest(unittest.TestCase):
         d = r.json()
         self.assertEqual((d["min_duration_off"], d["min_duration_on"]), (1.25, 0.0))
         self.assertIn(seg(0.0, 3.0, "spk_0"), d["segments"])
+        self.assertIs(d["exclusive"], False)
+
+    def test_exclusive_without_frame_scores_is_refused(self):
+        self.nm._state["streaming_ok"] = False
+        self.assertEqual(self.post(exclusive="1", exclusive_method="score_aware_v1").status_code, 400)
+
+    def test_an_unknown_exclusive_method_is_refused(self):
+        self.assertEqual(self.post(exclusive="1", exclusive_method="legacy_binary_v1").status_code, 400)
+        self.assertEqual(self.post(exclusive="0", exclusive_method="score_aware_v1").status_code, 400)
+
+    def test_exclusive_request_returns_aligned_score_evidence(self):
+        self.nm._state["streaming_ok"] = True
+        saved = self.nm._diarize_chunked
+
+        def fake(ctx, path, seconds, keep_scores=False):
+            self.assertTrue(keep_scores)
+            return ([seg(0.0, 1.0, "spk_0"), seg(0.5, 1.5, "spk_1")], 1.0,
+                    [row(0.9, 0.2), row(0.2, 0.95)], 1.0)
+
+        self.nm._diarize_chunked = fake
+        try:
+            r = self.post(exclusive="1", exclusive_method="score_aware_v1")
+        finally:
+            self.nm._diarize_chunked = saved
+        self.assertEqual(r.status_code, 200, r.text)
+        d = r.json()
+        self.assertIs(d["exclusive"], True)
+        self.assertEqual(d["exclusive_method"], "score_aware_v1")
+        self.assertEqual(d["exclusive_evidence"]["method"], "score_aware_v1")
+        self.assertEqual(d["exclusive_evidence"]["frame_step_ms"], 1000.0)
+        ev = d["exclusive_evidence"]["segments"]
+        self.assertEqual(len(ev), len(d["segments"]))
+        for i, turn in enumerate(d["segments"]):
+            self.assertEqual((ev[i]["ordinal"], ev[i]["start"], ev[i]["end"], ev[i]["speaker"]),
+                             (i, turn["start"], turn["end"], turn["speaker"]))
+        self.assertEqual([s["speaker"] for s in d["segments"]], ["spk_0", "spk_1"])
+        self.assertLessEqual(d["segments"][0]["end"], d["segments"][1]["start"])
+        self.assertEqual(len(d["nonexclusive_segments"]), 2)
 
     def test_request_overrides_for_one_job(self):
         d = self.post(min_duration_off="0", min_duration_on="0.2").json()
@@ -228,6 +266,79 @@ class PcmBlocksTest(unittest.TestCase):
                 list(nm._pcm_blocks(f.name))
         finally:
             os.unlink(f.name)
+
+
+def row(*scores):
+    return list(scores)
+
+
+class ExclusiveTimelineTest(unittest.TestCase):
+    def test_a_clear_lead_is_unique_support(self):
+        segs, evidence = stream.exclusive_timeline([row(0.9, 0.1)], 1.0, 0.0, 0.0)
+        self.assertEqual(segs, [seg(0.0, 1.0, "spk_0")])
+        self.assertEqual(evidence[0]["decision"], "unique_support")
+        self.assertEqual(evidence[0]["runner_up_speaker"], "spk_1")
+        self.assertAlmostEqual(evidence[0]["support_sum"], 0.9)
+        self.assertAlmostEqual(evidence[0]["runner_up_support_sum"], 0.1)
+        self.assertEqual(evidence[0]["ordinal"], 0)
+        self.assertEqual(evidence[0]["start"], segs[0]["start"])
+        self.assertEqual(evidence[0]["end"], segs[0]["end"])
+        self.assertEqual(evidence[0]["speaker"], segs[0]["speaker"])
+
+    def test_overlap_keeps_one_speaker(self):
+        # Both above 0.5 in the same frame. The louder one owns that instant.
+        segs, evidence = stream.exclusive_timeline(
+            [row(0.2, 0.95), row(0.8, 0.7)], 1.0, 0.0, 0.0)
+        self.assertEqual([s["speaker"] for s in segs], ["spk_1", "spk_0"])
+        self.assertEqual(len(evidence), len(segs))
+        self.assertTrue(segs[0]["end"] <= segs[1]["start"])
+
+    def test_a_close_call_keeps_the_speaker_already_talking(self):
+        # Frame 1's louder channel is spk_0, but the margin is under 0.05 and spk_1 is still active.
+        segs, evidence = stream.exclusive_timeline(
+            [row(0.1, 0.9), row(0.70, 0.67), row(0.70, 0.67)], 1.0, 0.0, 0.0)
+        self.assertEqual(segs, [seg(0.0, 3.0, "spk_1")])
+        self.assertEqual(evidence[0]["decision"], "tie_continuity")
+        self.assertEqual(evidence[0]["tie_continuity_frames"], 2)
+        self.assertEqual(evidence[0]["unique_support_frames"], 1)
+
+    def test_an_unanchored_tie_falls_back_to_the_louder_lower_index(self):
+        segs, evidence = stream.exclusive_timeline([row(0.70, 0.67)], 1.0, 0.0, 0.0)
+        self.assertEqual(segs, [seg(0.0, 1.0, "spk_0")])
+        self.assertEqual(evidence[0]["decision"], "deterministic_fallback")
+
+    def test_equal_scores_break_toward_the_lower_index(self):
+        segs, _ = stream.exclusive_timeline([row(0.8, 0.8)], 1.0, 0.0, 0.0)
+        self.assertEqual(segs[0]["speaker"], "spk_0")
+
+    def test_a_short_same_speaker_gap_is_bridged_without_overlap(self):
+        segs, evidence = stream.exclusive_timeline(
+            [row(0.9, 0.0), row(0.0, 0.0), row(0.9, 0.0)], 1.0, 1.25, 0.0)
+        self.assertEqual(segs, [seg(0.0, 3.0, "spk_0")])
+        self.assertEqual(evidence[0]["unique_support_frames"], 2)
+        self.assertEqual(evidence[0]["start"], segs[0]["start"])
+        self.assertEqual(evidence[0]["end"], segs[0]["end"])
+
+    def test_someone_else_in_the_gap_blocks_the_bridge(self):
+        segs, _ = stream.exclusive_timeline(
+            [row(0.9, 0.0), row(0.0, 0.9), row(0.9, 0.0)], 1.0, 5.0, 0.0)
+        self.assertEqual([s["speaker"] for s in segs], ["spk_0", "spk_1", "spk_0"])
+
+    def test_min_duration_on_drops_the_evidence_with_the_turn(self):
+        segs, evidence = stream.exclusive_timeline(
+            [row(0.9, 0.0), row(0.0, 0.9), row(0.0, 0.9)], 1.0, 0.0, 1.5)
+        self.assertEqual(segs, [seg(1.0, 3.0, "spk_1")])
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["ordinal"], 0)
+        self.assertEqual(evidence[0]["speaker"], "spk_1")
+
+    def test_silence_is_empty(self):
+        self.assertEqual(stream.exclusive_timeline([row(0.1, 0.2), row(0.0, 0.4)], 0.01, 1.25, 0.0),
+                         ([], []))
+
+    def test_below_threshold_is_not_speech(self):
+        segs, _ = stream.exclusive_timeline([row(0.49, 0.0)], 1.0, 0.0, 0.0)
+        self.assertEqual(segs, [])
 
 
 if __name__ == "__main__":

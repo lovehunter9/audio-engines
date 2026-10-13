@@ -183,9 +183,10 @@ def _pcm_blocks(path, seconds=BLOCK_SEC):
                                % err.read().decode("utf-8", "replace").strip()[-300:])
 
 
-def _diarize_chunked(ctx, path, seconds):
+def _diarize_chunked(ctx, path, seconds, keep_scores=False):
     # The streaming runner in bounded mode: flat GPU and host memory at any length.
-    st = stream._Streamer(bounded=True)
+    # keep_scores retains the activities for exclusive reconstruction; the socket path does not.
+    st = stream._Streamer(bounded=True, keep_scores=keep_scores)
     fed = 0
     for block in _pcm_blocks(path):
         ctx.checkpoint()
@@ -197,7 +198,8 @@ def _diarize_chunked(ctx, path, seconds):
             ctx.progress(ratio=min(0.99, fed / 16000.0 / seconds), stage="diarize")
     with _infer_lock:
         st.step(final=True)
-    return st.segments(), fed / 16000.0
+    scores = st.scores() if keep_scores else None
+    return st.segments(), fed / 16000.0, scores, st.frame_sec
 
 
 def _diarize_whole(path):
@@ -218,6 +220,7 @@ def build_app(supports):
     @app.post("/v1/audio/diarization")
     async def diarize(file: UploadFile = File(...), num_speakers: str = Form(default=None),
                       exclusive: str = Form(default=None),
+                      exclusive_method: str = Form(default=None),
                       min_duration_off: str = Form(default=None),
                       min_duration_on: str = Form(default=None),
                       async_: str = Form(default=None, alias="async")):
@@ -228,24 +231,50 @@ def build_app(supports):
             on = stream._seconds(min_duration_on, MIN_DURATION_ON, "min_duration_on")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        if num_speakers or (exclusive is not None and tasks.truthy(exclusive)):
-            log.info("num_speakers/exclusive are pyannote knobs; this checkpoint ignores them")
+        want_exclusive = tasks.truthy(exclusive)
+        method = (exclusive_method or "").strip()
+        if method and not want_exclusive:
+            raise HTTPException(status_code=400, detail="exclusive_method requires exclusive=1")
+        if want_exclusive and method not in ("", "score_aware_v1"):
+            raise HTTPException(status_code=400,
+                                detail="exclusive_method must be score_aware_v1")
+        if want_exclusive and not _state.get("streaming_ok"):
+            raise HTTPException(status_code=400,
+                                detail="exclusive diarization needs the streaming step API")
+        if num_speakers:
+            log.info("num_speakers is a pyannote knob; this checkpoint ignores it")
         path, seconds = await BOUNDS.spill(file, "this deployment caps clip length")
 
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="diarize")
             if _state.get("streaming_ok"):
-                raw, dur = _diarize_chunked(ctx, path, seconds)
+                raw, dur, scores, frame_sec = _diarize_chunked(
+                    ctx, path, seconds, keep_scores=want_exclusive)
             else:
                 raw, dur = _diarize_whole(path)
+                scores, frame_sec = None, None
             ctx.meter(input_seconds=dur)
-            segs = stream._tidy(raw, off, on)
+            if want_exclusive:
+                ordinary = stream._tidy(raw, off, on)
+                segs, evidence = stream.exclusive_timeline(scores, frame_sec, off, on)
+            else:
+                ordinary, evidence = None, None
+                segs = stream._tidy(raw, off, on)
             speakers = sorted({s["speaker"] for s in segs})
             ctx.progress(ratio=1.0, stage="done")
-            return {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
+            body = {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
                     "num_speakers": len(speakers), "speakers": speakers,
-                    "num_segments": len(segs), "segments": segs, "exclusive": False,
+                    "num_segments": len(segs), "segments": segs, "exclusive": want_exclusive,
                     "min_duration_off": off, "min_duration_on": on}
+            if want_exclusive:
+                body["exclusive_method"] = "score_aware_v1"
+                body["nonexclusive_segments"] = ordinary
+                body["exclusive_evidence"] = {
+                    "method": "score_aware_v1",
+                    "frame_step_ms": round(frame_sec * 1000.0, 3),
+                    "segments": evidence,
+                }
+            return body
 
         # The lock is taken per chunk, so an hours-long job does not stall live sockets.
         return await tasks.dispatch(async_, "diar", MODEL_NAME, _work,
