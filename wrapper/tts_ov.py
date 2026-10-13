@@ -346,14 +346,11 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
         return None
     import gc
     gc.collect()
-    compiled = _compile_ir(
-        xml,
-        device,
-        {
-            "INFERENCE_PRECISION_HINT": "f32",
-            "KV_CACHE_PRECISION": "undefined",
-        },
-    )
+    props = {"INFERENCE_PRECISION_HINT": "f32"}
+    # GPU accepts "undefined" and then keeps the IR dtype. CPU rejects it.
+    if not (device or "").strip().upper().startswith("CPU"):
+        props["KV_CACHE_PRECISION"] = "undefined"
+    compiled = _compile_ir(xml, device, props)
     log.info("compiled %s on %s inference_precision=f32 stateful=%s", xml, device, stateful)
 
     def run(*arrays):
@@ -632,6 +629,88 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     return h, k, v
 
 
+def _scatter_slot(past, value, slot):
+    """Write one new key/value into a fixed time axis. The cache shape stays put."""
+    idx = slot.reshape(1, 1, 1, 1).expand(
+        value.shape[0], value.shape[1], 1, value.shape[3]
+    )
+    return past.scatter(2, idx, value)
+
+
+def _layer_fixed(layer, hidden, rope, attention_mask, slot, pk, pv):
+    """Same qkv/rope/mlp as _layer_kv, but the cache is a fixed buffer, not a cat."""
+    import torch
+
+    attn = layer.self_attn
+    residual = hidden
+    h = layer.input_layernorm(hidden)
+    b, t, _ = h.shape
+    head_dim = int(attn.head_dim)
+    n_q = attn.q_proj.out_features // head_dim
+    n_kv = attn.k_proj.out_features // head_dim
+    q = attn.q_proj(h).view(b, t, n_q, head_dim)
+    k = attn.k_proj(h).view(b, t, n_kv, head_dim)
+    v = attn.v_proj(h).view(b, t, n_kv, head_dim)
+    if getattr(attn, "q_norm", None) is not None:
+        q = attn.q_norm(q)
+    if getattr(attn, "k_norm", None) is not None:
+        k = attn.k_norm(k)
+    q = q.transpose(1, 2)
+    k = k.transpose(1, 2)
+    v = v.transpose(1, 2)
+    cos, sin = rope
+    q, k = _apply_rope(q, k, cos, sin)
+    k = _scatter_slot(pk, k, slot)
+    v = _scatter_slot(pv, v, slot)
+    n_rep = n_q // n_kv
+    k_rep = _repeat_kv(k, n_rep)
+    v_rep = _repeat_kv(v, n_rep)
+    scale = float(getattr(attn, "scaling", head_dim ** -0.5))
+    scores = torch.matmul(q, k_rep.transpose(2, 3)) * scale
+    keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, -1)
+    scores = scores.masked_fill(~keep, torch.finfo(hidden.dtype).min)
+    probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
+    out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
+    h = residual + attn.o_proj(out)
+    h = h + layer.mlp(layer.post_attention_layernorm(h))
+    return h, k, v
+
+
+def causal_fixed_slot_module(inner, max_t):
+    """One token, one fixed cache. A second backbone graph is a second weight copy."""
+    import torch.nn as nn
+
+    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
+        raise RuntimeError("backbone missing layers/norm/rotary_emb for slot export")
+    cfg = getattr(inner, "config", None)
+    if cfg is not None:
+        cfg._attn_implementation = "eager"
+    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
+
+    class _Step(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.inner = inner
+
+        def forward(self, inputs_embeds, attention_mask, position_ids, slot, *past):
+            wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
+            hidden = inputs_embeds.to(dtype=wdtype)
+            rope = self.inner.rotary_emb(hidden, position_ids)
+            present = []
+            for i, layer in enumerate(self.inner.layers[:n_layers]):
+                hidden, nk, nv = _layer_fixed(
+                    layer, hidden, rope, attention_mask, slot,
+                    past[2 * i].to(dtype=wdtype),
+                    past[2 * i + 1].to(dtype=wdtype),
+                )
+                present.extend([nk, nv])
+            hidden = self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
+            out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
+            return (hidden, *out_kv)
+
+    return _Step()
+
+
 class KvRunner:
     """Prefill once, then decode with tensor K/V. No full-seq rerun.
 
@@ -780,6 +859,81 @@ class DeviceKvRunner:
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
         self._prefix = q
         return hidden[:, -q:, :]
+
+
+class FixedSlotRunner:
+    """One InferRequest pair, one static cache. K/V never change shape.
+
+    Growing a stateful cache between tokens is what made the step time wander,
+    and a second compiled backbone is a second copy of the weights.
+    """
+
+    def __init__(self, decode, n_layers, max_t, n_kv, head_dim):
+        compiled = getattr(decode, "compiled", None)
+        if compiled is None:
+            raise RuntimeError("FixedSlotRunner needs compile_causal().compiled")
+        self.compiled = compiled
+        self.reqs = (
+            compiled.create_infer_request(),
+            compiled.create_infer_request(),
+        )
+        self.n_layers = int(n_layers)
+        self.max_t = int(max_t)
+        self.n_kv = int(n_kv)
+        self.head_dim = int(head_dim)
+        self.which = 0
+        self.slot = 0
+        self.kv = None
+        self.reset()
+
+    def reset(self):
+        import numpy as np
+        import openvino as ov
+
+        zeros = np.zeros((1, self.n_kv, self.max_t, self.head_dim), dtype=np.float32)
+        self.kv = [ov.Tensor(np.array(zeros, copy=True)) for _ in range(2 * self.n_layers)]
+        self.slot = 0
+        self.which = 0
+
+    def step(self, embeds):
+        import numpy as np
+        import openvino as ov
+        import torch
+
+        if int(embeds.shape[1]) != 1:
+            raise RuntimeError(
+                "fixed slot step expects one token, got %s" % (tuple(embeds.shape),)
+            )
+        if self.slot >= self.max_t:
+            raise RuntimeError(
+                "fixed slot %d exceeds %d" % (self.slot, self.max_t)
+            )
+        self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        self._mask = np.zeros((1, self.max_t), dtype=np.int64)
+        self._mask[0, : self.slot + 1] = 1
+        self._pos = np.array([[self.slot]], dtype=np.int64)
+        self._slot = np.array([self.slot], dtype=np.int64)
+        req = self.reqs[self.which]
+        req.set_input_tensor(0, ov.Tensor(self._emb))
+        req.set_input_tensor(1, ov.Tensor(self._mask))
+        req.set_input_tensor(2, ov.Tensor(self._pos))
+        req.set_input_tensor(3, ov.Tensor(self._slot))
+        for i, t in enumerate(self.kv):
+            req.set_input_tensor(4 + i, t)
+        req.infer()
+        hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
+        self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
+        self.slot += 1
+        self.which ^= 1
+        return hidden
+
+    def prefill(self, embeds):
+        import torch
+
+        cols = []
+        for i in range(int(embeds.shape[1])):
+            cols.append(self.step(embeds[:, i:i + 1]))
+        return torch.cat(cols, dim=1)
 
 
 def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):

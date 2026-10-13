@@ -513,12 +513,12 @@ def _cache_prompt_encode():
 
 
 def _install_breeze_ov(model, path, device, audio_tokenizer=None):
-    """Text, backbone, depth, and codec on OpenVINO.
+    """Text, backbone, depth, and codec on OpenVINO. Backbone has one graph.
 
-    Replaying the 320-wide prefix cost about 1.5s per new token on the iGPU.
-    Prefill runs once and seeds a q=1 device-KV decode, same layout as FireRed.
-    Stateful VariableState kept the opening frame and the waveform jittered,
-    so decode does not use it. The cache still stops at 320 tokens.
+    Replaying the 320-wide prefix on every new token was about 1.5s a step.
+    A second compiled backbone is another copy of the weights and OOM'd the
+    iGPU machine. This graph writes token i at slot i, which is its position,
+    and the cache shape stays 320. One infer per token, one weight copy.
     """
     _cache_backbone_suppress_mask()
     _cache_prompt_encode()
@@ -532,55 +532,36 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     if backbone is None:
         raise RuntimeError("Breeze model has no backbone_model to export")
     cfg = getattr(backbone, "config", None) or model.config
-    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     hidden = int(cfg.hidden_size)
+    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
     # A long reference prefill overflowed in bf16. CUDA never reaches here.
     backbone.float()
     src = str(path)
     max_t = 320
-    example_t = 16
     past = []
     for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-        past.append(torch.zeros(1, n_kv, example_t, head_dim, dtype=torch.float32))
-    embeds_pre = torch.zeros(1, example_t, hidden, dtype=torch.float32)
-    mask_pre = torch.ones(1, example_t, dtype=torch.long)
-    embeds_q1 = torch.zeros(1, 1, hidden, dtype=torch.float32)
-    mask_q1 = torch.ones(1, example_t + 1, dtype=torch.long)
-    pos_q1 = torch.arange(example_t, example_t + 1, dtype=torch.long).unsqueeze(0)
-
-    def _build(mod, example, name, stamp, ranks, compile_graph):
-        _, xml, stamp_path = tts_ov.ir_paths(src, name, stamp)
-        return tts_ov.compile_causal(
-            mod, example, xml, stamp_path, device,
-            dynamize_ranks=ranks,
-            stateful=False,
-            compile_graph=compile_graph,
-        )
-
-    # Export both graphs while the weights are loaded, drop them, then compile.
-    prefill_mod = tts_ov.causal_kv_module(backbone, False)
-    decode_mod = tts_ov.causal_kv_module(backbone, True, external_position=True)
-    _build(
-        prefill_mod, (embeds_pre, mask_pre),
-        "breeze_backbone_prefill", ".ov-breeze-prefill-v8", (2, 3), False,
-    )
-    _build(
-        decode_mod, (embeds_q1, mask_q1, pos_q1, *past),
-        "breeze_backbone_decode_q1", ".ov-breeze-decode-q1-v1", (2, 4), False,
+        past.append(torch.zeros(1, n_kv, max_t, head_dim, dtype=torch.float32))
+        past.append(torch.zeros(1, n_kv, max_t, head_dim, dtype=torch.float32))
+    embeds = torch.zeros(1, 1, hidden, dtype=torch.float32)
+    mask = torch.ones(1, max_t, dtype=torch.long)
+    pos = torch.zeros(1, 1, dtype=torch.long)
+    slot = torch.zeros(1, dtype=torch.long)
+    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v1")
+    example = (embeds, mask, pos, slot, *past)
+    # Export while the weights are still loaded, drop them, then compile once.
+    tts_ov.compile_causal(
+        tts_ov.causal_fixed_slot_module(backbone, max_t),
+        example, xml, stamp, device,
+        dynamize_ranks=(),
+        compile_graph=False,
     )
     tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
-    prefill = _build(
-        prefill_mod, (embeds_pre, mask_pre),
-        "breeze_backbone_prefill", ".ov-breeze-prefill-v8", (2, 3), True,
+    compiled = tts_ov.compile_causal(
+        tts_ov.causal_fixed_slot_module(backbone, max_t),
+        example, xml, stamp, device,
+        dynamize_ranks=(),
     )
-    decode = _build(
-        decode_mod, (embeds_q1, mask_q1, pos_q1, *past),
-        "breeze_backbone_decode_q1", ".ov-breeze-decode-q1-v1", (2, 4), True,
-    )
-    runner = tts_ov.DeviceKvRunner(
-        decode, n_layers, prefill=prefill, external_position=True,
-    )
+    runner = tts_ov.FixedSlotRunner(compiled, n_layers, max_t, n_kv, head_dim)
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):
@@ -595,33 +576,33 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
                 "breeze ov backbone is compiled for batch=1 (cfg_scale=1); got %s"
                 % (tuple(embeds.shape),)
             )
-        n = int(embeds.shape[1])
         if past_in is None:
             import time
+            n = int(embeds.shape[1])
             if n > max_t:
                 raise RuntimeError(
-                    "breeze ov prefill length %d exceeds %d" % (n, max_t)
+                    "breeze ov prefix length %d exceeds static %d" % (n, max_t)
                 )
             runner.reset()
-            step_t["n"] = step_t["embed"] = step_t["ov"] = step_t["head"] = 0
             t0 = time.perf_counter()
-            states = runner.step(embeds)
+            states = runner.prefill(embeds.detach())
             log.info(
                 "breeze prefill tokens=%d %.3fs",
                 n, time.perf_counter() - t0,
             )
         else:
-            if n != 1:
+            if int(embeds.shape[1]) != 1:
                 raise RuntimeError(
                     "breeze ov continuation expects one new token, got %s"
                     % (tuple(embeds.shape),)
                 )
-            if runner.prefix_len + 1 > max_t:
+            if runner.slot <= 0:
+                raise RuntimeError("breeze ov continuation before a prefill")
+            if runner.slot >= max_t:
                 raise RuntimeError(
-                    "breeze ov decode length %d exceeds %d"
-                    % (runner.prefix_len + 1, max_t)
+                    "breeze ov slot %d exceeds %d" % (runner.slot, max_t)
                 )
-            states = runner.step(embeds)
+            states = runner.step(embeds.detach())
         if states.dtype != embeds.dtype:
             states = states.to(dtype=embeds.dtype)
         return type("BBOut", (), {
@@ -632,7 +613,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     backbone.forward = bb_forward
 
     def prefill_kv(self, past_key_values):
-        seq_len = runner.prefix_len
+        seq_len = int(runner.slot)
         if seq_len <= 0:
             raise RuntimeError("breeze ov prefill_kv before a prefill")
         if seq_len > self.max_seq_len:
@@ -686,7 +667,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     BackboneGraph.prefill_kv = prefill_kv
     BackboneGraph._decode_step = decode_step
     log.info(
-        "breeze backbone prefill+device-KV decode on OpenVINO %s layers=%d",
+        "breeze backbone one slot graph on OpenVINO %s layers=%d",
         device, n_layers,
     )
     _install_breeze_text_ov(model, path, device)
