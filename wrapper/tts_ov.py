@@ -987,7 +987,7 @@ class FixedSlotRunner:
         n_kv = 2 * self.n_layers
         self.kv = [req.get_output_tensor(i) for i in range(1, 1 + n_kv)]
         self.logits = None
-        if len(req.outputs) > 1 + n_kv:
+        if len(self.compiled.outputs) > 1 + n_kv:
             self.logits = torch.from_numpy(
                 np.array(req.get_output_tensor(1 + n_kv).data, copy=True)
             )
