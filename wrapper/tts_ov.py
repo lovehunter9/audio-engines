@@ -349,8 +349,30 @@ def patch_stateful_kv(ov_model, kv_from=2):
     return ov_model
 
 
+def _pin_f32_outputs(ov_model):
+    """Keep f32 ops when the GPU hint is f16.
+
+    The hint otherwise rewrites every f32 matmul. Depth attention, the SwiGLU
+    product's down projection, and the codebook head stay f32.
+    """
+    import openvino as ov
+
+    n = 0
+    for op in ov_model.get_ordered_ops():
+        for i in range(op.get_output_size()):
+            if op.get_output_element_type(i) == ov.Type.f32:
+                op.get_rt_info()["disable_fp16_compression"] = True
+                n += 1
+                break
+    if n < 1:
+        raise RuntimeError("no f32 op to keep under the f16 hint")
+    log.info("pinned %d f32 ops against fp16 compression", n)
+    return n
+
+
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
-                   stateful=False, kv_from=2, compile_graph=True, precision="f32"):
+                   stateful=False, kv_from=2, compile_graph=True, precision="f32",
+                   pin_f32=False):
     """Like compile_module, but dynamize the time axis before save.
 
     compile_graph=False writes the IR and returns. The caller can drop the
@@ -375,6 +397,8 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
             )
         if stateful:
             ov_model = patch_stateful_kv(ov_model, kv_from=kv_from)
+        if pin_f32:
+            _pin_f32_outputs(ov_model)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
@@ -633,7 +657,19 @@ def causal_kv_module(inner, with_past, external_position=False):
     return _Step()
 
 
-def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
+def _mlp_wide_f16(mlp, x):
+    """f16 gate and up, f32 product and down projection.
+
+    BreezeMLP does act(gate(x)) * up(x) in the input dtype. That product in
+    f16 is what stopped the utterance at 20 frames. The two wide projections
+    are the weight traffic.
+    """
+    gate = mlp.gate_proj(x.half()).float()
+    up = mlp.up_proj(x.half()).float()
+    return mlp.down_proj(mlp.act_fn(gate) * up)
+
+
+def _layer_kv(layer, hidden, rope, attn_mask, pk, pv, wide_f16=False):
     """input_ln → qkv/rope/cat → eager attn → o_proj → mlp. Tensor cache only."""
     import torch
 
@@ -668,7 +704,12 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
     out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
     h = residual + attn.o_proj(out)
-    h = h + layer.mlp(layer.post_attention_layernorm(h))
+    x = layer.post_attention_layernorm(h)
+    if wide_f16:
+        x = _mlp_wide_f16(layer.mlp, x)
+    else:
+        x = layer.mlp(x)
+    h = h + x
     return h, k, v
 
 
@@ -1097,7 +1138,9 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
                 if past is not None:
                     pk = past[2 * i].to(dtype=wdtype)
                     pv = past[2 * i + 1].to(dtype=wdtype)
-                hidden, nk, nv = _layer_kv(layer, hidden, rope, attn, pk, pv)
+                hidden, nk, nv = _layer_kv(
+                    layer, hidden, rope, attn, pk, pv, wide_f16=True,
+                )
                 present.extend([nk, nv])
             hidden = self.inner.norm(hidden).to(dtype=hidden.dtype)
             return hidden, present
