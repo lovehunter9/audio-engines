@@ -632,9 +632,11 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     mask = torch.ones(1, example_q, max_t, dtype=torch.long)
     pos = torch.arange(example_q, dtype=torch.long).unsqueeze(0)
     slot = torch.arange(example_q, dtype=torch.long)
+    # f16 logits from the slot graph, and an f16 codebook gather, both changed
+    # the sampled tokens. The transcript matched when this head and this table
+    # stayed f32 torch. They are one matmul and one gather, not a second backbone.
     lm_head = model.lm_head.float()
     _untie_depth_codebooks(model, backbone)
-    _install_breeze_embed_ov(backbone, src, device)
     _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v3")
     example = (embeds, mask, pos, slot, *past)
     # Export while the weights are still loaded, drop them, then compile once.
@@ -647,7 +649,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     )
     tts_ov.release_parameters(getattr(backbone, "layers", None), "breeze backbone layers")
     tts_ov.release_parameters(getattr(backbone, "norm", None), "breeze backbone norm")
-    tts_ov.release_parameters(lm_head, "breeze backbone lm_head")
     _install_breeze_text_ov(model, path, device)
     _install_breeze_depth_ov(model, path, device)
     _install_breeze_codec_ov(audio_tokenizer, path, device)
@@ -657,17 +658,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         dynamize_ranks=(1, 2, 3),
         precision="f16",
     )
-    if getattr(backbone.embed_tokens, "_ov_embed_bind", None) is not None:
-        backbone.embed_tokens._ov_embed_bind()
     runner = tts_ov.FixedSlotRunner(compiled, n_layers, max_t, n_kv, head_dim)
-
-    def _lm_head_forward(_self, _x):
-        logits = getattr(runner, "logits", None)
-        if logits is None:
-            raise RuntimeError("breeze ov lm_head ran before the backbone graph")
-        return logits
-
-    lm_head.forward = _lm_head_forward.__get__(lm_head, type(lm_head))
     orig_bb = backbone.forward
 
     def bb_forward(*args, **kwargs):
