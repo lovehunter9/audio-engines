@@ -78,6 +78,22 @@ def _rss_kib():
     return "?"
 
 
+def _device_props(device, precision):
+    """GPU compute precision. CPU stays f32: that plugin rejects f16 and undefined KV.
+
+    f16 is the iGPU path. LATENCY keeps a single stream so the codec graph is
+    not a second resident copy of the same weights.
+    """
+    cpu = (device or "").strip().upper().startswith("CPU")
+    prec = "f32" if cpu else (precision or "f32")
+    props = {"INFERENCE_PRECISION_HINT": prec}
+    if not cpu:
+        props["KV_CACHE_PRECISION"] = "undefined"
+        if prec == "f16":
+            props["PERFORMANCE_HINT"] = "LATENCY"
+    return props, prec
+
+
 def _compile_ir(xml, device, config=None):
     """Compile a saved IR. mmap of an intact IR on the hostPath raises SIGBUS."""
     import openvino as ov
@@ -92,7 +108,8 @@ def _compile_ir(xml, device, config=None):
         return core.compile_model(xml, device, props)
 
 
-def compile_module(mod, example, xml, stamp, device, config=None):
+def compile_module(mod, example, xml, stamp, device, config=None, precision="f32",
+                    compile_graph=True):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np.
 
     The callable's .compiled is the ov.CompiledModel so a caller can keep one
@@ -121,8 +138,15 @@ def compile_module(mod, example, xml, stamp, device, config=None):
                 ov_model = ov.convert_model(traced)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
+    if not compile_graph:
+        log.info("found %s; GPU compile deferred", xml)
+        return None
+    if config is None:
+        config, prec = _device_props(device, precision)
+    else:
+        prec = (config or {}).get("INFERENCE_PRECISION_HINT", precision)
     compiled = _compile_ir(xml, device, config)
-    log.info("compiled %s on %s", xml, device)
+    log.info("compiled %s on %s inference_precision=%s", xml, device, prec)
 
     def run(*arrays):
         feed = {}
@@ -135,7 +159,7 @@ def compile_module(mod, example, xml, stamp, device, config=None):
     return run
 
 
-def compile_static(mod, example, xml, stamp, device):
+def compile_static(mod, example, xml, stamp, device, precision="f32", compile_graph=True):
     """Like compile_module, but pin every input to the example shape.
 
     convert_model leaves codec T dynamic. Upsample residuals then Add a
@@ -171,8 +195,12 @@ def compile_static(mod, example, xml, stamp, device):
         log.info("froze %s inputs=%s", xml, mapping)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
-    compiled = _compile_ir(xml, device)
-    log.info("compiled static %s on %s", xml, device)
+    if not compile_graph:
+        log.info("exported static %s; GPU compile deferred", xml)
+        return None
+    props, prec = _device_props(device, precision)
+    compiled = _compile_ir(xml, device, props)
+    log.info("compiled static %s on %s inference_precision=%s", xml, device, prec)
 
     def run(*arrays):
         feed = {}
@@ -316,7 +344,7 @@ def patch_stateful_kv(ov_model, kv_from=2):
 
 
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
-                   stateful=False, kv_from=2, compile_graph=True):
+                   stateful=False, kv_from=2, compile_graph=True, precision="f32"):
     """Like compile_module, but dynamize the time axis before save.
 
     compile_graph=False writes the IR and returns. The caller can drop the
@@ -348,12 +376,13 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
         return None
     import gc
     gc.collect()
-    props = {"INFERENCE_PRECISION_HINT": "f32"}
     # GPU accepts "undefined" and then keeps the IR dtype. CPU rejects it.
-    if not (device or "").strip().upper().startswith("CPU"):
-        props["KV_CACHE_PRECISION"] = "undefined"
+    props, prec = _device_props(device, precision)
     compiled = _compile_ir(xml, device, props)
-    log.info("compiled %s on %s inference_precision=f32 stateful=%s", xml, device, stateful)
+    log.info(
+        "compiled %s on %s inference_precision=%s stateful=%s",
+        xml, device, prec, stateful,
+    )
 
     def run(*arrays):
         feed = {}
@@ -366,7 +395,7 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
     return run
 
 
-def compile_dyn_last(mod, example, xml, stamp, device):
+def compile_dyn_last(mod, example, xml, stamp, device, precision="f32", compile_graph=True):
     """Compile a chunk module whose last axis grows (codec conv time)."""
     import numpy as np
     import openvino as ov
@@ -397,8 +426,12 @@ def compile_dyn_last(mod, example, xml, stamp, device):
             ov_model.reshape(mapping)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
-    compiled = _compile_ir(xml, device, {"INFERENCE_PRECISION_HINT": "f32"})
-    log.info("compiled %s on %s inference_precision=f32", xml, device)
+    if not compile_graph:
+        log.info("exported %s; GPU compile deferred", xml)
+        return None
+    props, prec = _device_props(device, precision)
+    compiled = _compile_ir(xml, device, props)
+    log.info("compiled %s on %s inference_precision=%s", xml, device, prec)
 
     def run(*arrays):
         feed = {}
@@ -684,11 +717,12 @@ def _layer_fixed(layer, hidden, rope, attention_mask, slot, pk, pv):
     return h, k, v
 
 
-def causal_fixed_slot_module(inner, max_t):
+def causal_fixed_slot_module(inner, max_t, lm_head=None):
     """Fixed cache, variable query length. One compiled graph holds the weights.
 
     Prefill feeds the whole prefix in one call. Decode feeds one token. A
-    second backbone graph would be a second copy of the weights.
+    second backbone graph would be a second copy of the weights. lm_head, when
+    passed, is that same graph's last matmul, not another compiled model.
     """
     import torch.nn as nn
 
@@ -703,6 +737,7 @@ def causal_fixed_slot_module(inner, max_t):
         def __init__(self):
             super().__init__()
             self.inner = inner
+            self.lm_head = lm_head
 
         def forward(self, inputs_embeds, attention_mask, position_ids, slot, *past):
             wdtype = self.inner.layers[0].self_attn.q_proj.weight.dtype
@@ -718,7 +753,10 @@ def causal_fixed_slot_module(inner, max_t):
                 present.extend([nk, nv])
             hidden = self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
             out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
-            return (hidden, *out_kv)
+            if self.lm_head is None:
+                return (hidden, *out_kv)
+            logits = self.lm_head(hidden[:, -1, :].to(dtype=self.lm_head.weight.dtype))
+            return (hidden, *out_kv, logits)
 
     return _Step()
 
@@ -937,7 +975,13 @@ class FixedSlotRunner:
             req.set_input_tensor(4 + i, t)
         req.infer()
         hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
-        self.kv = [req.get_output_tensor(i) for i in range(1, 1 + 2 * self.n_layers)]
+        n_kv = 2 * self.n_layers
+        self.kv = [req.get_output_tensor(i) for i in range(1, 1 + n_kv)]
+        self.logits = None
+        if len(req.outputs) > 1 + n_kv:
+            self.logits = torch.from_numpy(
+                np.array(req.get_output_tensor(1 + n_kv).data, copy=True)
+            )
         self.slot += q
         self.which ^= 1
         return hidden
@@ -946,7 +990,7 @@ class FixedSlotRunner:
         return self._infer(embeds)
 
 
-def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
+def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_proj=None):
     """One audio frame: prefill plus every codebook step, one OpenVINO infer.
 
     Fifteen separate depth infers stay near 0.6s a frame; the time is the
@@ -974,6 +1018,26 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
             super().__init__()
             self.inner = inner
             self.head = head
+            self.backbone_proj = backbone_proj
+
+        def _open_frame(self, backbone_h, first_id):
+            # Official loop: embed [0, first_code], overwrite slot 0 with the
+            # backbone hidden, then project. Doing it here keeps those weights
+            # in this graph.
+            first = first_id.reshape(-1).to(dtype=torch.long)
+            ids = torch.stack([torch.zeros_like(first), first], dim=1)
+            emb = self.inner.embed_tokens(ids)
+            bh = backbone_h
+            if bh.dim() == 1:
+                bh = bh.unsqueeze(0)
+            if bh.dim() == 3:
+                bh = bh[:, 0]
+            if self.backbone_proj is not None:
+                bh = self.backbone_proj(bh.to(dtype=self.backbone_proj.weight.dtype))
+            emb = emb.clone()
+            emb[:, 0, :] = bh.to(dtype=emb.dtype)
+            proj = self.inner.inputs_embeds_projector
+            return proj(emb.to(dtype=proj.weight.dtype))
 
         def _pick(self, logits, u, temperature, top_k, top_p, do_sample):
             scores = logits[0, 0].float()
@@ -1029,8 +1093,8 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size):
             hidden = self.inner.norm(hidden).to(dtype=hidden.dtype)
             return hidden, present
 
-        def forward(self, prefill_embeds, temperature, top_k, top_p, do_sample, uniform):
-            hidden, past = self._stack(prefill_embeds, None)
+        def forward(self, backbone_h, first_id, temperature, top_k, top_p, do_sample, uniform):
+            hidden, past = self._stack(self._open_frame(backbone_h, first_id), None)
             head_w = self.head.weight
             tokens = []
             tok = self._pick(
