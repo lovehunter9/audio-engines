@@ -959,16 +959,12 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # Attention, norm, the SwiGLU product, down_proj, and the codebook head
-    # stay f32. gate_proj and up_proj are the wide reads. The whole MLP in
-    # f16 stopped at 20 frames. intel-tts47 (f4bb7d5) is the f32 frame.
+    # Same f32 frame as intel-tts47 (f4bb7d5). f16 matmul in this graph changes
+    # the codes. LATENCY is only the schedule the f16 graphs already use.
     inner.layers.float()
     inner.norm.float()
-    for layer in inner.layers:
-        layer.mlp.gate_proj.half()
-        layer.mlp.up_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v11",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v8",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -983,7 +979,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f16", pin_f32=True,
+        dynamize_ranks=(), compile_graph=False, precision="f32", latency=True,
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -992,7 +988,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f16", pin_f32=True,
+            dynamize_ranks=(), precision="f32", latency=True,
         )
 
         def full_loop(self):
