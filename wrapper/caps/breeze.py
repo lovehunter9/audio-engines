@@ -959,13 +959,14 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # Same f32 stack as the prefix path that already matches the transcript.
-    inner.layers.float()
-    inner.norm.float()
-    # f16 on this graph changed the codebook draws. The backbone then
-    # stopped at 20 frames. The matching transcript used this same frame at f32.
+    # Layers are the bulk of the frame. f16 there is the remaining cut.
+    # The head stays f32: an f16 head changed the draws and stopped at 20 frames.
+    # The two-token prefix is still built outside this graph.
+    inner.layers.half()
+    inner.norm.half()
+    head.float()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v8",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v9",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -980,16 +981,19 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f32",
+        dynamize_ranks=(), compile_graph=False, precision="f16", pin_f32=True,
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
     tts_ov.release_parameters(head, "breeze depth head")
+    for p in (frame_mod.cb_table, frame_mod.cb_proj_w, frame_mod.cb_proj_b):
+        if p is not None and p.data.numel():
+            p.data = p.data.new_empty(0)
 
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f32",
+            dynamize_ranks=(), precision="f16", pin_f32=True,
         )
 
         def full_loop(self):

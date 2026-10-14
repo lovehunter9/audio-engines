@@ -349,8 +349,30 @@ def patch_stateful_kv(ov_model, kv_from=2):
     return ov_model
 
 
+def _pin_f32_outputs(ov_model):
+    """Keep f32 ops when the GPU hint is f16.
+
+    The hint otherwise rewrites every f32 matmul. Depth sampling changed
+    when that happened to the codebook head.
+    """
+    import openvino as ov
+
+    n = 0
+    for op in ov_model.get_ordered_ops():
+        for i in range(op.get_output_size()):
+            if op.get_output_element_type(i) == ov.Type.f32:
+                op.get_rt_info()["disable_fp16_compression"] = True
+                n += 1
+                break
+    if n < 1:
+        raise RuntimeError("no f32 op to keep under the f16 hint")
+    log.info("pinned %d f32 ops against fp16 compression", n)
+    return n
+
+
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
-                   stateful=False, kv_from=2, compile_graph=True, precision="f32"):
+                   stateful=False, kv_from=2, compile_graph=True, precision="f32",
+                   pin_f32=False):
     """Like compile_module, but dynamize the time axis before save.
 
     compile_graph=False writes the IR and returns. The caller can drop the
@@ -375,6 +397,8 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
             )
         if stateful:
             ov_model = patch_stateful_kv(ov_model, kv_from=kv_from)
+        if pin_f32:
+            _pin_f32_outputs(ov_model)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
@@ -1028,6 +1052,21 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
             self.inner = inner
             self.head = head
             self.backbone_proj = backbone_proj
+            # f32 copies for the in-graph gather. The prefix keeps the
+            # original tables, so this cast does not change that path.
+            proj = inner.inputs_embeds_projector
+            self.cb_table = nn.Parameter(
+                inner.embed_tokens.weight.detach().float().clone(), requires_grad=False,
+            )
+            self.cb_proj_w = nn.Parameter(
+                proj.weight.detach().float().clone(), requires_grad=False,
+            )
+            if getattr(proj, "bias", None) is None:
+                self.register_parameter("cb_proj_b", None)
+            else:
+                self.cb_proj_b = nn.Parameter(
+                    proj.bias.detach().float().clone(), requires_grad=False,
+                )
 
         def _open_frame(self, backbone_h, first_id):
             # Official loop: embed [0, first_code], overwrite slot 0 with the
@@ -1121,9 +1160,10 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
                 ids = (tok + cb_idx * int(vocab)).view(1, 1).clamp(
                     0, int(n_codebooks) * int(vocab) - 1,
                 )
-                emb = self.inner.embed_tokens(ids)
-                proj = self.inner.inputs_embeds_projector
-                emb = proj(emb.to(dtype=proj.weight.dtype))
+                emb = torch.nn.functional.embedding(
+                    ids.reshape(-1), self.cb_table,
+                ).view(1, 1, -1)
+                emb = torch.nn.functional.linear(emb, self.cb_proj_w, self.cb_proj_b)
                 hidden, past = self._stack(emb, past)
                 pos = torch.tensor([1 + cb_idx])
                 tok = self._pick(
