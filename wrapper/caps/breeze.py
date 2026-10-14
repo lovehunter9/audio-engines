@@ -962,17 +962,14 @@ def _install_breeze_depth_ov(model, path, device):
     # Same f32 stack as the prefix path that already matches the transcript.
     inner.layers.float()
     inner.norm.float()
-    bb_proj = getattr(inner, "backbone_hidden_state_projector", None)
-    bb_h = int(getattr(cfg, "backbone_hidden_size", hidden))
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v6",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v7",
     )
     frame_mod = tts_ov.fused_depth_frame(
-        inner, head, n_codebooks, vocab, codebook_size, backbone_proj=bb_proj,
+        inner, head, n_codebooks, vocab, codebook_size,
     )
     frame_example = (
-        torch.zeros(1, bb_h, dtype=torch.float32),
-        torch.zeros(1, dtype=torch.long),
+        torch.zeros(1, 2, hidden, dtype=torch.float32),
         torch.ones(1, dtype=torch.float32),
         torch.ones(1, dtype=torch.long),
         torch.ones(1, dtype=torch.float32),
@@ -985,9 +982,6 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
-    tts_ov.release_parameters(inner.embed_tokens, "breeze depth embed")
-    tts_ov.release_parameters(inner.inputs_embeds_projector, "breeze depth projector")
-    tts_ov.release_parameters(bb_proj, "breeze depth backbone projector")
     tts_ov.release_parameters(head, "breeze depth head")
 
     def _bind_depth():
@@ -1002,12 +996,18 @@ def _install_breeze_depth_ov(model, path, device):
                 raise RuntimeError(
                     "breeze ov depth is compiled for batch=1; got %s" % self.batch_size
                 )
-            backbone_h = np.ascontiguousarray(
-                self.backbone_hidden_buf.detach().float().cpu().numpy()
-            ).reshape(1, -1)
-            first_id = np.ascontiguousarray(
-                self.first_cb_token_buf.detach().cpu().numpy().astype(np.int64)
-            ).reshape(-1)
+            self.prefill_input_ids[:, 0] = 0
+            self.prefill_input_ids[:, 1] = self.first_cb_token_buf
+            prefill_embeds = self.embed_tokens(self.prefill_input_ids)
+            backbone_h = self.backbone_hidden_buf
+            if self.backbone_hidden_state_projector is not None:
+                backbone_h = self.backbone_hidden_state_projector(backbone_h)
+            prefill_embeds[:, 0] = backbone_h
+            seq = self.inputs_embeds_projector(prefill_embeds)
+            if seq.shape[0] != 1 or int(seq.shape[1]) != 2:
+                raise RuntimeError(
+                    "breeze ov depth prefill is [1, 2, H]; got %s" % (tuple(seq.shape),)
+                )
             temp = np.ascontiguousarray(
                 self.temperature_buf[:1, 0].detach().float().cpu().numpy()
             )
@@ -1023,8 +1023,9 @@ def _install_breeze_depth_ov(model, path, device):
             uniform = np.ascontiguousarray(
                 torch.rand(n_tokens, vocab).numpy().astype(np.float32)
             )
+            embeds = np.ascontiguousarray(seq.detach().float().cpu().numpy())
             toks = np.array(
-                frame(backbone_h, first_id, temp, topk, topp, dos, uniform)[0]
+                frame(embeds, temp, topk, topp, dos, uniform)[0]
             ).reshape(-1)
             if int(toks.shape[0]) != int(self.num_decode_codebooks):
                 raise RuntimeError(

@@ -1102,8 +1102,11 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
             hidden = self.inner.norm(hidden).to(dtype=hidden.dtype)
             return hidden, present
 
-        def forward(self, backbone_h, first_id, temperature, top_k, top_p, do_sample, uniform):
-            hidden, past = self._stack(self._open_frame(backbone_h, first_id), None)
+        def forward(self, prefill_embeds, temperature, top_k, top_p, do_sample, uniform):
+            # The two-token prefix is built in f32 torch, the same way the
+            # transcript matched. Folding that gather and the projectors into
+            # this f16 graph changed the codes.
+            hidden, past = self._stack(prefill_embeds, None)
             hdtype = self.head.weight.dtype
             tokens = []
             tok = self._pick(
