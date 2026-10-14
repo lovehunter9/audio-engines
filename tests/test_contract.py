@@ -2822,6 +2822,11 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("_batched_text_encoder_forward", text)
         self.assertIn("text_encoder_proj", text)
         self.assertIn("dtype=wdtype", text)
+        self.assertIn("proj.float()", text)
+        self.assertLess(
+            text.index("wdtype = next(proj.parameters())"),
+            text.index("proj.float()"),
+        )
         depth = inspect.getsource(breeze._install_breeze_depth_ov)
         self.assertIn("official multinomial", depth)
         self.assertIn("inputs_embeds_projector", depth)
@@ -2853,6 +2858,9 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertNotIn("cdf <", fused)
         codec = inspect.getsource(breeze._install_breeze_codec_ov)
         self.assertIn("left_context", codec)
+        self.assertIn("dec.float()", codec)
+        self.assertIn("enc.float()", codec)
+        self.assertLess(codec.index("dec.float()"), codec.index("compile_static"))
         self.assertIn("return self.dec(codes)", codec)
         self.assertIn("compile_static", codec)
         self.assertIn("compile_dyn_last", codec)

@@ -811,10 +811,18 @@ def _install_breeze_text_ov(model, path, device):
     mask = torch.ones(1, t_fixed, dtype=torch.long)
     pos = torch.arange(t_fixed, dtype=torch.long).unsqueeze(0)
     _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v3")
+    # enc.float() makes the hidden state float32. The projection stays bf16
+    # unless it is cast too, and Linear then dies: float != BFloat16.
+    # Keep the original dtype for the backbone; the graph itself is f16.
     if proj is not None and hasattr(proj, "parameters"):
-        wdtype = next(proj.parameters()).dtype
+        try:
+            wdtype = next(proj.parameters()).dtype
+        except StopIteration:
+            wdtype = next(enc.parameters()).dtype
     else:
         wdtype = next(enc.parameters()).dtype
+    if proj is not None and hasattr(proj, "float"):
+        proj.float()
     tts_ov.compile_module(
         _Text(), (ids, mask, pos), xml, stamp, device,
         precision="f16", compile_graph=False,
@@ -1049,6 +1057,10 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     enc = getattr(tok_model, "encoder", None)
     if dec is None or enc is None:
         raise RuntimeError("Breeze audio tokenizer needs encoder and decoder")
+    # Same cast as the text encoder. A bf16 weight against a float32 wave
+    # dies in the first Linear during the trace.
+    dec.float()
+    enc.float()
     n_q = int(dec.config.num_quantizers)
     valid_q = int(getattr(tok_model, "encoder_valid_num_quantizers", n_q))
     upsample = int(dec.total_upsample)
