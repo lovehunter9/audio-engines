@@ -785,8 +785,14 @@ def _install_breeze_text_ov(model, path, device):
         )
 
     class _Text(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.enc = enc
+            if proj is not None:
+                self.proj = proj
+
         def forward(self, input_ids, attention_mask, position_ids):
-            hs = enc(
+            hs = self.enc(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
@@ -794,11 +800,12 @@ def _install_breeze_text_ov(model, path, device):
             ).last_hidden_state
             # Official _project_segments runs this after the encoder. Fold it
             # in so the linear is not a second CPU matmul.
-            if proj is None:
+            layer = getattr(self, "proj", None)
+            if layer is None:
                 return hs
-            if isinstance(proj, (nn.Linear, nn.Sequential)):
-                return proj(hs)
-            return proj(inputs_embeds=hs, position_ids=position_ids)
+            if isinstance(layer, (nn.Linear, nn.Sequential)):
+                return layer(hs)
+            return layer(inputs_embeds=hs, position_ids=position_ids)
 
     ids = torch.zeros(1, t_fixed, dtype=torch.long)
     mask = torch.ones(1, t_fixed, dtype=torch.long)
@@ -1050,12 +1057,20 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     src = str(path)
 
     class _Dec(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dec = dec
+
         def forward(self, codes):
-            return dec(codes)
+            return self.dec(codes)
 
     class _Enc(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.enc = enc
+
         def forward(self, wave):
-            out = enc.encode(input_values=wave.unsqueeze(1), return_dict=True)
+            out = self.enc.encode(input_values=wave.unsqueeze(1), return_dict=True)
             codes = out.audio_codes[:, :valid_q]
             return codes
 

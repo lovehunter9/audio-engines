@@ -108,6 +108,14 @@ def _compile_ir(xml, device, config=None):
         return core.compile_model(xml, device, props)
 
 
+def _freeze_for_export(mod):
+    """OpenVINO refuses a weight that still requires grad when the trace treats it as a constant."""
+    if not hasattr(mod, "parameters"):
+        return
+    for p in mod.parameters():
+        p.requires_grad_(False)
+
+
 def compile_module(mod, example, xml, stamp, device, config=None, precision="f32",
                     compile_graph=True):
     """Export a torch nn.Module once, compile on GPU, return a callable(np)->np.
@@ -125,8 +133,7 @@ def compile_module(mod, example, xml, stamp, device, config=None, precision="f32
             example = (example,)
         if hasattr(mod, "eval"):
             mod.eval()
-        for p in getattr(mod, "parameters", lambda: ())():
-            p.requires_grad_(False)
+        _freeze_for_export(mod)
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
         try:
             with torch.inference_mode():
@@ -176,8 +183,7 @@ def compile_static(mod, example, xml, stamp, device, precision="f32", compile_gr
             example = (example,)
         if hasattr(mod, "eval"):
             mod.eval()
-        for p in getattr(mod, "parameters", lambda: ())():
-            p.requires_grad_(False)
+        _freeze_for_export(mod)
         log.info("exporting static %s example=%s", xml, [tuple(t.shape) for t in example])
         try:
             with torch.inference_mode():
@@ -362,6 +368,7 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
             example = (example,)
         log.info("exporting %s example=%s stateful=%s", xml, [tuple(t.shape) for t in example], stateful)
         mod.eval()
+        _freeze_for_export(mod)
         with torch.inference_mode():
             ov_model = _dynamize_time(
                 ov.convert_model(mod, example_input=example), dynamize_ranks
@@ -407,6 +414,7 @@ def compile_dyn_last(mod, example, xml, stamp, device, precision="f32", compile_
             example = (example,)
         log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
         mod.eval()
+        _freeze_for_export(mod)
         with torch.inference_mode():
             ov_model = ov.convert_model(mod, example_input=example)
         mapping = {}
@@ -755,7 +763,8 @@ def causal_fixed_slot_module(inner, max_t, lm_head=None):
             out_kv = [t.to(dtype=inputs_embeds.dtype) for t in present]
             if self.lm_head is None:
                 return (hidden, *out_kv)
-            logits = self.lm_head(hidden[:, -1, :].to(dtype=self.lm_head.weight.dtype))
+            hdtype = self.lm_head.weight.dtype
+            logits = self.lm_head(hidden[:, -1, :].to(dtype=hdtype))
             return (hidden, *out_kv, logits)
 
     return _Step()
@@ -1095,11 +1104,11 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
 
         def forward(self, backbone_h, first_id, temperature, top_k, top_p, do_sample, uniform):
             hidden, past = self._stack(self._open_frame(backbone_h, first_id), None)
-            head_w = self.head.weight
+            hdtype = self.head.weight.dtype
             tokens = []
             tok = self._pick(
                 self.head(
-                    hidden[:, 1:, :].to(dtype=head_w.dtype),
+                    hidden[:, 1:, :].to(dtype=hdtype),
                     cache_position=torch.tensor([1]),
                 ),
                 uniform[0], temperature, top_k, top_p, do_sample,
@@ -1115,7 +1124,7 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
                 hidden, past = self._stack(emb, past)
                 pos = torch.tensor([1 + cb_idx])
                 tok = self._pick(
-                    self.head(hidden[:, -1:, :].to(dtype=head_w.dtype), cache_position=pos),
+                    self.head(hidden[:, -1:, :].to(dtype=hdtype), cache_position=pos),
                     uniform[cb_idx], temperature, top_k, top_p, do_sample,
                 )
                 tokens.append(tok)
