@@ -1057,6 +1057,75 @@ def _install_breeze_depth_ov(model, path, device):
     return depth
 
 
+def _codec_trace_mask(
+    config, input_embeds, attention_mask, cache_position, past_key_values,
+    position_ids=None, sliding_window=None, **kwargs,
+):
+    """Causal mask as a plain tensor.
+
+    transformers builds this with vmap. torch.jit.trace dies there with
+    unordered_map::at, so the codec never exports. Eager wants 0 / -inf.
+    SDPA wants True where a position is kept. No cache: this graph is one
+    static window.
+    """
+    import torch
+
+    if past_key_values is not None:
+        raise RuntimeError("codec trace mask does not take a kv cache")
+    if attention_mask is not None and attention_mask.dim() == 4:
+        return attention_mask
+    q = cache_position
+    kv = torch.arange(q.shape[0], device=q.device)
+    keep = kv.view(1, 1, 1, -1) <= q.view(1, 1, -1, 1)
+    if sliding_window is not None:
+        keep = keep & (kv.view(1, 1, 1, -1) > q.view(1, 1, -1, 1) - int(sliding_window))
+    impl = getattr(config, "_attn_implementation", "eager")
+    batches = input_embeds.shape[0]
+    if impl == "sdpa":
+        return keep.expand(batches, 1, q.shape[0], kv.shape[0])
+    if impl not in ("eager", "flex_attention"):
+        raise RuntimeError("codec attention implementation %s cannot be traced" % impl)
+    neg = torch.tensor(torch.finfo(input_embeds.dtype).min, dtype=input_embeds.dtype, device=q.device)
+    zero = torch.zeros((), dtype=input_embeds.dtype, device=q.device)
+    return torch.where(keep, zero, neg).expand(batches, 1, q.shape[0], kv.shape[0])
+
+
+def _patch_codec_trace_masks():
+    import qwen_tts.core.tokenizer_12hz.modeling_qwen3_tts_tokenizer_v2 as dec_mod
+    import transformers.models.mimi.modeling_mimi as enc_mod
+
+    saved = (
+        dec_mod.create_causal_mask,
+        dec_mod.create_sliding_window_causal_mask,
+        enc_mod.create_causal_mask,
+    )
+
+    def causal(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None, **kwargs):
+        return _codec_trace_mask(
+            config, input_embeds, attention_mask, cache_position, past_key_values,
+            position_ids=position_ids, sliding_window=None,
+        )
+
+    def sliding(config, input_embeds, attention_mask, cache_position, past_key_values, position_ids=None, **kwargs):
+        return _codec_trace_mask(
+            config, input_embeds, attention_mask, cache_position, past_key_values,
+            position_ids=position_ids, sliding_window=getattr(config, "sliding_window", None),
+        )
+
+    dec_mod.create_causal_mask = causal
+    dec_mod.create_sliding_window_causal_mask = sliding
+    enc_mod.create_causal_mask = causal
+    log.info("codec trace masks are plain tensors")
+    return dec_mod, enc_mod, saved
+
+
+def _restore_codec_trace_masks(patched):
+    dec_mod, enc_mod, saved = patched
+    dec_mod.create_causal_mask = saved[0]
+    dec_mod.create_sliding_window_causal_mask = saved[1]
+    enc_mod.create_causal_mask = saved[2]
+
+
 def _install_breeze_codec_ov(audio_tokenizer, path, device):
     """Encoder and decoder on one OpenVINO graph each.
 
@@ -1109,18 +1178,22 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             codes = out.audio_codes[:, :valid_q]
             return codes
 
-    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_codec_dec", ".ov-breeze-codec-dec-v1")
-    _, enc_xml, enc_stamp = tts_ov.ir_paths(src, "breeze_codec_enc", ".ov-breeze-codec-enc-v1")
+    _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_codec_dec", ".ov-breeze-codec-dec-v2")
+    _, enc_xml, enc_stamp = tts_ov.ir_paths(src, "breeze_codec_enc", ".ov-breeze-codec-enc-v2")
     dec_example = torch.zeros(1, n_q, static_t, dtype=torch.long)
     enc_example = torch.zeros(1, 16000, dtype=torch.float32)
-    tts_ov.compile_static(
-        _Dec(), dec_example, dec_xml, dec_stamp, device,
-        precision="f16", compile_graph=False,
-    )
-    tts_ov.compile_dyn_last(
-        _Enc(), enc_example, enc_xml, enc_stamp, device,
-        precision="f16", compile_graph=False,
-    )
+    patched = _patch_codec_trace_masks()
+    try:
+        tts_ov.compile_static(
+            _Dec(), dec_example, dec_xml, dec_stamp, device,
+            precision="f16", compile_graph=False,
+        )
+        tts_ov.compile_dyn_last(
+            _Enc(), enc_example, enc_xml, enc_stamp, device,
+            precision="f16", compile_graph=False,
+        )
+    finally:
+        _restore_codec_trace_masks(patched)
     downsample = int(tok_model.get_encode_downsample_rate())
     tts_ov.release_parameters(tok_model, "breeze audio tokenizer")
 
