@@ -962,8 +962,10 @@ def _install_breeze_depth_ov(model, path, device):
     # Same f32 stack as the prefix path that already matches the transcript.
     inner.layers.float()
     inner.norm.float()
+    # f16 on this graph changed the codebook draws. The backbone then
+    # stopped at 20 frames. The matching transcript used this same frame at f32.
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v7",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v8",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -978,7 +980,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f16",
+        dynamize_ranks=(), compile_graph=False, precision="f32",
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -987,7 +989,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f16",
+            dynamize_ranks=(), precision="f32",
         )
 
         def full_loop(self):
