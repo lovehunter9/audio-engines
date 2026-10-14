@@ -527,6 +527,28 @@ def _cache_prompt_encode():
 _OV_AFTER_EXPORT = []
 
 
+def _untie_depth_codebooks(model, backbone):
+    """Depth codebook embedding shares storage with the backbone table.
+
+    Releasing the backbone table after its export empties that storage.
+    The depth trace then sees a 0-d weight and dies in embedding.
+    """
+    import torch.nn as nn
+
+    depth = getattr(getattr(model, "depth_decoder", None), "model", None)
+    depth_emb = getattr(depth, "embed_tokens", None) if depth is not None else None
+    audio = getattr(getattr(backbone, "embed_tokens", None), "embed_audio_tokens", None)
+    if depth_emb is None or audio is None or getattr(depth_emb, "weight", None) is None:
+        return
+    if depth_emb.weight.data_ptr() != audio.weight.data_ptr():
+        return
+    depth_emb.weight = nn.Parameter(audio.weight.detach().clone(), requires_grad=False)
+    log.info(
+        "untied depth codebook embedding shape=%s dtype=%s",
+        tuple(depth_emb.weight.shape), depth_emb.weight.dtype,
+    )
+
+
 def _install_breeze_embed_ov(backbone, path, device):
     """One compiled lookup for codebook ids. Prefill and decode both call it.
 
@@ -611,6 +633,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     pos = torch.arange(example_q, dtype=torch.long).unsqueeze(0)
     slot = torch.arange(example_q, dtype=torch.long)
     lm_head = model.lm_head.float()
+    _untie_depth_codebooks(model, backbone)
     _install_breeze_embed_ov(backbone, src, device)
     _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v3")
     example = (embeds, mask, pos, slot, *past)

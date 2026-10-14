@@ -2813,6 +2813,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertLess(src.index("release_parameters"), src.index("FixedSlotRunner"))
         self.assertLess(src.index("backbone.float()"), src.index("breeze_backbone_slot"))
         self.assertNotIn("backbone.float()", cuda_branch)
+        self.assertIn("_untie_depth_codebooks", src)
+        self.assertLess(src.index("_untie_depth_codebooks"), src.index("_install_breeze_embed_ov"))
         self.assertIn("_install_breeze_text_ov", src)
         self.assertIn("_install_breeze_depth_ov", src)
         self.assertIn("_install_breeze_codec_ov", src)
