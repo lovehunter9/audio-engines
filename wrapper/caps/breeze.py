@@ -959,18 +959,17 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # Full-stack attention f16 made a different 1.6s file. Only the last
-    # layer's attention projections move; the MLP stays f32.
+    # All-layer and last-layer attention f16 both changed the sentence.
+    # Query and key stay f32 so the scores do. Value and output move.
+    # The MLP stays f32.
     inner.layers.float()
     inner.norm.float()
-    for layer in inner.layers[-1:]:
+    for layer in inner.layers:
         attn = layer.self_attn
-        attn.q_proj.half()
-        attn.k_proj.half()
         attn.v_proj.half()
         attn.o_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v21",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v22",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
