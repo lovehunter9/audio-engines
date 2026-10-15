@@ -666,10 +666,10 @@ def _proj_native(linear, x):
 
 
 def _mlp_wide_f16(mlp, x):
-    """f16 on each wide projection that was cast; product and down stay with x."""
+    """f16 on each projection that was cast. The product stays in x's dtype."""
     gate = _proj_native(mlp.gate_proj, x)
     up = _proj_native(mlp.up_proj, x)
-    return mlp.down_proj(mlp.act_fn(gate) * up)
+    return _proj_native(mlp.down_proj, mlp.act_fn(gate) * up)
 
 
 def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
@@ -712,6 +712,7 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     if (
         mlp.gate_proj.weight.dtype == x.dtype
         and mlp.up_proj.weight.dtype == x.dtype
+        and mlp.down_proj.weight.dtype == x.dtype
     ):
         x = mlp(x)
     else:
