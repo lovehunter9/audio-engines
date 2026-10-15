@@ -960,13 +960,24 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # f32 execution of this frame is about 0.44s. Weights stay f32 in the
-    # trace; the f16 hint is what runs the matmuls. A new stamp so the
-    # f32 frame is not reused.
+    # Linears run f16 and cast back to f32 before the residual. Norm,
+    # softmax, KV, and the codebook head stay f32; pin_f32 keeps the hint
+    # from rewriting those. A new stamp so the all-matmul f16 frame is
+    # not reused.
     inner.layers.float()
     inner.norm.float()
+    head.float()
+    for layer in inner.layers:
+        attn = layer.self_attn
+        attn.q_proj.half()
+        attn.k_proj.half()
+        attn.v_proj.half()
+        attn.o_proj.half()
+        layer.mlp.gate_proj.half()
+        layer.mlp.up_proj.half()
+        layer.mlp.down_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v24",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v25",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -981,7 +992,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f16",
+        dynamize_ranks=(), compile_graph=False, precision="f16", pin_f32=True,
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -990,7 +1001,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f16",
+            dynamize_ranks=(), precision="f16", pin_f32=True,
         )
 
         def full_loop(self):
