@@ -1,6 +1,4 @@
-# Shared OpenVINO compile for TTS one-step modules. Loops stay in official Python.
-# Causal AR (Breeze backbone / FireRed Qwen3) is compiled here too: the official
-# Python loop still drives sampling, but each transformer step runs on GPU.
+# Shared OpenVINO compile for TTS steps. Official Python still samples; each transformer step runs on GPU.
 import logging
 import os
 
@@ -290,15 +288,13 @@ def patch_stateful_kv(ov_model, kv_from=2):
 
     if len(ov_model.inputs) < 4:
         raise RuntimeError("stateful decode needs embeds, mask, and K/V")
-    # kv_from skips non-cache inputs that sit in front of K/V (embeds, mask,
-    # and a static-slot position). Default 2 is the original decode signature.
+    # kv_from skips non-cache inputs in front of K/V. Default 2 is the original decode signature.
     for i, inp in enumerate(ov_model.inputs[kv_from:]):
         tensor = inp.get_tensor()
         if not tensor.get_names():
             tensor.add_names({"past_kv_%d" % i})
     kv_in = [inp.get_any_name() for inp in ov_model.inputs[kv_from:]]
-    # convert_model leaves tuple outputs unnamed. get_any_name then throws
-    # "Attempt to get a name for a Tensor without names".
+    # Name tuple outputs; convert_model leaves them unnamed and get_any_name throws.
     kv_out = []
     for i, out in enumerate(ov_model.outputs[1:]):
         tensor = out.get_tensor()
@@ -350,30 +346,9 @@ def patch_stateful_kv(ov_model, kv_from=2):
     return ov_model
 
 
-def _pin_f32_outputs(ov_model):
-    """Keep f32 ops when the GPU hint is f16.
-
-    The hint otherwise rewrites every f32 matmul. Depth attention, the early
-    layers, the down projection, and the codebook head stay f32.
-    """
-    import openvino as ov
-
-    n = 0
-    for op in ov_model.get_ordered_ops():
-        for i in range(op.get_output_size()):
-            if op.get_output_element_type(i) == ov.Type.f32:
-                op.get_rt_info()["disable_fp16_compression"] = True
-                n += 1
-                break
-    if n < 1:
-        raise RuntimeError("no f32 op to keep under the f16 hint")
-    log.info("pinned %d f32 ops against fp16 compression", n)
-    return n
-
-
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
                    stateful=False, kv_from=2, compile_graph=True, precision="f32",
-                   latency=False, pin_f32=False):
+                   latency=False):
     """Like compile_module, but dynamize the time axis before save.
 
     compile_graph=False writes the IR and returns. The caller can drop the
@@ -398,8 +373,6 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
             )
         if stateful:
             ov_model = patch_stateful_kv(ov_model, kv_from=kv_from)
-        if pin_f32:
-            _pin_f32_outputs(ov_model)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
@@ -619,9 +592,7 @@ def causal_kv_module(inner, with_past, external_position=False):
             self.inner = inner
 
         def forward(self, inputs_embeds, attention_mask, *rest):
-            # rotary inv_freq is float32 even when the linears are bf16.
-            # Taking the first parameter casts every activation to float and
-            # the next linear refuses the pair.
+            # Use the linear dtype, not rotary inv_freq: that buffer is float32 and would cast every activation.
             if external_position:
                 position_ids, past = rest[0], rest[1:]
             else:
@@ -763,8 +734,7 @@ def _layer_fixed(layer, hidden, rope, attention_mask, slot, pk, pv):
     v_rep = _repeat_kv(v, n_rep)
     scale = float(getattr(attn, "scaling", head_dim ** -0.5))
     scores = torch.matmul(q, k_rep.transpose(2, 3)) * scale
-    # [1, q, max_t] -> [1, 1, q, max_t]. The mask is an input, so q is not a
-    # constant baked from the export example.
+    # [1, q, max_t] to [1, 1, q, max_t]. q stays an input, not a constant from the export example.
     keep = attention_mask.to(dtype=torch.bool).unsqueeze(1)
     scores = scores.masked_fill(~keep, torch.finfo(hidden.dtype).min)
     probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
@@ -1079,9 +1049,7 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
             self.backbone_proj = backbone_proj
 
         def _open_frame(self, backbone_h, first_id):
-            # Official loop: embed [0, first_code], overwrite slot 0 with the
-            # backbone hidden, then project. Doing it here keeps those weights
-            # in this graph.
+            # Embed [0, first_code], overwrite slot 0 with the backbone hidden, then project.
             first = first_id.reshape(-1).to(dtype=torch.long)
             ids = torch.stack([torch.zeros_like(first), first], dim=1)
             emb = self.inner.embed_tokens(ids)
@@ -1122,8 +1090,7 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
             filtered = torch.full_like(filtered, float("-inf")).scatter(
                 0, order, sorted_logits,
             )
-            # Gumbel-max is a multinomial draw. A boolean CDF reduce compiled
-            # to a constant and every codebook came out as noise.
+            # Gumbel-max. A boolean CDF reduce compiled to a constant and the codec rendered noise.
             uu = u.float().reshape(-1).clamp(1e-6, 1.0 - 1e-6)
             gumbel = -torch.log(-torch.log(uu))
             sampled = torch.argmax((filtered + gumbel).float()).to(dtype=torch.long)
@@ -1152,9 +1119,7 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
             return hidden, present
 
         def forward(self, prefill_embeds, temperature, top_k, top_p, do_sample, uniform):
-            # The two-token prefix is built in f32 torch, the same way the
-            # transcript matched. Folding that gather and the projectors into
-            # this f16 graph changed the codes.
+            # The two-token prefix stays f32 torch. Folding that gather into this graph changed the codes.
             hidden, past = self._stack(prefill_embeds, None)
             hdtype = self.head.weight.dtype
             tokens = []

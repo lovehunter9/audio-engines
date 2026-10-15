@@ -428,8 +428,7 @@ def _load():
     if _is_ov():
         from .. import tts_ov
 
-        # Sentinel, tokenizer register, and the snapshot wait are Intel-only.
-        # The CUDA branch below is load_runtime on the resolved device.
+        # Intel-only: sentinel, tokenizer register, and the snapshot wait. CUDA calls load_runtime below.
         _wait_breeze_snapshot(path)
         _register_breeze_tokenizer()
         device = tts_ov.require_gpu()
@@ -633,9 +632,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     mask = torch.ones(1, example_q, max_t, dtype=torch.long)
     pos = torch.arange(example_q, dtype=torch.long).unsqueeze(0)
     slot = torch.arange(example_q, dtype=torch.long)
-    # f16 logits from the slot graph, and an f16 codebook gather, both changed
-    # the sampled tokens. The transcript matched when this head and this table
-    # stayed f32 torch. They are one matmul and one gather, not a second backbone.
+    # f16 logits and an f16 codebook gather changed the tokens; this head and table stay f32 torch.
     lm_head = model.lm_head.float()
     _untie_depth_codebooks(model, backbone)
     _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v4")
@@ -813,8 +810,7 @@ def _install_breeze_text_ov(model, path, device):
                 position_ids=position_ids,
                 output_hidden_states=False,
             ).last_hidden_state
-            # Official _project_segments runs this after the encoder. Fold it
-            # in so the linear is not a second CPU matmul.
+            # Fold the official post-encoder projection in so it is not a second CPU matmul.
             layer = getattr(self, "proj", None)
             if layer is None:
                 return hs
@@ -826,9 +822,7 @@ def _install_breeze_text_ov(model, path, device):
     mask = torch.ones(1, t_fixed, dtype=torch.long)
     pos = torch.arange(t_fixed, dtype=torch.long).unsqueeze(0)
     _, xml, stamp = tts_ov.ir_paths(str(path), "breeze_text_encoder", ".ov-breeze-text-v3")
-    # enc.float() makes the hidden state float32. The projection stays bf16
-    # unless it is cast too, and Linear then dies: float != BFloat16.
-    # Keep the original dtype for the backbone; the graph itself is f16.
+    # Cast the projection with the encoder; a bf16 weight against float32 hidden states breaks Linear. The graph runs f16.
     if proj is not None and hasattr(proj, "parameters"):
         try:
             wdtype = next(proj.parameters()).dtype
@@ -960,24 +954,11 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # Linears run f16 and cast back to f32 before the residual. Norm,
-    # softmax, KV, and the codebook head stay f32; pin_f32 keeps the hint
-    # from rewriting those. A new stamp so the all-matmul f16 frame is
-    # not reused.
+    # f32 depth frame. f16 codebook draws changed the sentence. New stamp so that f16 xml is not reused.
     inner.layers.float()
     inner.norm.float()
-    head.float()
-    for layer in inner.layers:
-        attn = layer.self_attn
-        attn.q_proj.half()
-        attn.k_proj.half()
-        attn.v_proj.half()
-        attn.o_proj.half()
-        layer.mlp.gate_proj.half()
-        layer.mlp.up_proj.half()
-        layer.mlp.down_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v25",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v26",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -992,7 +973,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f16", pin_f32=True,
+        dynamize_ranks=(), compile_graph=False, precision="f32",
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -1001,7 +982,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f16", pin_f32=True,
+            dynamize_ranks=(), precision="f32",
         )
 
         def full_loop(self):
@@ -1155,8 +1136,7 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     enc = getattr(tok_model, "encoder", None)
     if dec is None or enc is None:
         raise RuntimeError("Breeze audio tokenizer needs encoder and decoder")
-    # Same cast as the text encoder. A bf16 weight against a float32 wave
-    # dies in the first Linear during the trace.
+    # Cast like the text encoder so a bf16 weight is not traced against a float32 wave.
     dec.float()
     enc.float()
     n_q = int(dec.config.num_quantizers)
