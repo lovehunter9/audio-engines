@@ -966,7 +966,7 @@ def _install_breeze_depth_ov(model, path, device):
     for layer in inner.layers:
         layer.mlp.gate_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v16",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v17",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,

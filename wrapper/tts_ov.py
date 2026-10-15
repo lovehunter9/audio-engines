@@ -658,10 +658,17 @@ def causal_kv_module(inner, with_past, external_position=False):
     return _Step()
 
 
+def _proj_native(linear, x):
+    """Run one linear in its own weight dtype and return x's dtype."""
+    if linear.weight.dtype == x.dtype:
+        return linear(x)
+    return linear(x.to(dtype=linear.weight.dtype)).to(dtype=x.dtype)
+
+
 def _mlp_wide_f16(mlp, x):
-    """f16 gate and up, f32 product and down projection."""
-    gate = mlp.gate_proj(x.half()).float()
-    up = mlp.up_proj(x.half()).float()
+    """f16 on each wide projection that was cast; product and down stay with x."""
+    gate = _proj_native(mlp.gate_proj, x)
+    up = _proj_native(mlp.up_proj, x)
     return mlp.down_proj(mlp.act_fn(gate) * up)
 
 
@@ -702,7 +709,10 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     h = residual + attn.o_proj(out)
     x = layer.post_attention_layernorm(h)
     mlp = layer.mlp
-    if mlp.gate_proj.weight.dtype == x.dtype:
+    if (
+        mlp.gate_proj.weight.dtype == x.dtype
+        and mlp.up_proj.weight.dtype == x.dtype
+    ):
         x = mlp(x)
     else:
         x = _mlp_wide_f16(mlp, x)
