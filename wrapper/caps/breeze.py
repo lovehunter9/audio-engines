@@ -959,16 +959,16 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # First half of the depth stack stays the f32 frame from intel-tts47.
-    # Putting every gate/up in f16 (Intel-tts50) changed the wav. The later
-    # layers sit next to the codebook head.
+    # Intel-tts52 put layers[6:] in f16 and the wav matched the all-f16 file.
+    # The first half staying f32 did not change a sample. Only the last
+    # three layers' wide projections move this time.
     inner.layers.float()
     inner.norm.float()
-    for layer in inner.layers[len(inner.layers) // 2:]:
+    for layer in inner.layers[-3:]:
         layer.mlp.gate_proj.half()
         layer.mlp.up_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v12",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v13",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
