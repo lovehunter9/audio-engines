@@ -960,12 +960,13 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # f16 on this frame changed the codebook draws. The short sentence
-    # that finished used this same frame at f32.
+    # f32 execution of this frame is about 0.44s. Weights stay f32 in the
+    # trace; the f16 hint is what runs the matmuls. A new stamp so the
+    # f32 frame is not reused.
     inner.layers.float()
     inner.norm.float()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v23",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v24",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -980,7 +981,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f32",
+        dynamize_ranks=(), compile_graph=False, precision="f16",
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -989,7 +990,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f32",
+            dynamize_ranks=(), precision="f16",
         )
 
         def full_loop(self):
