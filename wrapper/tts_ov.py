@@ -683,9 +683,9 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     head_dim = int(attn.head_dim)
     n_q = attn.q_proj.out_features // head_dim
     n_kv = attn.k_proj.out_features // head_dim
-    q = attn.q_proj(h).view(b, t, n_q, head_dim)
-    k = attn.k_proj(h).view(b, t, n_kv, head_dim)
-    v = attn.v_proj(h).view(b, t, n_kv, head_dim)
+    q = _proj_native(attn.q_proj, h).view(b, t, n_q, head_dim)
+    k = _proj_native(attn.k_proj, h).view(b, t, n_kv, head_dim)
+    v = _proj_native(attn.v_proj, h).view(b, t, n_kv, head_dim)
     if getattr(attn, "q_norm", None) is not None:
         q = attn.q_norm(q)
     if getattr(attn, "k_norm", None) is not None:
@@ -706,7 +706,7 @@ def _layer_kv(layer, hidden, rope, attn_mask, pk, pv):
     scores = scores + attn_mask
     probs = torch.softmax(scores.float(), dim=-1).to(q.dtype)
     out = torch.matmul(probs, v_rep).transpose(1, 2).contiguous().view(b, t, n_q * head_dim)
-    h = residual + attn.o_proj(out)
+    h = residual + _proj_native(attn.o_proj, out)
     x = layer.post_attention_layernorm(h)
     mlp = layer.mlp
     if (
