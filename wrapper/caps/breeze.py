@@ -598,11 +598,12 @@ def _bind_embed(emb, compiled):
 def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     """Text, backbone, depth, and codec on OpenVINO. Backbone has one graph.
 
-    Replaying the 320-wide prefix on every new token was about 1.5s a step.
+    Replaying a wide prefix on every new token was about 1.5s a step.
     Walking that prefix one token at a time was still about 28s. A second
     compiled backbone is another copy of the weights and OOM'd the iGPU
     machine. This one graph writes the whole prefix in one call, then one
-    token per decode step. Token i is slot i, and the cache shape stays 320.
+    token per decode step. Token i is slot i. The cache is max_seq_len
+    wide, the same single-call budget CUDA already uses.
     """
     _cache_backbone_suppress_mask()
     _cache_prompt_encode()
@@ -621,7 +622,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     # A long reference prefill overflowed in bf16. CUDA never reaches here.
     backbone.float()
     src = str(path)
-    max_t = 320
+    max_t = int(tts_el.MAX_SEQ_LEN)
     past = []
     for _ in range(n_layers):
         past.append(torch.zeros(1, n_kv, max_t, head_dim, dtype=torch.float32))
@@ -637,7 +638,7 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
     # stayed f32 torch. They are one matmul and one gather, not a second backbone.
     lm_head = model.lm_head.float()
     _untie_depth_codebooks(model, backbone)
-    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v3")
+    _, xml, stamp = tts_ov.ir_paths(src, "breeze_backbone_slot", ".ov-breeze-slot-v4")
     example = (embeds, mask, pos, slot, *past)
     # Export while the weights are still loaded, drop them, then compile once.
     tts_ov.compile_causal(
@@ -959,17 +960,12 @@ def _install_breeze_depth_ov(model, path, device):
     n_tokens = n_codebooks - 1
     if n_tokens < 1:
         raise RuntimeError("breeze depth frame needs codebooks, got %d" % n_codebooks)
-    # All-layer and last-layer attention f16 both changed the sentence.
-    # Query and key stay f32 so the scores do. Value and output move.
-    # The MLP stays f32.
+    # f16 on this frame changed the codebook draws. The short sentence
+    # that finished used this same frame at f32.
     inner.layers.float()
     inner.norm.float()
-    for layer in inner.layers:
-        attn = layer.self_attn
-        attn.v_proj.half()
-        attn.o_proj.half()
     _, frame_xml, frame_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v22",
+        str(path), "breeze_depth_frame", ".ov-breeze-depth-frame-v23",
     )
     frame_mod = tts_ov.fused_depth_frame(
         inner, head, n_codebooks, vocab, codebook_size,
@@ -984,7 +980,7 @@ def _install_breeze_depth_ov(model, path, device):
     )
     tts_ov.compile_causal(
         frame_mod, frame_example, frame_xml, frame_stamp, device,
-        dynamize_ranks=(), compile_graph=False, precision="f16", pin_f32=True, latency=True,
+        dynamize_ranks=(), compile_graph=False, precision="f32",
     )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
@@ -993,7 +989,7 @@ def _install_breeze_depth_ov(model, path, device):
     def _bind_depth():
         frame = tts_ov.compile_causal(
             frame_mod, frame_example, frame_xml, frame_stamp, device,
-            dynamize_ranks=(), precision="f16", pin_f32=True, latency=True,
+            dynamize_ranks=(), precision="f32",
         )
 
         def full_loop(self):
