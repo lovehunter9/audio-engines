@@ -605,10 +605,7 @@ def _install_firered_ov(instruct, path, device):
 
 
 def _firered_sliding_mask(hidden, window):
-    """Additive mask: causal, and only the last `window` keys (eager Qwen3).
-
-    kv_idx > q_idx - window matches transformers sliding_window_overlay.
-    """
+    """Causal mask that also blocks keys older than window, matching sliding_window_overlay."""
     import torch
 
     t = hidden.shape[1]
@@ -621,13 +618,7 @@ def _firered_sliding_mask(hidden, window):
 
 
 def _install_firered_decoder_ov(instruct, path, device):
-    """Put the RedAE decoder transformer on OpenVINO. ISTFT stays in torch.
-
-    A short speak spent ~8s in this decode, after the AR loop. Qwen3Model.forward
-    builds the sliding-window mask through the HF cache helpers and the trace
-    dies with 'tuple index out of range'. Walk the layers with that same mask.
-    Export failure keeps the official decoder and is logged; load still finishes.
-    """
+    """RedAE transformer on OpenVINO; ISTFT stays torch. Walk layers so the HF sliding-window trace does not die."""
     import torch
     from torch import nn
 
@@ -781,7 +772,7 @@ def _install_firered_redae_cache(instruct, times):
 
 
 def _install_firered_backbone(core, path, device):
-    """Replace _backbone_one_step: OV prefill seeds stateful decode (same KV layout)."""
+    """Replace _backbone_one_step with OpenVINO prefill plus device-KV decode."""
     import torch
 
     from .. import tts_ov
@@ -810,7 +801,6 @@ def _install_firered_backbone(core, path, device):
         tts_ov.causal_kv_module(inner, False),
         (embeds_pre, mask_pre), pre_xml, pre_stamp, device,
         dynamize_ranks=(2, 3),
-        stateful=False,
     )
 
     embeds_q1 = torch.zeros(1, 1, hidden, dtype=torch.float32)
@@ -824,7 +814,6 @@ def _install_firered_backbone(core, path, device):
         tts_ov.causal_kv_module(inner, True, external_position=True),
         (embeds_q1, mask_q1, pos_q1, *past), xml, stamp, device,
         dynamize_ranks=(2, 4),
-        stateful=False,
     )
     runner = tts_ov.DeviceKvRunner(
         compiled_q1, n_layers, prefill=prefill, external_position=True,

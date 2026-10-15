@@ -2701,26 +2701,6 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertEqual(int(keep[0, 0]), 0)
         self.assertEqual(int(keep[0, 2]), 1)
 
-    def test_full_seq_runner_keeps_prefix(self):
-        try:
-            import numpy as np
-            import torch
-        except ImportError:
-            self.skipTest("torch")
-        from wrapper import tts_ov
-
-        def compiled(arr, mask):
-            return [np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32)]
-
-        runner = tts_ov.FullSeqRunner(compiled)
-        first = runner.step(torch.zeros(1, 2, 4))
-        self.assertEqual(tuple(first.shape), (1, 2, 4))
-        nxt = runner.step(torch.zeros(1, 1, 4))
-        self.assertEqual(tuple(nxt.shape), (1, 1, 4))
-        self.assertEqual(int(runner.prefix.shape[1]), 3)
-        runner.reset()
-        self.assertIsNone(runner.prefix)
-
     def test_release_parameters_drops_storage(self):
         try:
             from torch import nn
@@ -2957,7 +2937,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("cache[key]", redae)
         bb = inspect.getsource(firered._install_firered_backbone)
         self.assertIn("DeviceKvRunner", bb)
-        self.assertIn("stateful=False", bb)
+        self.assertNotIn("stateful=", bb)
         self.assertNotIn("StatefulKvRunner", bb)
         self.assertNotIn("seed_flat", bb)
         self.assertIn(".ov-firered-prefill-v15", bb)
@@ -2971,17 +2951,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("dynamize_ranks=(2, 4)", bb)
         self.assertNotIn("firered_llm_decode_q4", bb)
         self.assertNotIn("tts_ov.KvRunner", bb)
-        self.assertIn("patch_stateful_kv", inspect.getsource(tts_ov.compile_causal))
-        self.assertIn("apply_make_stateful_transformation", inspect.getsource(tts_ov.patch_stateful_kv))
-        self.assertIn("consumers = list(port.get_target_inputs())", inspect.getsource(tts_ov.patch_stateful_kv))
-        self.assertIn("present_kv_", inspect.getsource(tts_ov.patch_stateful_kv))
-        self.assertIn("past_kv_", inspect.getsource(tts_ov.patch_stateful_kv))
-        self.assertIn("get_names()", inspect.getsource(tts_ov.patch_stateful_kv))
-        runner_src = inspect.getsource(tts_ov.StatefulKvRunner)
-        self.assertIn("query_state", runner_src)
-        self.assertIn("st.state =", runner_src)
-        self.assertIn("seed_flat", runner_src)
-        self.assertNotIn(".set_state(", runner_src)
+        self.assertNotIn("patch_stateful_kv", inspect.getsource(tts_ov.compile_causal))
+        self.assertNotIn("StatefulKvRunner", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("_device_props", inspect.getsource(tts_ov.compile_causal))
         self.assertIn("INFERENCE_PRECISION_HINT", inspect.getsource(tts_ov._device_props))
@@ -3012,38 +2983,6 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertFalse(torch.isfinite(dec[0, 0, 0, 17]))
         self.assertTrue(torch.isfinite(dec[0, 0, 3, 19]))
         self.assertTrue(torch.isfinite(dec[0, 0, 3, 16]))
-
-    def test_kv_runner_appends_cache(self):
-        try:
-            import numpy as np
-            import torch
-        except ImportError:
-            self.skipTest("torch")
-        from wrapper import tts_ov
-
-        def prefill(arr, mask):
-            t = arr.shape[1]
-            return [
-                np.ones((1, t, arr.shape[2]), dtype=np.float32),
-                np.zeros((1, 2, t, 8), dtype=np.float32),
-                np.ones((1, 2, t, 8), dtype=np.float32),
-            ]
-
-        def decode(arr, mask, *past):
-            t = past[0].shape[-2] + arr.shape[1]
-            return [
-                np.ones((1, arr.shape[1], arr.shape[2]), dtype=np.float32),
-                np.zeros((1, 2, t, 8), dtype=np.float32),
-                np.ones((1, 2, t, 8), dtype=np.float32),
-            ]
-
-        runner = tts_ov.KvRunner(prefill, decode, 1)
-        first = runner.step(torch.zeros(1, 4, 3))
-        self.assertEqual(tuple(first.shape), (1, 4, 3))
-        self.assertEqual(runner.prefix_len, 4)
-        nxt = runner.step(torch.zeros(1, 1, 3))
-        self.assertEqual(tuple(nxt.shape), (1, 1, 3))
-        self.assertEqual(runner.prefix_len, 5)
 
 
 class SlimTtsOvRecipeTest(unittest.TestCase):

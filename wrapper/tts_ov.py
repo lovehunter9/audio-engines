@@ -276,85 +276,9 @@ def _dynamize_time(ov_model, ranks=(2, 3, 4)):
     return ov_model
 
 
-def patch_stateful_kv(ov_model, kv_from=2):
-    """Intel FireRedTTS2 helper: hide K/V as InferRequest VariableState.
-
-    Official notebook calls apply_make_stateful_transformation so decode does
-    not bounce 28×2 tensors through Python every token.
-    """
-    import numpy as np
-    import openvino.opset13 as opset13
-    from openvino._offline_transformations import apply_make_stateful_transformation
-
-    if len(ov_model.inputs) < 4:
-        raise RuntimeError("stateful decode needs embeds, mask, and K/V")
-    # kv_from skips non-cache inputs in front of K/V. Default 2 is the original decode signature.
-    for i, inp in enumerate(ov_model.inputs[kv_from:]):
-        tensor = inp.get_tensor()
-        if not tensor.get_names():
-            tensor.add_names({"past_kv_%d" % i})
-    kv_in = [inp.get_any_name() for inp in ov_model.inputs[kv_from:]]
-    # Name tuple outputs; convert_model leaves them unnamed and get_any_name throws.
-    kv_out = []
-    for i, out in enumerate(ov_model.outputs[1:]):
-        tensor = out.get_tensor()
-        if not tensor.get_names():
-            tensor.add_names({"present_kv_%d" % i})
-        kv_out.append(out.get_any_name())
-    if len(kv_in) != len(kv_out):
-        raise RuntimeError("stateful kv in/out %d vs %d" % (len(kv_in), len(kv_out)))
-    import openvino as ov
-
-    batch = ov_model.inputs[0].get_partial_shape()[0]
-    beam_idx = opset13.parameter(
-        name="beam_idx", dtype=ov.Type.i32, shape=ov.PartialShape([batch])
-    )
-    beam_idx.output(0).get_tensor().add_names({"beam_idx"})
-    ov_model.add_parameters([beam_idx])
-    for name in kv_in:
-        port = ov_model.input(name)
-        consumers = list(port.get_target_inputs())
-        gather = opset13.gather(port, beam_idx, opset13.constant(0))
-        for consumer in consumers:
-            consumer.replace_source_output(gather.output(0))
-    ov_model.validate_nodes_and_infer_types()
-    apply_make_stateful_transformation(ov_model, dict(zip(kv_in, kv_out)))
-    embeds = ov_model.inputs[0]
-    batch_g = opset13.gather(
-        opset13.shape_of(embeds, output_type="i64"),
-        opset13.constant([0]),
-        opset13.constant(0),
-    )
-    for op in ov_model.get_ops():
-        if op.get_type_name() != "ReadValue":
-            continue
-        dims = [d.min_length for d in list(op.get_output_partial_shape(0))]
-        dims[0] = batch_g
-        parts = []
-        for dim in dims:
-            if isinstance(dim, int):
-                parts.append(opset13.constant(np.array([max(dim, 0)], dtype=np.int64)))
-            else:
-                parts.append(dim)
-        shape = opset13.concat(parts, axis=0)
-        op.set_arguments([
-            opset13.broadcast(
-                opset13.constant(0.0, dtype=op.get_output_element_type(0)), shape
-            )
-        ])
-    ov_model.validate_nodes_and_infer_types()
-    return ov_model
-
-
 def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
-                   stateful=False, kv_from=2, compile_graph=True, precision="f32",
-                   latency=False):
-    """Like compile_module, but dynamize the time axis before save.
-
-    compile_graph=False writes the IR and returns. The caller can drop the
-    torch weights before the GPU compile, which is the resident set that
-    killed Breeze once both prefills were on the device.
-    """
+                   compile_graph=True, precision="f32", latency=False):
+    """Dynamize the time axis, then compile. compile_graph=False writes IR only so torch weights can be dropped first."""
     import numpy as np
     import openvino as ov
     import torch
@@ -364,15 +288,13 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
     if wrote:
         if not isinstance(example, (tuple, list)):
             example = (example,)
-        log.info("exporting %s example=%s stateful=%s", xml, [tuple(t.shape) for t in example], stateful)
+        log.info("exporting %s example=%s", xml, [tuple(t.shape) for t in example])
         mod.eval()
         _freeze_for_export(mod)
         with torch.inference_mode():
             ov_model = _dynamize_time(
                 ov.convert_model(mod, example_input=example), dynamize_ranks
             )
-        if stateful:
-            ov_model = patch_stateful_kv(ov_model, kv_from=kv_from)
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
         del ov_model
@@ -385,8 +307,8 @@ def compile_causal(mod, example, xml, stamp, device, dynamize_ranks=(2, 3, 4),
     props, prec = _device_props(device, precision, latency=latency)
     compiled = _compile_ir(xml, device, props)
     log.info(
-        "compiled %s on %s inference_precision=%s performance_hint=%s stateful=%s",
-        xml, device, prec, props.get("PERFORMANCE_HINT", ""), stateful,
+        "compiled %s on %s inference_precision=%s performance_hint=%s",
+        xml, device, prec, props.get("PERFORMANCE_HINT", ""),
     )
 
     def run(*arrays):
@@ -450,87 +372,8 @@ def compile_dyn_last(mod, example, xml, stamp, device, precision="f32", compile_
     return run
 
 
-def causal_full_module(inner):
-    """Layer stack only. Official backbone.forward builds an HF causal mask that
-    traces into functorch vmap and dies with unordered_map::at (intel3/intel5)."""
-    import torch
-    import torch.nn as nn
-
-    if not all(hasattr(inner, n) for n in ("layers", "norm", "rotary_emb")):
-        raise RuntimeError("backbone missing layers/norm/rotary_emb for stack export")
-    cfg = getattr(inner, "config", None)
-    if cfg is not None:
-        cfg._attn_implementation = "eager"
-    n_layers = int(getattr(cfg, "num_hidden_layers", len(inner.layers)))
-
-    class _Stack(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, inputs_embeds, attention_mask):
-            wdtype = next(self.inner.parameters()).dtype
-            hidden = inputs_embeds.to(dtype=wdtype)
-            t = hidden.shape[1]
-            pos = torch.arange(t, device=hidden.device).unsqueeze(0)
-            cache_pos = pos.reshape(-1)
-            causal = torch.triu(
-                torch.ones(t, t, dtype=torch.bool, device=hidden.device), 1
-            )
-            min_v = torch.finfo(hidden.dtype).min
-            attn = hidden.new_zeros(1, 1, t, t)
-            attn = attn.masked_fill(causal, min_v)
-            keep = attention_mask.to(dtype=torch.bool).view(1, 1, 1, t)
-            attn = attn.masked_fill(~keep, min_v)
-            rope = self.inner.rotary_emb(hidden, pos)
-            for layer in self.inner.layers[:n_layers]:
-                hidden = layer(
-                    hidden,
-                    attention_mask=attn,
-                    position_ids=pos,
-                    past_key_values=None,
-                    cache_position=cache_pos,
-                    position_embeddings=rope,
-                )
-                if isinstance(hidden, (tuple, list)):
-                    hidden = hidden[0]
-            return self.inner.norm(hidden).to(dtype=inputs_embeds.dtype)
-
-    return _Stack()
-
-
-class FullSeqRunner:
-    """Python keeps the prefix; every decode re-runs the growing sequence on GPU."""
-
-    def __init__(self, compiled):
-        self.compiled = compiled
-        self.prefix = None
-
-    def reset(self):
-        self.prefix = None
-
-    def step(self, embeds):
-        import numpy as np
-        import torch
-
-        q = int(embeds.shape[1])
-        piece = embeds.detach().float().contiguous()
-        self.prefix = piece if self.prefix is None else torch.cat([self.prefix, piece], dim=1)
-        arr = np.ascontiguousarray(self.prefix.cpu().numpy())
-        hidden = torch.from_numpy(
-            np.ascontiguousarray(self.compiled(arr, mask_np(None, arr.shape[1], 0))[0])
-        )
-        return hidden[:, -q:, :]
-
-
 def causal_attn_bias(hidden, q_len, past_len):
-    """Additive mask: query i sees keys 0 .. past_len+i. Needed for FireRed q=4.
-
-    Prefill is a T×T triu (intel8 exported this and dynamized T). Decode keeps
-    every past key and applies the same triu only on the new q×q block.
-    Do not build the mask with arange-compare: OpenVINO freezes that Select
-    at the example length and then 500s on a longer prompt.
-    """
+    """Additive causal mask via triu. An arange-compare Select freezes at the export length."""
     import torch
 
     min_v = torch.finfo(hidden.dtype).min
@@ -789,64 +632,8 @@ def causal_fixed_slot_module(inner, max_t, lm_head=None):
     return _Step()
 
 
-class KvRunner:
-    """Prefill once, then decode with tensor K/V. No full-seq rerun.
-
-    Copies every K/V to host numpy each token. Fine for tests / Breeze until
-    DeviceKvRunner covers prefill too.
-    """
-
-    def __init__(self, prefill, decode, n_layers):
-        self.prefill = prefill
-        self.decode = decode
-        self.n_layers = n_layers
-        self.kv = None
-
-    def reset(self):
-        self.kv = None
-
-    def seed_kv(self, cache):
-        """Copy an official HF cache into numpy K/V after a CPU prefill."""
-        import numpy as np
-
-        flat = flatten_kv(cache)
-        if len(flat) != 2 * self.n_layers:
-            raise RuntimeError(
-                "seed_kv expected %d tensors, got %d"
-                % (2 * self.n_layers, len(flat))
-            )
-        self.kv = [
-            np.ascontiguousarray(t.detach().float().cpu().numpy()) for t in flat
-        ]
-
-    @property
-    def prefix_len(self):
-        if self.kv is None:
-            return 0
-        return int(self.kv[0].shape[-2])
-
-    def step(self, embeds):
-        import numpy as np
-        import torch
-
-        q = int(embeds.shape[1])
-        arr = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
-        if self.kv is None:
-            out = self.prefill(arr, mask_np(None, q, 0))
-        else:
-            out = self.decode(arr, mask_np(None, q, self.prefix_len), *self.kv)
-        hidden = torch.from_numpy(np.ascontiguousarray(out[0]))
-        self.kv = [np.ascontiguousarray(out[i]) for i in range(1, 1 + 2 * self.n_layers)]
-        return hidden[:, -q:, :]
-
-
 class DeviceKvRunner:
-    """Decode with ping-pong InferRequests. Only hidden comes back to host.
-
-    intel12 fed 28×2 numpy K/V every token and lost to official eager (RTF 26
-    vs 16). Keep present K/V as the next request's input tensors so the
-    device-side buffers stay put. Prefill stays official; seed_kv uploads once.
-    """
+    """Ping-pong InferRequests. Prefill and decode stay on device; only hidden returns to host."""
 
     def __init__(self, decode, n_layers, prefill=None, external_position=False):
         compiled = getattr(decode, "compiled", None)
@@ -867,24 +654,6 @@ class DeviceKvRunner:
         self._prefix = 0
         self.which = 0
 
-    def seed_kv(self, cache):
-        import numpy as np
-        import openvino as ov
-
-        flat = flatten_kv(cache)
-        if len(flat) != 2 * self.n_layers:
-            raise RuntimeError(
-                "seed_kv expected %d tensors, got %d"
-                % (2 * self.n_layers, len(flat))
-            )
-        self._host = []
-        self.kv = []
-        for t in flat:
-            arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
-            self._host.append(arr)
-            self.kv.append(ov.Tensor(arr))
-        self._prefix = int(self._host[0].shape[-2])
-
     @property
     def prefix_len(self):
         return int(self._prefix)
@@ -896,7 +665,7 @@ class DeviceKvRunner:
 
         if self.kv is None:
             if self.pre_req is None:
-                raise RuntimeError("DeviceKvRunner.step needs seed_kv or a prefill model")
+                raise RuntimeError("DeviceKvRunner.step needs a prefill model")
             return self._prefill_step(embeds)
         q = int(embeds.shape[1])
         self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
@@ -1150,104 +919,6 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
     return _Frame()
 
 
-class StatefulKvRunner:
-    """One InferRequest; K/V stay in VariableState. Official prefill then seed_kv."""
-
-    def __init__(self, decode, n_layers):
-        compiled = getattr(decode, "compiled", None)
-        if compiled is None:
-            raise RuntimeError("StatefulKvRunner needs compile_causal().compiled")
-        self.compiled = compiled
-        self.req = compiled.create_infer_request()
-        self.n_layers = n_layers
-        self._prefix = 0
-        self._ready = False
-
-    def reset(self):
-        self.req.reset_state()
-        self._prefix = 0
-        self._ready = False
-
-    def seed_kv(self, cache):
-        self.seed_flat(flatten_kv(cache))
-
-    def seed_flat(self, flat):
-        """Write already-flat K/V (torch or numpy, our [B,kv,T,D] layout) into state."""
-        import numpy as np
-        import openvino as ov
-
-        states = self.req.query_state()
-        if len(states) != len(flat):
-            raise RuntimeError(
-                "state %d vs kv %d" % (len(states), len(flat))
-            )
-        prefix = None
-        for st, t in zip(states, flat):
-            if hasattr(t, "detach"):
-                arr = np.ascontiguousarray(t.detach().float().cpu().numpy())
-            else:
-                arr = np.ascontiguousarray(np.asarray(t, dtype=np.float32))
-            st.state = ov.Tensor(arr)
-            if prefix is None:
-                prefix = int(arr.shape[-2])
-        self._prefix = int(prefix or 0)
-        self._ready = True
-
-    @property
-    def prefix_len(self):
-        return int(self._prefix)
-
-    def step(self, embeds, position=None):
-        import numpy as np
-        import openvino as ov
-        import torch
-
-        if not self._ready:
-            raise RuntimeError("StatefulKvRunner.step needs seed_kv")
-        q = int(embeds.shape[1])
-        self._emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
-        self._mask = mask_np(None, q, self._prefix)
-        self._beam = np.zeros((1,), dtype=np.int32)
-        req = self.req
-        req.set_input_tensor(0, ov.Tensor(self._emb))
-        req.set_input_tensor(1, ov.Tensor(self._mask))
-        nxt = 2
-        if position is not None:
-            if hasattr(position, "detach"):
-                position = position.detach().cpu().numpy()
-            self._pos = np.asarray(position, dtype=np.int64).reshape(1, -1)
-            req.set_input_tensor(nxt, ov.Tensor(self._pos))
-            nxt += 1
-        req.set_input_tensor(nxt, ov.Tensor(self._beam))
-        req.infer()
-        hidden = torch.from_numpy(np.array(req.get_output_tensor(0).data, copy=True))
-        self._prefix += q
-        return hidden[:, -q:, :]
-
-
-def causal_step_module(inner, n_layers, with_past):
-    """Kept for tests. Do not export this: DynamicCache does not trace."""
-    import torch.nn as nn
-
-    class _Step(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.inner = inner
-
-        def forward(self, inputs_embeds, attention_mask, *past):
-            kwargs = {
-                "inputs_embeds": inputs_embeds,
-                "attention_mask": attention_mask,
-                "use_cache": True,
-            }
-            if with_past:
-                kwargs["past_key_values"] = unflatten_kv(past, n_layers)
-            out = self.inner(**kwargs)
-            return (out.last_hidden_state, *flatten_kv(out.past_key_values))
-
-    return _Step()
-
-
 def mask_np(mask, q_len, past_len):
     """2-D [1, past+q] keep-mask for a causal step. 4-D additive masks: 0 = keep."""
     import numpy as np
@@ -1269,22 +940,6 @@ def mask_np(mask, q_len, past_len):
     if out.shape[1] < total:
         out = np.concatenate([out, np.ones((1, total - out.shape[1]), dtype=np.int64)], 1)
     return np.ascontiguousarray(out)
-
-
-def write_static_kv(cache, flat):
-    """Copy OV present K/V (used prefix) back into a transformers StaticCache."""
-    n = len(flat) // 2
-    for i in range(n):
-        k, v = flat[2 * i], flat[2 * i + 1]
-        layer = cache.layers[i]
-        sl = k.shape[-2]
-        keys = getattr(layer, "keys", None)
-        vals = getattr(layer, "values", None)
-        if keys is None:
-            keys = layer.key_cache
-            vals = layer.value_cache
-        keys[..., :sl, :].copy_(k)
-        vals[..., :sl, :].copy_(v)
 
 
 def force_cpu_torch_device():
