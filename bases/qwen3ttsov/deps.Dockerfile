@@ -49,14 +49,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
-# Matched CPU wheels. The CPU index has no torchaudio next to torch 2.14, and a PyPI
-# torchaudio would replace this torch with a CUDA build.
+# CPU torch first. optimum-intel also wants torchvision; the matching CPU wheel is 0.29.1.
+# The CPU index has no torchaudio for torch 2.14, so that wheel is installed with --no-deps
+# afterwards. A PyPI torchaudio would replace this torch with a CUDA build.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         --index-url https://download.pytorch.org/whl/cpu \
-        "torch==2.9.1" "torchaudio==2.9.1"
+        "torch==2.14.1" "torchvision==0.29.1"
 
-# qwen-tts is installed without its deps: gradio is the demo UI, and its torch pin would
-# fight the CPU wheel above. transformers stays on 4.57.3, the release qwen-tts 0.1.1 requires.
+# qwen-tts is installed without its deps: gradio is the demo UI. optimum-intel's resolver
+# still pulls the CUDA torch because torchvision on PyPI requires it; those packages are
+# removed and the CPU wheels put back before the image is allowed to finish.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino \
         openvino-genai \
@@ -78,15 +80,21 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "transformers==4.57.3" \
         "pyparsing==3.3.2" \
-    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+    && python3 -c 'import subprocess,sys; freeze=subprocess.check_output([sys.executable,"-m","pip","list","--format=freeze"],text=True); drop=[line.split("==",1)[0] for line in freeze.splitlines() if line.lower().startswith(("nvidia-","cuda-"))]; drop and subprocess.check_call([sys.executable,"-m","pip","uninstall","-y",*drop])' \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall \
         --index-url https://download.pytorch.org/whl/cpu \
-        "torch==2.9.1" "torchaudio==2.9.1" \
+        "torch==2.14.1" "torchvision==0.29.1" \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore --no-deps \
+        --index-url https://download.pytorch.org/whl/cpu \
+        "torchaudio==2.9.1" \
     && ! python3 -m pip list 2>/dev/null | grep -i '^nvidia-' \
     && python3 -c "import pyparsing, openvino, torch, torchaudio, transformers, qwen_tts, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
 from optimum.intel import OVModelForTextToSpeechSeq2Seq; \
+import torchaudio.compliance.kaldi as kaldi; \
 assert pyparsing.__version__ == '3.3.2', pyparsing.__version__; \
 assert transformers.__version__ == '4.57.3', transformers.__version__; \
 assert torch.version.cuda is None, torch.__version__; \
+assert callable(kaldi.fbank); \
 print('torch', torch.__version__); \
 print('torchaudio', torchaudio.__version__); \
 print('transformers', transformers.__version__); \
