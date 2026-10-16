@@ -50,8 +50,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 # CPU torch first. optimum-intel also wants torchvision; the matching CPU wheel is 0.29.1.
-# The CPU index has no torchaudio for torch 2.14, so that wheel is installed with --no-deps
-# afterwards. A PyPI torchaudio would replace this torch with a CUDA build.
+# There is no torchaudio build for this torch. A small pure-Python package stands in so the
+# 25 Hz tokenizer can be imported; the 12 Hz model this image serves does not call it.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         --index-url https://download.pytorch.org/whl/cpu \
         "torch==2.14.1" "torchvision==0.29.1"
@@ -72,7 +72,9 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "uvicorn>=0.29" \
         python-multipart \
         websockets \
-        numpy \
+        "numpy>=1.24,<2.5" \
+        onnxruntime \
+        sox \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "qwen-tts==0.1.1" --no-deps \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
@@ -84,11 +86,13 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall \
         --index-url https://download.pytorch.org/whl/cpu \
         "torch==2.14.1" "torchvision==0.29.1" \
-    && python3 -m pip install --no-cache-dir --root-user-action=ignore --no-deps \
-        --index-url https://download.pytorch.org/whl/cpu \
-        "torchaudio==2.9.1" \
-    && ! python3 -m pip list 2>/dev/null | grep -i '^nvidia-' \
-    && python3 -c "import pyparsing, openvino, torch, torchaudio, transformers, qwen_tts, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy; \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        "numpy>=1.24,<2.5"
+
+COPY bases/qwen3ttsov/torchaudio_shim/torchaudio /usr/local/lib/python3.12/dist-packages/torchaudio
+
+RUN ! python3 -m pip list 2>/dev/null | grep -i '^nvidia-' \
+    && python3 -c "import pyparsing, openvino, torch, torchaudio, transformers, qwen_tts, librosa, soundfile, fastapi, uvicorn, huggingface_hub, numpy, onnxruntime, sox; \
 from optimum.intel import OVModelForTextToSpeechSeq2Seq; \
 import torchaudio.compliance.kaldi as kaldi; \
 assert pyparsing.__version__ == '3.3.2', pyparsing.__version__; \
@@ -96,8 +100,8 @@ assert transformers.__version__ == '4.57.3', transformers.__version__; \
 assert torch.version.cuda is None, torch.__version__; \
 assert callable(kaldi.fbank); \
 print('torch', torch.__version__); \
-print('torchaudio', torchaudio.__version__); \
 print('transformers', transformers.__version__); \
+print('numpy', numpy.__version__); \
 print('openvino', openvino.__version__); \
 print('qwen_tts', 'ok'); \
 print('qwen3_tts', OVModelForTextToSpeechSeq2Seq.__name__)"
