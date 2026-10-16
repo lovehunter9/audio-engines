@@ -14,6 +14,68 @@ from . import tts
 
 log = tts.log
 
+# The codec graph's time axis is dynamic, and a new length pays the full compile again.
+# One sentence is one chunk (qwen_tts windows at 300 frames plus 25 of left context),
+# so four buckets cover it. The decoder is causal: right-padding does not move the
+# samples the window keeps, and those samples are cropped back off the pad.
+_CODEC_BUCKETS = (64, 128, 256, 384)
+
+
+def _codec_bucket(frames):
+    frames = int(frames)
+    for bucket in _CODEC_BUCKETS:
+        if frames <= bucket:
+            return bucket
+    return frames
+
+
+def _pad_time(codes, pad):
+    extra = codes.shape[:-1] + (pad,)
+    if hasattr(codes, "new_zeros"):
+        import torch
+        return torch.cat((codes, codes.new_zeros(extra)), dim=-1)
+    return np.concatenate((codes, np.zeros(extra, dtype=codes.dtype)), axis=-1)
+
+
+def _crop_time(wav, frames, bucket):
+    if frames == bucket:
+        return wav
+    keep = int(round(wav.shape[-1] * frames / bucket))
+    return wav[..., :keep]
+
+
+def _bucketing_forward(orig):
+    """Pad the code time axis to a bucket, then drop the padded tail of the wave."""
+    seen = set()
+
+    def forward(codes):
+        frames = int(codes.shape[-1])
+        bucket = _codec_bucket(frames)
+        if bucket not in seen:
+            seen.add(bucket)
+            log.info("codec frames %s -> bucket %s", frames, bucket)
+        if bucket != frames:
+            codes = _pad_time(codes, bucket - frames)
+        wav = orig(codes)
+        return _crop_time(wav, frames, bucket)
+
+    forward._codec_buckets = True
+    return forward
+
+
+def _install_codec_buckets(ov):
+    model = getattr(ov, "model", None)
+    tokenizer = getattr(model, "speech_tokenizer", None) if model is not None else None
+    inner = getattr(tokenizer, "model", None) if tokenizer is not None else None
+    decoder = getattr(inner, "decoder", None) if inner is not None else None
+    if decoder is None or not callable(getattr(decoder, "forward", None)):
+        log.warning("codec buckets skipped; the loaded model has no decoder")
+        return
+    if getattr(decoder.forward, "_codec_buckets", False):
+        return
+    decoder.forward = _bucketing_forward(decoder.forward)
+    log.info("codec decode buckets %s", ",".join(str(b) for b in _CODEC_BUCKETS))
+
 
 def _device():
     """GPU when this pod is an Intel mode. --device in ENGINE_ARGS replaces that."""
@@ -103,6 +165,7 @@ def _load():
     elif not kind:
         kind = "base"
     rate = int(getattr(ov, "sampling_rate", tts.OUT_SR) or tts.OUT_SR)
+    _install_codec_buckets(ov)
     return (_OpenVINOQwen3TTS(ov, rate), speakers,
             kind == "custom_voice", kind == "voice_design")
 
