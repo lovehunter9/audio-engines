@@ -114,6 +114,10 @@ for _el_mod in ("firered", "breeze"):
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
             "async_supported": _async,
         }
+for _tts_key, _tts_meta in list(EXPECTED_CAPABILITY_ENDPOINTS.items()):
+    _tts_mod, _tts_cap, _tts_method, _tts_path = _tts_key
+    if _tts_mod == "tts":
+        EXPECTED_CAPABILITY_ENDPOINTS[("tts_ov", _tts_cap, _tts_method, _tts_path)] = dict(_tts_meta)
 
 TASK_PATHS = {
     "/v1/tasks",
@@ -2160,6 +2164,7 @@ class RouteSpecAgreementTest(unittest.TestCase):
         ("breeze", "tts_design", "POST", "/v1/text-to-voice/design"),
         # Qwen3-TTS reads its preset library off the checkpoint, so voices is checkpoint-gated.
         ("tts", "tts", "GET", "/v1/audio/voices"),
+        ("tts_ov", "tts", "GET", "/v1/audio/voices"),
     })
 
     @staticmethod

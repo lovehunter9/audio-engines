@@ -54,6 +54,10 @@ BASES = {
     "qwen3tts": [
         (("tts", "tts_clone"), "tts"),
     ],
+    # Intel iGPU / Arc. Same routes as qwen3tts; the weights run through OpenVINO, not CUDA graphs.
+    "qwen3ttsov": [
+        (("tts", "tts_clone"), "tts_ov"),
+    ],
     # Dasheng-AudioGen: sound effects from English-only captions, so translation sits upstream.
     "dasheng": [
         (("sound_fx",), "sound_fx"),
@@ -90,6 +94,7 @@ FAMILIES = {
     "enhance": "speechbrain",
     "diar_stream": "nemo-sortformer",
     "tts": "qwen3-tts",
+    "tts_ov": "qwen3-tts",
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
@@ -252,6 +257,10 @@ _MOUNTS = {
          True),
     ],
 }
+
+# Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
+_MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
+_MOUNTS[("tts_ov", "tts_clone")] = list(_MOUNTS[("tts", "tts_clone")])
 
 
 def implements(base):
