@@ -19,7 +19,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from .. import hfgate
@@ -653,6 +653,25 @@ def _patch_card(target, want, pack=None):
     (target / "meta.json").write_text(json.dumps(have, ensure_ascii=False, indent=2))
 
 
+def _native_pack(backend):
+    """A backend's own premade directory. Absent on FireRed and Breeze."""
+    getter = getattr(backend, "native_voices_dir", None)
+    if not callable(getter):
+        return None
+    path = getter()
+    if not path:
+        return None
+    path = Path(path)
+    return path if path.is_dir() else None
+
+
+def _pack_for(vid, pack, native_pack):
+    """Official-speaker wavs live beside the shared pack, not inside it."""
+    if native_pack is not None and (native_pack / vid / "meta.json").is_file():
+        return native_pack
+    return pack
+
+
 def seed_builtins(module, dest, backend=None, cards=None, pack=None):
     """Reconcile premade cards with the current union. User clones / designs stay.
 
@@ -681,6 +700,7 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
         pack = builtin_voices_dir(module)
     else:
         pack = Path(pack)
+    native_pack = _native_pack(backend)
     for child in list(dest.iterdir()):
         if not _premade_dir(child):
             continue
@@ -688,16 +708,17 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
             shutil.rmtree(child)
     for vid, card in want.items():
         target = dest / vid
+        card_pack = _pack_for(vid, pack, native_pack)
         if target.exists() and not _premade_dir(target):
             continue
         if not target.exists():
-            _plant(target, card, pack)
+            _plant(target, card, card_pack)
             continue
-        if _replant_needed(target, card, pack):
+        if _replant_needed(target, card, card_pack):
             shutil.rmtree(target)
-            _plant(target, card, pack)
+            _plant(target, card, card_pack)
             continue
-        _patch_card(target, card, pack)
+        _patch_card(target, card, card_pack)
     planted = {c["voice_id"]: c for c in load_voice_cards(dest, category="premade")}
     return [planted[vid] for vid in want if vid in planted]
 
@@ -1967,7 +1988,7 @@ def _audio_response(audio, sr, fmt, stream=False, *, meta=None, text="", setting
     return tasks.Binary(body, mime, suffix="." + fmt, headers=headers)
 
 
-def build_app(supports, module=None):
+def build_app(supports, module=None, openai_alias=False):
     module = module or _MODULE["name"] or "firered"
     _MODULE["name"] = module
     app = FastAPI(title="audio-tts (%s, ElevenLabs shape)" % module)
@@ -2348,6 +2369,144 @@ def build_app(supports, module=None):
 
             return await tasks.dispatch(async_, "tts_clone", MODEL_NAME, _work,
                                         fail="voice clone failed")
+
+    if openai_alias and has_tts:
+        @app.post("/v1/audio/speech")
+        async def openai_speech(request: Request):
+            try:
+                payload = dict(await request.json())
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="body must be JSON in the OpenAI /v1/audio/speech shape")
+            return await _synthesize_payload(payload, request.query_params.get("async"),
+                                             default_fmt="wav")
+
+        @app.get("/v1/audio/voices")
+        def openai_voices():
+            _require_ready()
+            rows = []
+            for meta in _store().list():
+                row = _public_voice(meta)
+                row["id"] = row["voice_id"]
+                row["voice"] = row["voice_id"]
+                rows.append(row)
+            return {"model": MODEL_NAME, "voices": rows}
+
+        @app.websocket("/v1/audio/speech/stream")
+        async def openai_speech_stream(ws: WebSocket):
+            await ws.accept()
+            if not _state["ready"]:
+                await ws.send_text(json.dumps({
+                    "type": "error", "message": _state["error"] or "engine not ready"}))
+                await ws.close()
+                return
+            cfg = {"voice": "", "instructions": ""}
+            pending = ""
+            await ws.send_text(json.dumps({
+                "type": "session.ready", "model": MODEL_NAME,
+                "sample_rate": int(_state.get("sample_rate") or 24000), "format": "pcm"}))
+
+            def split_sentences(buf):
+                out, start = [], 0
+                for i, ch in enumerate(buf):
+                    if ch in "。！？!?\n" or (ch == "." and i + 1 < len(buf) and buf[i + 1] == " "):
+                        piece = buf[start:i + 1].strip()
+                        if piece:
+                            out.append(piece)
+                        start = i + 1
+                return out, buf[start:]
+
+            async def speak_one(text):
+                voice = cfg["voice"].strip()
+                instructions = cfg["instructions"].strip()
+                if voice:
+                    audio, _sr = await asyncio.to_thread(
+                        _speak_voice, voice, text, instructions or None)
+                elif instructions:
+                    audio, _sr = await asyncio.to_thread(_speak_design, instructions, text)
+                else:
+                    raise HTTPException(status_code=400, detail="voice or instructions is required")
+                await ws.send_bytes(_pcm16(audio))
+
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        return
+                    raw = msg.get("text")
+                    if not raw:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "the socket carries JSON text frames"}))
+                        continue
+                    try:
+                        frame = json.loads(raw)
+                    except json.JSONDecodeError:
+                        await ws.send_text(json.dumps({"type": "error", "message": "frame is not JSON"}))
+                        continue
+                    kind = str(frame.get("type") or "")
+                    session = frame.get("session") if isinstance(frame.get("session"), dict) else frame
+                    if kind == "session.update":
+                        if session.get("voice"):
+                            cfg["voice"] = str(session.get("voice"))
+                        if session.get("instructions"):
+                            cfg["instructions"] = str(session.get("instructions"))
+                    elif kind == "input.text":
+                        pending += str(frame.get("text") or "")
+                        ready, pending = split_sentences(pending)
+                        for piece in ready:
+                            await speak_one(piece)
+                    elif kind == "input.done":
+                        tail = (pending + str(frame.get("text") or "")).strip()
+                        pending = ""
+                        if tail:
+                            await speak_one(tail)
+                        await ws.send_text(json.dumps({"type": "session.done"}))
+                    elif kind == "session.close":
+                        await ws.close()
+                        return
+                    else:
+                        await ws.send_text(json.dumps({
+                            "type": "error", "message": "unknown frame type %r" % kind}))
+            except WebSocketDisconnect:
+                return
+            except Exception as e:
+                detail = getattr(e, "detail", None) or str(e)
+                try:
+                    await ws.send_text(json.dumps({"type": "error", "message": detail}))
+                    await ws.close()
+                except Exception:
+                    return
+
+    if openai_alias and has_clone:
+        @app.post("/v1/audio/speech/clone")
+        async def openai_clone(file: UploadFile = File(...),
+                               text: str = Form(..., alias="input"),
+                               ref_text: str = Form(default=""),
+                               instructions: str = Form(default=""),
+                               fmt: str = Form(default="wav", alias="response_format"),
+                               async_: str = Form(default=None, alias="async")):
+            _require_ready()
+            data = await file.read()
+            if not data:
+                raise HTTPException(status_code=400, detail="file (the reference audio) is empty")
+            transcript = (ref_text or "").strip()
+            if not transcript:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ref_text (the exact transcript of the reference) is required")
+            _check_ref_audio(data)
+            mime = file.content_type or "audio/wav"
+            payload = {
+                "input": text,
+                "response_format": fmt or "wav",
+                "ref_text": transcript,
+                "ref_audio": "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii")),
+            }
+            if instructions.strip():
+                payload["instructions"] = instructions.strip()
+            return await _synthesize_payload(payload, async_, default_fmt="wav")
 
     return app
 

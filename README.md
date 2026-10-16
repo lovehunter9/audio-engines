@@ -232,6 +232,7 @@ passes. For the same reason the build's final import check must go **through**
 | `speakrs-ov` | `beclab/audio-speakrs-ov` | `diar` | the same speakrs, on ONNX Runtime's OpenVINO provider for Intel GPUs (amd64 only) | in progress |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
+| `qwen3voice` | `beclab/audio-qwen3voice` | `tts`, `tts_clone`, `tts_design` | Qwen3-TTS Base + on-demand VoiceDesign; official speakers are private cards; OpenAI and ElevenLabs | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |

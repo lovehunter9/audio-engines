@@ -101,7 +101,7 @@ _EL_DESIGN_ROUTES = (
 _EL_CLONE_ROUTES = (
     ("POST", "/v1/voices/add", True),
 )
-for _el_mod in ("firered", "breeze"):
+for _el_mod in ("firered", "breeze", "qwen3_voice"):
     for _method, _path, _async in _EL_TTS_ROUTES:
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts", _method, _path)] = {
             "async_supported": _async,
@@ -114,6 +114,17 @@ for _el_mod in ("firered", "breeze"):
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
             "async_supported": _async,
         }
+for _method, _path, _async in (
+    ("POST", "/v1/audio/speech", True),
+    ("GET", "/v1/audio/voices", False),
+    ("WS", "/v1/audio/speech/stream", False),
+):
+    EXPECTED_CAPABILITY_ENDPOINTS[("qwen3_voice", "tts", _method, _path)] = {
+        "async_supported": _async,
+    }
+EXPECTED_CAPABILITY_ENDPOINTS[("qwen3_voice", "tts_clone", "POST", "/v1/audio/speech/clone")] = {
+    "async_supported": True,
+}
 
 TASK_PATHS = {
     "/v1/tasks",
