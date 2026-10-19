@@ -51,7 +51,7 @@ def base_name():
 
 
 # Display family only; ov is the Intel build of the same qwen routes. Dispatch still keys on AUDIO_BASE.
-_SPEC_BASE = {"ov": "qwen"}
+_SPEC_BASE = {"ov": "qwen", "qwen3ttsov": "qwen3tts"}
 
 
 def spec_base():
