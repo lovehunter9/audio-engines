@@ -114,6 +114,10 @@ for _el_mod in ("firered", "breeze"):
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
             "async_supported": _async,
         }
+for _tts_key, _tts_meta in list(EXPECTED_CAPABILITY_ENDPOINTS.items()):
+    _tts_mod, _tts_cap, _tts_method, _tts_path = _tts_key
+    if _tts_mod == "tts":
+        EXPECTED_CAPABILITY_ENDPOINTS[("tts_ov", _tts_cap, _tts_method, _tts_path)] = dict(_tts_meta)
 
 TASK_PATHS = {
     "/v1/tasks",
@@ -1253,6 +1257,8 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertNotIn("optimum", src)
 
     def test_no_wrapper_imports_optimum_intel(self):
+        # Qwen3-TTS is the OpenVINO exception: it loads through OVModelForTextToSpeechSeq2Seq.
+        allowed = {"caps/tts_ov.py"}
         root = os.path.join(os.path.dirname(__file__), "..", "wrapper")
         hits = []
         for dirpath, _, files in os.walk(root):
@@ -1262,7 +1268,9 @@ class OpenVINOModeTest(unittest.TestCase):
                 path = os.path.join(dirpath, name)
                 text = open(path, encoding="utf-8").read()
                 if "optimum.intel" in text or "OVModelFor" in text:
-                    hits.append(os.path.relpath(path, root))
+                    rel = os.path.relpath(path, root)
+                    if rel not in allowed:
+                        hits.append(rel)
         self.assertEqual(hits, [])
 
     def test_ov_logits_splits_encoder_decoder_and_skips_thinker(self):
@@ -2160,6 +2168,7 @@ class RouteSpecAgreementTest(unittest.TestCase):
         ("breeze", "tts_design", "POST", "/v1/text-to-voice/design"),
         # Qwen3-TTS reads its preset library off the checkpoint, so voices is checkpoint-gated.
         ("tts", "tts", "GET", "/v1/audio/voices"),
+        ("tts_ov", "tts", "GET", "/v1/audio/voices"),
     })
 
     @staticmethod
