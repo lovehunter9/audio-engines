@@ -329,10 +329,11 @@ def _generate(orig, compiled, steps, vocab, hidden):
     return generate
 
 
-_STAMP = ".qwen3tts-predictor-frame-v2"
+_STAMP_FP = ".qwen3tts-predictor-frame-v1"
+_STAMP_INT8 = ".qwen3tts-predictor-frame-v2"
 
 
-def install(ov, model_dir, device, cache, compress):
+def install(ov, model_dir, device, cache, compress=None):
     """Replace code_predictor.generate with one compiled frame. The fifteen launches are the thing this removes."""
     global log
     from . import tts
@@ -344,8 +345,12 @@ def install(ov, model_dir, device, cache, compress):
     steps = residual_steps(predictor.config)
     vocab = int(predictor.config.vocab_size)
     hidden = int(ov.model.talker.config.hidden_size)
-    xml = os.path.join(cache, "qwen3tts-predictor-frame-v2.xml")
-    stamp = os.path.join(cache, _STAMP)
+    if compress is None:
+        xml_name, stamp_name = "qwen3tts-predictor-frame-v1.xml", _STAMP_FP
+    else:
+        xml_name, stamp_name = "qwen3tts-predictor-frame-v2.xml", _STAMP_INT8
+    xml = os.path.join(cache, xml_name)
+    stamp = os.path.join(cache, stamp_name)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
         fresh = _fresh_predictor(ov, model_dir)
         try:
@@ -353,11 +358,12 @@ def install(ov, model_dir, device, cache, compress):
         finally:
             del fresh
             gc.collect()
-        compress(xml)
+        if compress is not None:
+            compress(xml)
         open(stamp, "w").close()
     compiled = _compile(xml, device, cache)
     orig = predictor.generate
     predictor.generate = _generate(orig, compiled, steps, vocab, hidden)
     log.info(
-        "code predictor frame on OpenVINO %s steps=%d vocab=%d",
-        device, steps, vocab)
+        "code predictor frame on OpenVINO %s %s steps=%d vocab=%d",
+        device, "int8" if compress is not None else "fp32", steps, vocab)

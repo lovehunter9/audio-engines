@@ -1,6 +1,8 @@
 """The residual-code frame is one infer. Sliding attention is not this graph."""
 import inspect
+import os
 import unittest
+from unittest.mock import patch
 
 from wrapper.caps import tts_ov
 from wrapper.caps import tts_ov_frame
@@ -17,13 +19,22 @@ class PredictorFrameTest(unittest.TestCase):
     def test_load_installs_the_frame(self):
         src = inspect.getsource(tts_ov._load)
         self.assertIn("tts_ov_frame.install", src)
-        self.assertIn("load_in_8bit=True", src)
-        self.assertIn("compress_frame_int8", src)
+        self.assertIn("load_in_8bit=True if int8 else False", src)
+        self.assertIn("compress_frame_int8 if int8 else None", src)
 
-    def test_frame_stamp_is_the_int8_graph(self):
+    def test_only_the_integrated_gpu_uses_int8(self):
+        with patch.dict(os.environ, {"OLARES_GPU_MODE": "intel"}):
+            self.assertTrue(tts_ov._igpu_int8())
+        with patch.dict(os.environ, {"OLARES_GPU_MODE": "intel-gpu"}):
+            self.assertFalse(tts_ov._igpu_int8())
+        with patch.dict(os.environ, {"OLARES_GPU_MODE": "Intel"}):
+            self.assertTrue(tts_ov._igpu_int8())
+
+    def test_frame_stamp_follows_the_weight_format(self):
         src = inspect.getsource(tts_ov_frame.install)
-        self.assertIn("qwen3tts-predictor-frame-v2", src)
-        self.assertIn("compress(xml)", src)
+        self.assertIn("qwen3tts-predictor-frame-v1.xml", src)
+        self.assertIn("qwen3tts-predictor-frame-v2.xml", src)
+        self.assertIn("if compress is not None:", src)
         self.assertNotIn("codec", inspect.getsource(tts_ov.compress_frame_int8))
 
     def test_full_attention_counts_the_residual_codes(self):

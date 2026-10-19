@@ -172,6 +172,11 @@ def compress_frame_int8(xml):
     log.info("code predictor frame int8 %s", xml)
 
 
+def _igpu_int8():
+    """8-bit weights on the integrated GPU only. Discrete stays full precision."""
+    return (os.environ.get("OLARES_GPU_MODE") or "").strip().lower() == "intel"
+
+
 def _load():
     from optimum.intel import OVModelForTextToSpeechSeq2Seq
 
@@ -179,11 +184,14 @@ def _load():
     device = _device()
     cache = os.path.join(_hub_cache(), "ov-cache")
     os.makedirs(cache, exist_ok=True)
-    log.info("loading %s from %s on OpenVINO %s int8", tts.MODEL_NAME, path, device)
+    int8 = _igpu_int8()
+    log.info(
+        "loading %s from %s on OpenVINO %s %s",
+        tts.MODEL_NAME, path, device, "int8" if int8 else "fp32")
     ov = OVModelForTextToSpeechSeq2Seq.from_pretrained(
         path, export=True, device=device, local_files_only=True,
         cache_dir=_hub_cache(), token=tts.HF_TOKEN,
-        load_in_8bit=True,
+        load_in_8bit=True if int8 else False,
         ov_config={"CACHE_DIR": cache})
     kind = str(getattr(ov, "_tts_model_type", "") or "").strip().lower()
     speakers = []
@@ -194,7 +202,7 @@ def _load():
     rate = int(getattr(ov, "sampling_rate", tts.OUT_SR) or tts.OUT_SR)
     _install_codec_buckets(ov)
     from . import tts_ov_frame
-    tts_ov_frame.install(ov, path, device, cache, compress_frame_int8)
+    tts_ov_frame.install(ov, path, device, cache, compress_frame_int8 if int8 else None)
     return (_OpenVINOQwen3TTS(ov, rate), speakers,
             kind == "custom_voice", kind == "voice_design")
 
