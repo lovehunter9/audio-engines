@@ -253,7 +253,7 @@ def _compile(xml, device, cache):
         return core.compile_model(xml, device, props)
 
 
-def _export(fresh, steps, vocab, hidden, xml, stamp):
+def _export(fresh, steps, vocab, hidden, xml):
     import openvino as ov
     import torch
 
@@ -271,7 +271,6 @@ def _export(fresh, steps, vocab, hidden, xml, stamp):
     with torch.inference_mode():
         model = ov.convert_model(frame, example_input=example)
     ov.save_model(model, xml)
-    open(stamp, "w").close()
     del model, frame
 
 
@@ -330,10 +329,10 @@ def _generate(orig, compiled, steps, vocab, hidden):
     return generate
 
 
-_STAMP = ".qwen3tts-predictor-frame-v1"
+_STAMP = ".qwen3tts-predictor-frame-v2"
 
 
-def install(ov, model_dir, device, cache):
+def install(ov, model_dir, device, cache, compress):
     """Replace code_predictor.generate with one compiled frame. The fifteen launches are the thing this removes."""
     global log
     from . import tts
@@ -345,15 +344,17 @@ def install(ov, model_dir, device, cache):
     steps = residual_steps(predictor.config)
     vocab = int(predictor.config.vocab_size)
     hidden = int(ov.model.talker.config.hidden_size)
-    xml = os.path.join(cache, "qwen3tts-predictor-frame-v1.xml")
+    xml = os.path.join(cache, "qwen3tts-predictor-frame-v2.xml")
     stamp = os.path.join(cache, _STAMP)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
         fresh = _fresh_predictor(ov, model_dir)
         try:
-            _export(fresh, steps, vocab, hidden, xml, stamp)
+            _export(fresh, steps, vocab, hidden, xml)
         finally:
             del fresh
             gc.collect()
+        compress(xml)
+        open(stamp, "w").close()
     compiled = _compile(xml, device, cache)
     orig = predictor.generate
     predictor.generate = _generate(orig, compiled, steps, vocab, hidden)

@@ -146,6 +146,32 @@ class _OpenVINOQwen3TTS:
         yield audio, sr, None
 
 
+def compress_frame_int8(xml):
+    """8-bit the fused predictor frame. optimum's own compress leaves this graph alone.
+
+    load_in_8bit covers the talker and the embedding tables, and it leaves the
+    waveform decoder at full precision. The residual codes run on the frame we
+    export, so that IR has to be compressed on its own or the predictor stays fp32.
+    """
+    import gc
+
+    import openvino as ov
+    from optimum.intel.openvino.configuration import OVWeightQuantizationConfig
+    from optimum.intel.openvino.quantization import _weight_only_quantization
+
+    core = ov.Core()
+    core.set_property({"ENABLE_MMAP": False})
+    model = core.read_model(xml)
+    compressed = _weight_only_quantization(model, OVWeightQuantizationConfig(bits=8))
+    staged = xml[:-4] + ".compressed.xml"
+    ov.save_model(compressed, staged, compress_to_fp16=False)
+    del compressed, model
+    gc.collect()
+    os.replace(staged, xml)
+    os.replace(staged[:-4] + ".bin", xml[:-4] + ".bin")
+    log.info("code predictor frame int8 %s", xml)
+
+
 def _load():
     from optimum.intel import OVModelForTextToSpeechSeq2Seq
 
@@ -153,10 +179,11 @@ def _load():
     device = _device()
     cache = os.path.join(_hub_cache(), "ov-cache")
     os.makedirs(cache, exist_ok=True)
-    log.info("loading %s from %s on OpenVINO %s", tts.MODEL_NAME, path, device)
+    log.info("loading %s from %s on OpenVINO %s int8", tts.MODEL_NAME, path, device)
     ov = OVModelForTextToSpeechSeq2Seq.from_pretrained(
         path, export=True, device=device, local_files_only=True,
         cache_dir=_hub_cache(), token=tts.HF_TOKEN,
+        load_in_8bit=True,
         ov_config={"CACHE_DIR": cache})
     kind = str(getattr(ov, "_tts_model_type", "") or "").strip().lower()
     speakers = []
@@ -167,7 +194,7 @@ def _load():
     rate = int(getattr(ov, "sampling_rate", tts.OUT_SR) or tts.OUT_SR)
     _install_codec_buckets(ov)
     from . import tts_ov_frame
-    tts_ov_frame.install(ov, path, device, cache)
+    tts_ov_frame.install(ov, path, device, cache, compress_frame_int8)
     return (_OpenVINOQwen3TTS(ov, rate), speakers,
             kind == "custom_voice", kind == "voice_design")
 
