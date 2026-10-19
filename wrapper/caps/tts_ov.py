@@ -166,6 +166,8 @@ def _load():
         kind = "base"
     rate = int(getattr(ov, "sampling_rate", tts.OUT_SR) or tts.OUT_SR)
     _install_codec_buckets(ov)
+    from . import tts_ov_frame
+    tts_ov_frame.install(ov, path, device, cache)
     return (_OpenVINOQwen3TTS(ov, rate), speakers,
             kind == "custom_voice", kind == "voice_design")
 
