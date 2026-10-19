@@ -33,7 +33,7 @@ ARG TARGETARCH
 
 # CUDA-graph capture is unreliable on torch<=2.5.0, so the floor is 2.5.1, asserted below.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        "faster-qwen3-tts>=0.3.2" \
+        "faster-qwen3-tts==0.3.2" \
         "huggingface-hub>=0.34" soundfile librosa numpy \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets \
     && python3 -c "\
