@@ -1,0 +1,44 @@
+# Qwen3-TTS OpenVINO CI (image audio-qwen3tts-ov). Triggers only; build is build-image.yml.
+name: qwen3tts-ov-ci
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/qwen3ttsov/**'
+      - 'scripts/deps-image.sh'
+      - 'scripts/vendor-image.sh'
+      - '.github/workflows/qwen3tts-ov-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qwen3tts-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: qwen3ttsov
+      repo: audio-qwen3tts-ov
+      # Intel GPU (iGPU and Arc) is x86_64; there is no arm64 OpenVINO GPU plugin we would ship.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
