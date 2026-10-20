@@ -76,7 +76,7 @@ understands under the **upstream's own spelling** — `--gpu-memory-utilization`
 handed to a child engine's argv, or logged as ignored where there is no child.
 
 Two flags are claimed by every capability that holds a whole clip at once — `diar`
-(both engines), `speaker_embed`, `enhance`, `vad`. `--max-upload-mb` (default 1024)
+(pyannote, speakrs, and nemotron), `speaker_embed`, `enhance`, `vad`. `--max-upload-mb` (default 1024)
 bounds the request while it is still arriving; `--max-audio-seconds` bounds what it
 decodes into, read off the header rather than by decoding it, and defaults to four
 hours everywhere except `speaker_embed`, which embeds the whole clip in one pass and
@@ -231,6 +231,8 @@ passes. For the same reason the build's final import check must go **through**
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
 | `speakrs-ov` | `beclab/audio-speakrs-ov` | `diar` | the same speakrs, on ONNX Runtime's OpenVINO provider for Intel GPUs (amd64 only) | in progress |
 | `nemo` | `beclab/audio-nemo` | `diar_stream` | NVIDIA NeMo | validated |
+| `nemotron` | `beclab/audio-nemotron` | `diar`, `diar_stream` | NeMo Sortformer on a CUDA runtime (`nemo-toolkit[asr]`), not the NGC training image | in progress |
+| `nemotron-ov` | `beclab/audio-nemotron-ov` | `diar`, `diar_stream` | the same Sortformer; pre-encode, acoustic encoder, speaker head and mel on OpenVINO (Intel GPU, amd64 only) | in progress |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `qwen3ttsov` | `beclab/audio-qwen3tts-ov` | `tts`, `tts_clone` | Qwen3-TTS on OpenVINO (Intel iGPU / Arc, amd64); same HTTP as `qwen3tts` | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
@@ -558,6 +560,30 @@ own CALLHOME 4spk DER: 12.44 -> 11.72):
 | low (1.04 s, live-first) | 6 | 7 | 188 | 144 | 188 |
 | **high (10 s, accuracy)** | **124** | **1** | **124** | **124** | **188** |
 | very high (30.4 s) | 340 | 40 | 40 | 300 | 188 |
+
+**`nemotron` (`diar` and `diar_stream`).** Nemotron 3 Diarization is the same
+Sortformer class, loaded with `SortformerEncLabelModel.restore_from` from the
+llm-init cache, and it is not the `nemo` image. `beclab/audio-nemo` is the NGC
+training container; this base installs `nemo-toolkit[asr]` on a CUDA runtime and
+publishes `beclab/audio-nemotron`. One process, one checkpoint, both the offline
+POST and the streaming socket. The streaming path is NeMo's own step API (the
+same runner `diar_stream` already uses), not a second cache written here.
+Latency presets are the model's 80 ms-frame configs, via `ENGINE_ARGS
+--latency-preset high|low|verylow|ultralow` (default **high**, 30.4 s; the same
+five `--chunk-len` / `--right-context` / `--fifo-len` / `--update-period` /
+`--spkcache-len` overrides). Arrival order, at most 8 channels, overlap kept.
+`num_speakers` is accepted on the form and ignored. `exclusive=1` returns a score-aware timeline (`exclusive_method=score_aware_v1`).
+The checkpoint emits one row per 10 ms (`high_resolution`) and marks word-level
+activity, so both paths fill a same-speaker pause shorter than
+`--min-duration-off` (default **1.25** s, per speaker as in pyannote) and then drop
+turns shorter than `--min-duration-on` (default 0). One job overrides either with
+the form fields `min_duration_off` / `min_duration_on`, one socket with the same
+keys on its `start` message; the POST response echoes both. The POST does not read
+the clip as one array: the CUDA image decodes it in 60 s blocks, and the OpenVINO image in one block up to an hour so mel runs once, into the same bounded
+streaming runner the socket uses, which hands NeMo an empty `total_preds` each
+step and keeps turns instead, so GPU and host memory stay flat at any length and
+`--max-audio-seconds` / `--max-upload-mb` default to 0 (no cap). The inference lock
+is taken per chunk, so a long job does not stall live sockets.
 
 **`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
 other bases apply: no KV cache, no autoregression, and `generate()` denoises a
