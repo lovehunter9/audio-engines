@@ -104,7 +104,7 @@ def gpu_metrics_text(nvml_fallback=False):
     if not present:
         # ov has no CUDA and must not ask NVML; /dev/dri means the chart mounted Intel, used/total stay 0.
         if (os.environ.get("AUDIO_BASE") or "").strip() in (
-                "ov", "whisperov", "enhanceov"):
+                "ov", "whisperov", "enhanceov", "nemotron-ov"):
             present = 1 if os.path.exists("/dev/dri") else 0
         elif nvml_fallback:
             # torch is absent or saw no device; ask NVML before reporting zeros.

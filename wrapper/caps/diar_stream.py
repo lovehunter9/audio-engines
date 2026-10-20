@@ -4,6 +4,8 @@ import json
 import glob
 import asyncio
 import logging
+import threading
+import time
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
@@ -14,6 +16,20 @@ from ..audioio import pcm16_to_float32, resample_linear
 from ..runtime import Runtime
 
 log = logging.getLogger("audio-diar-stream")
+_ov_mod = None
+
+
+def _ov_add(bucket, dt):
+    global _ov_mod
+    if _ov_mod is False:
+        return
+    if _ov_mod is None:
+        if (os.environ.get("AUDIO_BASE") or "").strip() != "nemotron-ov":
+            _ov_mod = False
+            return
+        from . import diar_nemotron_ov as ov_mod
+        _ov_mod = ov_mod
+    _ov_mod.add(bucket, dt)
 
 _runtime = Runtime(
     model=None,
@@ -43,6 +59,12 @@ RIGHT_CONTEXT = _args.count("--right-context", _base[1])
 FIFO_LEN = _args.count("--fifo-len", _base[2])
 UPDATE_PERIOD = _args.count("--update-period", _base[3])
 SPKCACHE_LEN = _args.count("--spkcache-len", _base[4])
+# Same meaning as pyannote's: fill a same-speaker pause shorter than off, then drop a turn shorter than on.
+MIN_DURATION_OFF = _args.number("--min-duration-off", 0.8)
+MIN_DURATION_ON = _args.number("--min-duration-on", 0.0)
+# Sortformer keeps its neighbour-only merge and whole total_preds; Nemotron binds both True.
+PER_SPEAKER = False
+BOUNDED_PREDS = False
 _args.warn_unclaimed(log)
 
 STEP_SEC = 2.0   # partial every N s of audio
@@ -52,8 +74,13 @@ WINDOW_SEC = 60.0
 OVERLAP_SEC = 12.0
 
 _state = _runtime.state
-# Sortformer's diarize() is blocking and not concurrency-safe, so inference is serialized.
-_infer_lock = asyncio.Lock()
+# Sortformer's diarize() is blocking, so the offline POST and the socket share one lock.
+_infer_lock = threading.Lock()
+
+
+def _call_locked(fn, *args):
+    with _infer_lock:
+        return fn(*args)
 
 
 def _p(msg):
@@ -169,29 +196,154 @@ def _merge_segments(segs, gap=0.8):
     return out
 
 
-def _preds_to_segments(preds, frame_sec, thr=0.5):
-    # preds [T, n_spk] of activity per 80ms frame; AOSC pins column k to one speaker, so no remap.
-    out = []
-    if preds is None or getattr(preds, "size", 0) == 0:
-        return out
-    T = preds.shape[0]
-    S = preds.shape[1] if preds.ndim > 1 else 1
-    act = preds >= thr
-    for s in range(S):
-        col = act[:, s]
-        i = 0
-        while i < T:
-            if col[i]:
-                j = i
-                while j + 1 < T and col[j + 1]:
-                    j += 1
-                out.append({"start": round(i * frame_sec, 3),
-                            "end": round((j + 1) * frame_sec, 3),
-                            "speaker": "spk_%d" % s})
-                i = j + 1
+def _seconds(value, default, name):
+    # A per-request knob: absent means the engine's value, anything else must be a finite >= 0.
+    if value is None or str(value).strip() == "":
+        return float(default)
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        raise ValueError("%s must be a number of seconds, got %r" % (name, value))
+    if not (v >= 0.0 and v != float("inf")):
+        raise ValueError("%s must be a finite number of seconds >= 0, got %r" % (name, value))
+    return v
+
+
+def _fill_pauses(segs, off):
+    # Each speaker on its own, like pyannote's min_duration_off: another voice in the pause does not block it.
+    by = {}
+    for s in sorted(segs, key=lambda x: (x["start"], x["end"])):
+        run = by.setdefault(s["speaker"], [])
+        if run and s["start"] - run[-1]["end"] <= off:
+            run[-1]["end"] = max(run[-1]["end"], s["end"])
+        else:
+            run.append({"start": round(float(s["start"]), 3),
+                        "end": round(float(s["end"]), 3), "speaker": s["speaker"]})
+    return sorted((x for run in by.values() for x in run), key=lambda x: (x["start"], x["end"]))
+
+
+def _tidy(segs, off, on):
+    out = _fill_pauses(segs, off) if PER_SPEAKER else _merge_segments(segs, gap=off)
+    return [s for s in out if s["end"] - s["start"] >= on] if on > 0 else out
+
+
+# A frame at or above this is speech, the same cut exclusive and ordinary timelines use.
+_ACTIVITY = 0.5
+# Activities are in 0..1. A lead smaller than this is a tie: keep the speaker already going.
+_TIE_MARGIN = 0.05
+_DECISIONS = ("unique_support", "tie_continuity", "deterministic_fallback")
+
+
+def _exclusive_decision(counts):
+    best = _DECISIONS[0]
+    for name in _DECISIONS[1:]:
+        if counts[name] > counts[best]:
+            best = name
+    return best
+
+
+def exclusive_timeline(rows, frame_sec, off, on):
+    """Collapse per-frame activities into one non-overlapping timeline and its evidence.
+
+    `rows` is [frames, speakers] in the same order `_Runs` consumed. Note's evidence_v3
+    asks for this shape (`exclusive_method=score_aware_v1`): `segments` and
+    `exclusive_evidence.segments` share start, end, speaker, and order. A clear lead is
+    unique_support. A close call keeps whoever was already talking (tie_continuity).
+    Otherwise the louder channel wins, and a lower index breaks an equal tie
+    (deterministic_fallback). A same-speaker gap no longer than `off` is bridged only
+    when nobody else holds it.
+    """
+    n = 0 if rows is None else len(rows)
+    if n == 0:
+        return [], []
+    width = len(rows[0])
+    if width == 0:
+        return [], []
+
+    def blank():
+        return {"counts": {name: 0 for name in _DECISIONS}, "support": [0.0] * width}
+
+    def accrue(run, kind, sc):
+        run["counts"][kind] += 1
+        for k in range(width):
+            run["support"][k] += float(sc[k])
+
+    runs = []
+    prev = None
+    for i in range(n):
+        sc = rows[i]
+        active = []
+        for k in range(width):
+            v = float(sc[k])
+            if v >= _ACTIVITY:
+                active.append((v, k))
+        if not active:
+            continue
+        active.sort(key=lambda item: (-item[0], item[1]))
+        top_v, top_k = active[0]
+        if len(active) == 1 or top_v - active[1][0] >= _TIE_MARGIN:
+            winner, kind = top_k, "unique_support"
+        else:
+            second_k = active[1][1]
+            prev_v = float(sc[prev]) if prev is not None else -1.0
+            if prev is not None and prev_v >= _ACTIVITY and prev in (top_k, second_k):
+                winner, kind = prev, "tie_continuity"
             else:
-                i += 1
-    return _merge_segments(out)
+                winner, kind = top_k, "deterministic_fallback"
+        if runs and runs[-1]["spk"] == winner and runs[-1]["end"] == i:
+            runs[-1]["end"] = i + 1
+            accrue(runs[-1], kind, sc)
+        else:
+            run = blank()
+            run["start"], run["end"], run["spk"] = i, i + 1, winner
+            accrue(run, kind, sc)
+            runs.append(run)
+        prev = winner
+
+    merged = []
+    for run in runs:
+        gap = (run["start"] - merged[-1]["end"]) * frame_sec if merged else None
+        if merged and merged[-1]["spk"] == run["spk"] and gap <= off:
+            m = merged[-1]
+            m["end"] = run["end"]
+            for name in _DECISIONS:
+                m["counts"][name] += run["counts"][name]
+            for k in range(width):
+                m["support"][k] += run["support"][k]
+        else:
+            merged.append(run)
+
+    segments, evidence = [], []
+    for run in merged:
+        start = round(run["start"] * frame_sec, 3)
+        end = round(run["end"] * frame_sec, 3)
+        if on > 0 and end - start < on:
+            continue
+        speaker = "spk_%d" % run["spk"]
+        others = [(run["support"][k], k) for k in range(width) if k != run["spk"]]
+        runner_sum, runner_k = max(others) if others else (0.0, None)
+        runner = "spk_%d" % runner_k if runner_k is not None and runner_sum > 0 else ""
+        seg = {"start": start, "end": end, "speaker": speaker}
+        segments.append(seg)
+        evidence.append({
+            "ordinal": len(evidence),
+            "start": seg["start"], "end": seg["end"], "speaker": seg["speaker"],
+            "support_sum": run["support"][run["spk"]],
+            "runner_up_speaker": runner,
+            "runner_up_support_sum": runner_sum if runner else 0.0,
+            "unique_support_frames": run["counts"]["unique_support"],
+            "tie_continuity_frames": run["counts"]["tie_continuity"],
+            "deterministic_fallback_frames": run["counts"]["deterministic_fallback"],
+            "decision": _exclusive_decision(run["counts"]),
+        })
+    return segments, evidence
+
+
+def _frame_sec(model, sub):
+    # A high-resolution head emits one row per output_subsampling_factor 10ms frames, not per encoder frame.
+    if getattr(model, "high_resolution", False):
+        return max(1, int(getattr(model, "output_subsampling_factor", 1) or 1)) * 0.01
+    return sub * 0.01
 
 
 def _diarize(buf):
@@ -199,6 +351,12 @@ def _diarize(buf):
     model = _state["model"]
     res = model.diarize(audio=[buf], batch_size=1, sample_rate=16000)
     return _parse_segments(res[0] if res else [])
+
+
+def _start_knobs(obj, knobs):
+    # Per-connection overrides ride on the start message; a bad one ends the socket with an error.
+    knobs["off"] = _seconds(obj.get("min_duration_off"), knobs["off"], "min_duration_off")
+    knobs["on"] = _seconds(obj.get("min_duration_on"), knobs["on"], "min_duration_on")
 
 
 class _FallbackToWindow(Exception):
@@ -214,97 +372,190 @@ async def _send_closed(ws, total_samples):
     }))
 
 
-async def _run_streaming(ws):
-    # Features must span a CONTIGUOUS window: per-block normalization splits one speaker into two.
-    import numpy as np
-    import torch
+class _Runs:
+    """Speaker turns built chunk by chunk from activity rows, so no whole-session array is kept."""
 
-    model = _state["model"]
-    sm = model.sortformer_modules
-    device = _state["device"]
-    n_spk = _state["n_spk"]
-    sub = _state["subsampling"]
-    frame_sec = sub * 0.01                      # 80ms output frame (sub * 10ms hop)
-    hop = 160                                   # samples per 10ms preprocessor frame @16k
-    CS = max(1, int(sm.chunk_len) * sub)        # feat frames committed per chunk
-    CRs = int(getattr(sm, "chunk_right_context", 0)) * sub   # feat frames of right context
-    chunk_audio = CS * hop                       # samples committed per chunk
-    rc_frames = CRs
-    step_samples = max(8000, int(STEP_SEC * 16000))          # process/emit cadence
-    # Chunk-aligned window: enough for stable normalization plus left context, trimmed each step.
-    keep_chunks = max(8, int(WINDOW_SEC * 16000) // chunk_audio)
-    sample_rate = 16000
-    buf = np.zeros((0,), dtype="float32")
-    ss = {"state": None, "preds": None}
-    st = {"base_chunks": 0, "committed": 0}      # chunks dropped from buf front / total fed
+    def __init__(self, n_spk, frame_sec, thr=0.5):
+        self.frame_sec, self.thr = frame_sec, thr
+        self.rows = 0
+        self.open = [None] * n_spk     # start row of a turn still running at the frontier
+        self.closed = []               # (start_row, end_row, spk)
 
-    def _init_stream():
-        ss["state"] = sm.init_streaming_state(batch_size=1, async_streaming=True, device=device)
-        ss["preds"] = torch.zeros((1, 0, n_spk), device=device)
-        st["base_chunks"] = 0
-        st["committed"] = 0
+    def add(self, rows):
+        # rows [R, n_spk]; AOSC pins column k to one speaker, so no remap.
+        import numpy as np
 
-    def _process(final=False):
-        # Feed each new chunk that has full right context; offset stays 0 since state carries history.
-        nonlocal buf
-        if buf.size < hop:
+        R = int(rows.shape[0])
+        if R == 0:
             return
-        sig = torch.as_tensor(buf, dtype=torch.float32, device=device).unsqueeze(0)
+        act = np.asarray(rows) >= self.thr
+        for k in range(act.shape[1]):
+            edges = np.flatnonzero(np.diff(np.r_[0, act[:, k].astype(np.int8), 0]))
+            runs = edges.reshape(-1, 2)
+            if self.open[k] is not None and (runs.size == 0 or runs[0, 0] > 0):
+                self.closed.append((self.open[k], self.rows, k))
+                self.open[k] = None
+            for a, b in runs:
+                start = self.open[k] if (a == 0 and self.open[k] is not None) else self.rows + int(a)
+                self.open[k] = None
+                if b == R:
+                    self.open[k] = start
+                else:
+                    self.closed.append((start, self.rows + int(b), k))
+        self.rows += R
+
+    def segments(self):
+        f = self.frame_sec
+        out = [{"start": round(a * f, 3), "end": round(b * f, 3), "speaker": "spk_%d" % k}
+               for a, b, k in self.closed]
+        out += [{"start": round(a * f, 3), "end": round(self.rows * f, 3), "speaker": "spk_%d" % k}
+                for k, a in enumerate(self.open) if a is not None]
+        return out
+
+
+class _Streamer:
+    """NeMo's step API over a chunk-aligned window of bounded length.
+
+    `bounded` hands NeMo an empty total_preds each step and keeps turns instead, so GPU and host
+    memory stay flat however long the audio runs; the legacy path keeps feeding the whole array.
+    Callers hold _infer_lock around step() and selftest().
+    """
+
+    HOP = 160                                   # samples per 10ms preprocessor frame @16k
+
+    def __init__(self, bounded=False, keep_scores=False):
+        model = _state["model"]
+        self.model, self.sm, self.device = model, model.sortformer_modules, _state["device"]
+        self.n_spk = _state["n_spk"]
+        sub = _state["subsampling"]
+        self.frame_sec = _frame_sec(model, sub)
+        self.CS = max(1, int(self.sm.chunk_len) * sub)     # feat frames committed per chunk
+        self.rc_frames = int(getattr(self.sm, "chunk_right_context", 0)) * sub
+        self.chunk_audio = self.CS * self.HOP
+        # Enough for stable normalization plus left context, trimmed each step.
+        self.keep_chunks = max(8, int(WINDOW_SEC * 16000) // self.chunk_audio)
+        self.bounded = bounded
+        # Offline exclusive reconstruction needs the activities. Streaming does not keep them.
+        self.keep_scores = keep_scores
+        self.reset()
+
+    def reset(self):
+        import numpy as np
+        import torch
+
+        self.buf = np.zeros((0,), dtype="float32")
+        self.state = self.sm.init_streaming_state(batch_size=1, async_streaming=True,
+                                                  device=self.device)
+        self.preds = torch.zeros((1, 0, self.n_spk), device=self.device)
+        self.base_chunks = 0                    # chunks dropped from buf front
+        self.committed = 0                      # chunks fed in total
+        self.runs = _Runs(self.n_spk, self.frame_sec)
+        self.score_rows = []
+
+    def feed(self, samples):
+        import numpy as np
+
+        self.buf = np.concatenate([self.buf, samples]) if self.buf.size else samples
+
+    def step(self, final=False):
+        # Features must span a CONTIGUOUS window: per-block normalization splits one speaker into two.
+        import torch
+
+        if self.buf.size < self.HOP:
+            return
+        model, sm, device = self.model, self.sm, self.device
+        # No channel normalization, so a hop-aligned suffix matches the full window past the STFT edge.
+        local_fed = self.committed - self.base_chunks
+        margin_hops = 8
+        audio = self.buf
+        frame_skip = 0
+        norm = getattr(model.preprocessor, "normalize", "per_feature")
+        if local_fed > 0 and norm in ("NA", "na", None, False):
+            start = local_fed * self.chunk_audio - margin_hops * self.HOP
+            if start > 0:
+                audio = self.buf[start:]
+                frame_skip = margin_hops
+        sig = torch.as_tensor(audio, dtype=torch.float32, device=device).unsqueeze(0)
         slen = torch.tensor([sig.shape[1]], device=device)
         with torch.inference_mode():
+            t_mel = time.perf_counter()
             proc, proc_len = model.preprocessor(input_signal=sig, length=slen)
+            _ov_add("mel", time.perf_counter() - t_mel)
+            if frame_skip:
+                proc = proc[:, :, frame_skip:]
+                proc_len = (proc_len - frame_skip).clamp(min=0)
             T = int(proc.shape[2])
             zoff = torch.zeros((proc.shape[0],), dtype=torch.long, device=device)
             loader = sm.streaming_feat_loader(feat_seq=proc, feat_seq_length=proc_len,
                                               feat_seq_offset=zoff)
-            local_fed = st["committed"] - st["base_chunks"]   # leading chunks already fed
+            skip_chunks = 0 if frame_skip else local_fed
             for _tup in loader:
                 i, chunk_feat, feat_lengths, lo, ro = _tup[0], _tup[1], _tup[2], _tup[3], _tup[4]
-                if i < local_fed:
+                if i < skip_chunks:
                     continue                       # already committed in a previous step
-                if not final and ((i + 1) * CS + rc_frames > T):
+                if not final and ((i + 1) * self.CS + self.rc_frames > T):
                     break                          # right context not fully arrived yet
-                ss["state"], ss["preds"] = model.forward_streaming_step(
+                before = 0 if self.bounded else int(self.preds.shape[1])
+                carry = self.preds[:, :0] if self.bounded else self.preds
+                t_step = time.perf_counter()
+                self.state, out = model.forward_streaming_step(
                     processed_signal=chunk_feat, processed_signal_length=feat_lengths,
-                    streaming_state=ss["state"], total_preds=ss["preds"],
+                    streaming_state=self.state, total_preds=carry,
                     left_offset=lo, right_offset=ro)
-                st["committed"] += 1
+                _ov_add("step", time.perf_counter() - t_step)
+                if not self.bounded:
+                    self.preds = out
+                rows = out[0, before:].detach().float().cpu().numpy().copy()
+                self.runs.add(rows)
+                if self.keep_scores and rows.size:
+                    self.score_rows.append(rows)
+                self.committed += 1
         # Trim behind the committed frontier, chunk-aligned so the feature grid never shifts.
-        max_base = st["committed"] - keep_chunks
-        if max_base > st["base_chunks"]:
-            drop = max_base - st["base_chunks"]
-            buf = buf[drop * chunk_audio:]
-            st["base_chunks"] = max_base
+        max_base = self.committed - self.keep_chunks
+        if max_base > self.base_chunks:
+            self.buf = self.buf[(max_base - self.base_chunks) * self.chunk_audio:]
+            self.base_chunks = max_base
 
-    def _selftest():
+    def selftest(self):
         # Run the pipeline on silence, then reset, so the probe cannot shift the real session.
-        nonlocal buf
-        _init_stream()
-        buf = np.zeros((CS * 3 * hop,), dtype="float32")
-        _process(final=True)
-        buf = np.zeros((0,), dtype="float32")
-        _init_stream()
+        import numpy as np
 
-    def _segments():
-        p = ss["preds"]
-        if p is None or p.shape[1] == 0:
-            return []
-        arr = p[0].detach().float().cpu().numpy()
-        return _preds_to_segments(arr, frame_sec)
+        self.reset()
+        self.buf = np.zeros((self.CS * 3 * self.HOP,), dtype="float32")
+        self.step(final=True)
+        self.reset()
+
+    def segments(self):
+        return self.runs.segments()
+
+    def scores(self):
+        # [frames, speakers], concatenated in the order runs.add saw them.
+        import numpy as np
+
+        if not self.score_rows:
+            return np.zeros((0, self.n_spk), dtype="float32")
+        return np.concatenate(self.score_rows, axis=0)
+
+
+async def _run_streaming(ws):
+    streamer = _Streamer(bounded=BOUNDED_PREDS)
+    sample_rate = 16000
+    knobs = {"off": MIN_DURATION_OFF, "on": MIN_DURATION_ON}
+    step_samples = max(8000, int(STEP_SEC * 16000))          # process/emit cadence
 
     async def _send(kind):
-        segs = await asyncio.to_thread(_segments)
+        segs = _tidy(streamer.segments(), knobs["off"], knobs["on"])
         speakers = sorted({s["speaker"] for s in segs})
         await ws.send_text(json.dumps({"type": kind, "segments": segs, "speakers": speakers}))
 
     # Pre-flight: prove the streaming API works BEFORE consuming client audio.
-    async with _infer_lock:
-        try:
-            await asyncio.to_thread(_selftest)
-        except Exception as e:
-            raise _FallbackToWindow("%s: %s" % (type(e).__name__, e))
+    try:
+        await asyncio.to_thread(_call_locked, streamer.selftest)
+    except Exception as e:
+        raise _FallbackToWindow("%s: %s" % (type(e).__name__, e))
     _p("streaming path active (chunk=%d frames rc=%d keep=%d chunks frame=%.3fs n_spk=%d)"
-       % (CS, rc_frames, keep_chunks, frame_sec, n_spk))
+       % (streamer.CS, streamer.rc_frames, streamer.keep_chunks, streamer.frame_sec,
+          streamer.n_spk))
 
     new_samples = 0
     total_new = 0
@@ -322,6 +573,7 @@ async def _run_streaming(ws):
             t = obj.get("type")
             if t == "start":
                 sample_rate = int(obj.get("sample_rate") or 16000)
+                _start_knobs(obj, knobs)
                 continue
             if t in ("stop", "done", "finish"):
                 break
@@ -330,19 +582,17 @@ async def _run_streaming(ws):
         if not data:
             continue
         seg = resample_linear(pcm16_to_float32(data), sample_rate)
-        buf = np.concatenate([buf, seg]) if buf.size else seg
+        streamer.feed(seg)
         new_samples += int(seg.shape[0])
         total_new += int(seg.shape[0])
         if new_samples >= step_samples:
             new_samples = 0
-            async with _infer_lock:
-                await asyncio.to_thread(_process)
+            await asyncio.to_thread(_call_locked, streamer.step)
             if total_new - last_emit >= step_samples:
                 last_emit = total_new
                 await _send("partial")
     # Feed the remaining chunks, accepting rc=0 on the trailing one.
-    async with _infer_lock:
-        await asyncio.to_thread(_process, True)
+    await asyncio.to_thread(_call_locked, streamer.step, True)
     await _send("final")
     await _send_closed(ws, total_new)
     await ws.close()
@@ -365,6 +615,7 @@ async def _run_window(ws):
     overlap_ref = []         # ABS canonical segs over the retained tail (remap ref)
     win_map = {}             # local spk -> canonical spk for the CURRENT window
     canon = {"n": 0}         # next canonical speaker index
+    knobs = {"off": MIN_DURATION_OFF, "on": MIN_DURATION_ON}
 
     def _relabel(local_abs):
         # Window labels are AOSC-stable, so after a roll anchor them by max overlap with the tail.
@@ -402,8 +653,7 @@ async def _run_window(ws):
         # Diarize only the active window, returning canonical absolute-time segments.
         if buf.shape[0] < min_samples:
             return []
-        async with _infer_lock:
-            local = await asyncio.to_thread(_diarize, buf)   # times relative to buf[0]
+        local = await asyncio.to_thread(_call_locked, _diarize, buf)   # times relative to buf[0]
         local_abs = [{"start": s["start"] + base_offset, "end": s["end"] + base_offset,
                       "speaker": s["speaker"]} for s in local]
         return _relabel(local_abs)
@@ -419,7 +669,7 @@ async def _run_window(ws):
             if s["start"] < boundary:
                 committed.append({"start": s["start"], "end": min(s["end"], boundary),
                                   "speaker": s["speaker"]})
-        committed = _merge_segments(committed)
+        committed = _tidy(committed, knobs["off"], 0.0)
         overlap_ref = [{"start": max(s["start"], boundary), "end": s["end"],
                         "speaker": s["speaker"]} for s in cur if s["end"] > boundary]
         base_offset = boundary
@@ -427,7 +677,7 @@ async def _run_window(ws):
         win_map = {}   # rebuilt on the next _current() via overlap_ref
 
     async def _send(kind, cur):
-        full = _merge_segments(committed + cur)
+        full = _tidy(committed + cur, knobs["off"], knobs["on"])
         speakers = sorted({s["speaker"] for s in full})
         await ws.send_text(json.dumps({"type": kind, "segments": full, "speakers": speakers}))
 
@@ -444,6 +694,7 @@ async def _run_window(ws):
             t = obj.get("type")
             if t == "start":
                 sample_rate = int(obj.get("sample_rate") or 16000)
+                _start_knobs(obj, knobs)
                 continue
             if t in ("stop", "done", "finish"):
                 break
