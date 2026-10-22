@@ -326,6 +326,20 @@ _STAMP_FP = ".qwen3tts-predictor-frame-v1"
 _STAMP_INT8 = ".qwen3tts-predictor-frame-v2"
 
 
+def frame_cache_names(talker_hidden, predictor_hidden, compress):
+    """0.6B keeps the unscoped names. A wider talker must not reuse that 1024-wide graph."""
+    if int(talker_hidden) == int(predictor_hidden):
+        if compress is None:
+            return "qwen3tts-predictor-frame-v1.xml", _STAMP_FP
+        return "qwen3tts-predictor-frame-v2.xml", _STAMP_INT8
+    tag = "h%d-%d" % (int(talker_hidden), int(predictor_hidden))
+    if compress is None:
+        return ("qwen3tts-predictor-frame-%s-v1.xml" % tag,
+                ".qwen3tts-predictor-frame-%s-v1" % tag)
+    return ("qwen3tts-predictor-frame-%s-v2.xml" % tag,
+            ".qwen3tts-predictor-frame-%s-v2" % tag)
+
+
 def install(ov, model_dir, device, cache, compress=None):
     """Replace code_predictor.generate with one compiled frame. The fifteen launches are the thing this removes."""
     global log
@@ -338,10 +352,8 @@ def install(ov, model_dir, device, cache, compress=None):
     steps = residual_steps(predictor.config)
     vocab = int(predictor.config.vocab_size)
     hidden = int(ov.model.talker.config.hidden_size)
-    if compress is None:
-        xml_name, stamp_name = "qwen3tts-predictor-frame-v1.xml", _STAMP_FP
-    else:
-        xml_name, stamp_name = "qwen3tts-predictor-frame-v2.xml", _STAMP_INT8
+    xml_name, stamp_name = frame_cache_names(
+        hidden, predictor.config.hidden_size, compress)
     xml = os.path.join(cache, xml_name)
     stamp = os.path.join(cache, stamp_name)
     if not (os.path.isfile(xml) and os.path.isfile(stamp)):
