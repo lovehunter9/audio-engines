@@ -444,8 +444,12 @@ class _Streamer:
         import torch
 
         self.buf = np.zeros((0,), dtype="float32")
-        self.state = self.sm.init_streaming_state(batch_size=1, async_streaming=True,
-                                                  device=self.device)
+        # NeMo's step selects its update path from the model, so its initial
+        # cache must use the same mode. Async preallocation is real history to
+        # the synchronous path, which expects empty cache and FIFO tensors.
+        self.state = self.sm.init_streaming_state(
+            batch_size=1, async_streaming=getattr(self.model, "async_streaming", False),
+            device=self.device)
         self.preds = torch.zeros((1, 0, self.n_spk), device=self.device)
         self.base_chunks = 0                    # chunks dropped from buf front
         self.committed = 0                      # chunks fed in total
