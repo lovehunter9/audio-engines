@@ -162,6 +162,22 @@ def _igpu_int8():
     return (os.environ.get("OLARES_GPU_MODE") or "").strip().lower() == "intel"
 
 
+def _exporter_auto_int8(model_name):
+    """Optimum int8-compresses a submodel at 1e9 parameters. 1.7B's talker crosses it; 0.6B does not."""
+    import re
+    match = re.search(r"(\d+(?:\.\d+)?)b", str(model_name).lower())
+    if not match:
+        return False
+    return float(match.group(1)) >= 1.0
+
+
+def _load_in_8bit(int8, model_name):
+    """Pass the flag only when export will not already compress. A second compress_irs is refused."""
+    if not int8:
+        return False
+    return not _exporter_auto_int8(model_name)
+
+
 def _load():
     from optimum.intel import OVModelForTextToSpeechSeq2Seq
 
@@ -170,13 +186,14 @@ def _load():
     cache = os.path.join(_hub_cache(), "ov-cache")
     os.makedirs(cache, exist_ok=True)
     int8 = _igpu_int8()
+    load_8bit = _load_in_8bit(int8, tts.MODEL_NAME)
     log.info(
         "loading %s from %s on OpenVINO %s %s",
         tts.MODEL_NAME, path, device, "int8" if int8 else "fp32")
     ov = OVModelForTextToSpeechSeq2Seq.from_pretrained(
         path, export=True, device=device, local_files_only=True,
         cache_dir=_hub_cache(), token=tts.HF_TOKEN,
-        load_in_8bit=True if int8 else False,
+        load_in_8bit=load_8bit,
         ov_config={"CACHE_DIR": cache})
     kind = str(getattr(ov, "_tts_model_type", "") or "").strip().lower()
     speakers = []
