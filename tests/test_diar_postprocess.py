@@ -38,6 +38,20 @@ class FramesTest(unittest.TestCase):
         self.assertAlmostEqual(stream._frame_sec(m, 8), 0.08)
 
 
+class OutputFramesTest(unittest.TestCase):
+    def test_high_resolution_final_chunk_does_not_keep_encoder_padding(self):
+        self.assertEqual(stream._output_frames(840, .01), 840)
+        self.assertEqual(stream._output_frames(841, .01), 841)
+
+    def test_encoder_rate_final_chunk_rounds_up_to_valid_output_frames(self):
+        self.assertEqual(stream._output_frames(840, .08), 105)
+        self.assertEqual(stream._output_frames(841, .08), 106)
+
+    def test_no_output_past_the_input_frontier(self):
+        self.assertEqual(stream._output_frames(0, .01), 0)
+        self.assertEqual(stream._output_frames(-8, .01), 0)
+
+
 class TidyTest(unittest.TestCase):
     def test_pause_is_filled_per_speaker_across_another_voice(self):
         segs = [seg(0.0, 1.0, "spk_0"), seg(1.2, 1.5, "spk_1"), seg(2.0, 3.0, "spk_0")]
@@ -191,6 +205,48 @@ class OfflineEndpointTest(unittest.TestCase):
 
     def test_bad_override_is_a_400(self):
         self.assertEqual(self.post(min_duration_off="-1").status_code, 400)
+
+
+class StreamerStateTest(unittest.TestCase):
+    def test_initial_state_matches_the_model_update_mode(self):
+        import types
+        from unittest import mock
+        import numpy as np
+
+        # The real runner needs only zeros during initialization. Keep this
+        # regression GPU-free so every image's PR checks exercise both modes.
+        torch = types.SimpleNamespace(zeros=lambda shape, device=None: np.zeros(shape))
+        for mode in (False, True, None):
+            with self.subTest(mode=mode):
+                def init_state(batch_size, async_streaming, device):
+                    return types.SimpleNamespace(
+                        cache_frames=264 if async_streaming else 0,
+                        fifo_frames=40 if async_streaming else 0)
+
+                sm = types.SimpleNamespace(
+                    chunk_len=340, chunk_right_context=40,
+                    init_streaming_state=mock.Mock(side_effect=init_state))
+                model = types.SimpleNamespace(sortformer_modules=sm)
+                if mode is not None:
+                    model.async_streaming = mode
+                state = dict(model=model, device="cpu", n_spk=8, subsampling=8)
+                with mock.patch.dict(sys.modules, {"torch": torch}), \
+                        mock.patch.object(stream, "_state", state):
+                    runner = stream._Streamer(bounded=True, keep_scores=True)
+                    expected = mode if mode is not None else False
+                    sm.init_streaming_state.assert_called_once_with(
+                        batch_size=1, async_streaming=expected, device="cpu")
+                    self.assertEqual(runner.state.cache_frames, 264 if expected else 0)
+                    self.assertEqual(runner.state.fifo_frames, 40 if expected else 0)
+                    # A fresh recording must reset all output clocks and scores.
+                    runner.runs.add(np.ones((5, 8), dtype="float32"))
+                    runner.score_rows.append(np.ones((5, 8), dtype="float32"))
+                    runner.committed = 2
+                    runner.reset()
+                    self.assertEqual(runner.committed, 0)
+                    self.assertEqual(runner.segments(), [])
+                    self.assertEqual(runner.scores().shape, (0, 8))
+                    self.assertEqual(sm.init_streaming_state.call_count, 2)
 
 
 class RunsTest(unittest.TestCase):
