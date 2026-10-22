@@ -346,6 +346,12 @@ def _frame_sec(model, sub):
     return sub * 0.01
 
 
+def _output_frames(feature_frames, frame_sec):
+    # NeMo crops the subsampled final chunk back to valid 10ms input frames.
+    stride = max(1, round(frame_sec / 0.01))
+    return max(0, (feature_frames + stride - 1) // stride)
+
+
 def _diarize(buf):
     # Fallback path: float32 mono @16k in, segments relative to buf[0] out, O(n) per call.
     model = _state["model"]
@@ -488,6 +494,9 @@ class _Streamer:
             if frame_skip:
                 proc = proc[:, :, frame_skip:]
                 proc_len = (proc_len - frame_skip).clamp(min=0)
+            # Match model.forward(): the mel tensor may include padded frames.
+            # Those frames must not become right context or extra output rows.
+            proc = proc[:, :, :int(proc_len.max())]
             T = int(proc.shape[2])
             zoff = torch.zeros((proc.shape[0],), dtype=torch.long, device=device)
             loader = sm.streaming_feat_loader(feat_seq=proc, feat_seq_length=proc_len,
@@ -509,7 +518,8 @@ class _Streamer:
                 _ov_add("step", time.perf_counter() - t_step)
                 if not self.bounded:
                     self.preds = out
-                rows = out[0, before:].detach().float().cpu().numpy().copy()
+                valid_rows = _output_frames(T - i * self.CS, self.frame_sec)
+                rows = out[0, before:before + valid_rows].detach().float().cpu().numpy().copy()
                 self.runs.add(rows)
                 if self.keep_scores and rows.size:
                     self.score_rows.append(rows)

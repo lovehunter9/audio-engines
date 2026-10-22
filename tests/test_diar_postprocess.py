@@ -38,6 +38,20 @@ class FramesTest(unittest.TestCase):
         self.assertAlmostEqual(stream._frame_sec(m, 8), 0.08)
 
 
+class OutputFramesTest(unittest.TestCase):
+    def test_high_resolution_final_chunk_does_not_keep_encoder_padding(self):
+        self.assertEqual(stream._output_frames(840, .01), 840)
+        self.assertEqual(stream._output_frames(841, .01), 841)
+
+    def test_encoder_rate_final_chunk_rounds_up_to_valid_output_frames(self):
+        self.assertEqual(stream._output_frames(840, .08), 105)
+        self.assertEqual(stream._output_frames(841, .08), 106)
+
+    def test_no_output_past_the_input_frontier(self):
+        self.assertEqual(stream._output_frames(0, .01), 0)
+        self.assertEqual(stream._output_frames(-8, .01), 0)
+
+
 class TidyTest(unittest.TestCase):
     def test_pause_is_filled_per_speaker_across_another_voice(self):
         segs = [seg(0.0, 1.0, "spk_0"), seg(1.2, 1.5, "spk_1"), seg(2.0, 3.0, "spk_0")]
