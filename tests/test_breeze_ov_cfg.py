@@ -55,8 +55,11 @@ class BreezeOvCfgTest(unittest.TestCase):
         self.assertTrue(torch.allclose(got, torch.tensor([[-4.0, 6.0, 1.0]])))
         self.assertLess(_sim_temperature(1.0, 2.0), 1.0)
         self.assertLess(_sim_top_p(0.8, 2.0), 0.8)
-        self.assertGreater(_sim_temperature(1.0, 0.7), 1.0)
+        # A flat knob keeps the model's temperature and closes an open nucleus.
+        self.assertLessEqual(_sim_temperature(1.0, 0.7), 1.0)
+        self.assertAlmostEqual(_sim_temperature(0.9, 0.85), 0.9)
         self.assertGreater(_sim_top_p(0.5, 0.7), 0.5)
+        self.assertAlmostEqual(_sim_top_p(1.0, 0.85), 0.95)
 
     def test_depth_cfg_greedy_and_masked_tail(self):
         if not _HAS_TORCH:

@@ -26,6 +26,9 @@ _SIM_SPAN = 4.0
 # Off unless this request moved stability, similarity, style, or speaker boost.
 # Speed does not set it: the tempo filter is the only speed path.
 _KNOB_FAST = {"on": False}
+# On only when this request's depth actually uses the four-step frame.
+# The codec then drops the later acoustic books. A full frame leaves it off.
+_KNOB_SHORT = {"on": False}
 # Residual codebooks drawn when a knob is off default. The other graph still draws all of them.
 _KNOB_DEPTH_STEPS = 4
 # One quiet code per codec codebook, filled in by the codec installer before weights are released.
@@ -139,8 +142,16 @@ def _sim_logits(cond, scale):
 
 
 def _sim_temperature(temperature, scale):
+    """Sharpening cools the draw. A flatter knob keeps the model's own temperature.
+
+    Dividing by a gain below 1 heats a frame until one sample lands on a breath code.
+    """
     gain = _sim_gain(scale)
-    return max(0.12, min(2.5, float(temperature) / gain))
+    base = float(temperature)
+    cooled = base / gain
+    if gain < 1.0:
+        cooled = min(cooled, base)
+    return max(0.12, min(2.5, cooled))
 
 
 def _sim_top_p(top_p, scale):
@@ -150,7 +161,11 @@ def _sim_top_p(top_p, scale):
         p = p ** min(gain, 4.0)
     else:
         p = 1.0 - (1.0 - p) * gain
-    return max(0.1, min(1.0, p))
+    p = max(0.1, min(1.0, p))
+    # An open nucleus on a flat draw is the same occasional breath.
+    if gain < 1.0 and p > 0.95:
+        p = 0.95
+    return p
 
 
 def _ov_real_rows(embeds, mask):
@@ -446,6 +461,7 @@ class BreezeBackend:
         tempo = tts_long.TempoStream(self.sample_rate, kn.speed) if kw.get("pace_each") else None
         try:
             _KNOB_FAST["on"] = _knobs_request_fast(kw.get("settings"))
+            _KNOB_SHORT["on"] = False
             sf.write(path, wav, rate, format="WAV", subtype="PCM_16")
             ctx = kw.get("ctx")
             total = len(parts)
@@ -491,6 +507,7 @@ class BreezeBackend:
                     yield paced, self.sample_rate
         finally:
             _KNOB_FAST["on"] = False
+            _KNOB_SHORT["on"] = False
             if tempo is not None:
                 tempo.abort()
             tts_long.vram(log, "clone")
@@ -523,6 +540,7 @@ class BreezeBackend:
                                      include_speed_direction=False,
                                      seed_jitter=int(kw.get("seed_jitter") or 0))
         _KNOB_FAST["on"] = _knobs_request_fast(kw.get("settings"))
+        _KNOB_SHORT["on"] = False
         try:
             tts_el.job_tick(ctx, 0, 1, stage="design")
             audio, sr = self._generate(text, kn.instruction or instruction,
@@ -532,6 +550,7 @@ class BreezeBackend:
             return audio, sr, {}
         finally:
             _KNOB_FAST["on"] = False
+            _KNOB_SHORT["on"] = False
 
 
 def _is_ov():
@@ -1262,6 +1281,8 @@ def _install_breeze_depth_ov(model, path, device):
             embeds = np.ascontiguousarray(seq.detach().float().cpu().numpy())
             use_knob = _knob_uses_short_frame(_KNOB_FAST["on"], scale)
             if use_knob:
+                # The codec reads this when the request closes, after these frames exist.
+                _KNOB_SHORT["on"] = True
                 uniform = np.ascontiguousarray(
                     torch.rand(knob_steps, vocab).numpy().astype(np.float32)
                 )
@@ -1373,6 +1394,37 @@ def _patch_codec_trace_masks():
     return dec_mod, enc_mod, saved
 
 
+def _silence_acoustic_tail(dec, start):
+    """Acoustic RVQ books from `start` on decode to exact zeros. Restore before the next trace.
+
+    The four drawn books stay. A constant quiet code in the other books is a latent offset,
+    and the decoder turns that offset into a sigh wherever the frame dips.
+    """
+    import torch
+
+    rest = dec.quantizer.rvq_rest.vq.layers
+    start = int(start)
+    if start < 1 or start >= len(rest):
+        raise RuntimeError(
+            "breeze quiet tail starts at acoustic book %d of %d" % (start, len(rest))
+        )
+    saved = []
+    for layer in list(rest)[start:]:
+        orig = layer.decode
+
+        def _zeros(codes, _orig=orig):
+            return torch.zeros_like(_orig(codes))
+
+        saved.append((layer, orig))
+        layer.decode = _zeros
+    return saved
+
+
+def _restore_acoustic_tail(saved):
+    for layer, orig in saved:
+        layer.decode = orig
+
+
 def _restore_codec_trace_masks(patched):
     dec_mod, enc_mod, saved = patched
     dec_mod.create_causal_mask = saved[0]
@@ -1426,6 +1478,9 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             return codes
 
     _, dec_xml, dec_stamp = tts_ov.ir_paths(src, "breeze_codec_dec", ".ov-breeze-codec-dec-v2")
+    _, quiet_xml, quiet_stamp = tts_ov.ir_paths(
+        src, "breeze_codec_dec_quiet", ".ov-breeze-codec-dec-quiet4",
+    )
     _, enc_xml, enc_stamp = tts_ov.ir_paths(src, "breeze_codec_enc", ".ov-breeze-codec-enc-v2")
     dec_example = torch.zeros(1, n_q, static_t, dtype=torch.long)
     enc_example = torch.zeros(1, 16000, dtype=torch.float32)
@@ -1439,6 +1494,15 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
             _Enc(), enc_example, enc_xml, enc_stamp, device,
             precision="f16", compile_graph=False,
         )
+        # Full graph is already on disk. This second trace zeros acoustic books 4..14.
+        silenced = _silence_acoustic_tail(dec, _KNOB_DEPTH_STEPS)
+        try:
+            tts_ov.compile_static(
+                _Dec(), dec_example, quiet_xml, quiet_stamp, device,
+                precision="f16", compile_graph=False,
+            )
+        finally:
+            _restore_acoustic_tail(silenced)
     finally:
         _restore_codec_trace_masks(patched)
     downsample = int(tok_model.get_encode_downsample_rate())
@@ -1453,9 +1517,19 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
         compiled_enc = tts_ov.compile_dyn_last(
             _Enc(), enc_example, enc_xml, enc_stamp, device, precision="f16",
         )
+        quiet_box = {"fn": None}
+
+        def _quiet_dec():
+            # First sharpened knob pays for this graph. Default and a flat knob never load it.
+            if quiet_box["fn"] is None:
+                quiet_box["fn"] = tts_ov.compile_static(
+                    _Dec(), dec_example, quiet_xml, quiet_stamp, device, precision="f16",
+                )
+            return quiet_box["fn"]
 
         def _decode_window(codes_bqt):
             """codes [1, Q, T] -> wav [samples]. Left context is real codes."""
+            decode = _quiet_dec() if _KNOB_SHORT["on"] else compiled_dec
             total = int(codes_bqt.shape[-1])
             pieces = []
             start = 0
@@ -1472,7 +1546,7 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
                     raise RuntimeError(
                         "breeze codec window %d exceeds static %d" % (window.shape[-1], static_t)
                     )
-                wav = np.array(compiled_dec(window)[0])
+                wav = np.array(decode(window)[0])
                 per = int(wav.shape[-1]) // static_t
                 if per < 1:
                     raise RuntimeError(
@@ -1509,8 +1583,10 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
                 t0 = time.perf_counter()
                 wav = _decode_window(cat.numpy())
                 log.info(
-                    "breeze codec decode frames=%d samples=%d %.3fs",
-                    int(cat.shape[-1]), int(wav.shape[0]), time.perf_counter() - t0,
+                    "breeze codec decode frames=%d samples=%d tail=%s %.3fs",
+                    int(cat.shape[-1]), int(wav.shape[0]),
+                    "quiet" if _KNOB_SHORT["on"] else "full",
+                    time.perf_counter() - t0,
                 )
                 self._runtime._ov_wav = wav
 
