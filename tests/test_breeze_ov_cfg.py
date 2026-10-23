@@ -87,6 +87,21 @@ class BreezeOvCfgTest(unittest.TestCase):
         self.assertTrue(_knobs_request_fast({"style": 1.0}))
         self.assertTrue(_knobs_request_fast({"use_speaker_boost": False}))
 
+    def test_knob_tail_uses_each_later_books_quiet_code(self):
+        try:
+            import numpy as np
+
+            from wrapper.caps.breeze import _knob_tail_codes
+        except Exception as exc:
+            self.skipTest("breeze deps missing: %s" % exc)
+        drawn = np.array([3, 4, 5, 6])
+        quiet = list(range(100, 116))
+        got = _knob_tail_codes(drawn, 15, quiet)
+        self.assertEqual(got.tolist(), [3, 4, 5, 6] + list(range(105, 116)))
+        self.assertTrue(np.array_equal(_knob_tail_codes(drawn[:4], 4, quiet), drawn))
+        with self.assertRaises(RuntimeError):
+            _knob_tail_codes(drawn, 15, quiet[:5])
+
     def test_depth_cfg_sample_keeps_the_only_finite_logit(self):
         if not _HAS_TORCH:
             self.skipTest("torch is not installed")

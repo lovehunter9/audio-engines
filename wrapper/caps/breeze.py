@@ -28,6 +28,9 @@ _SIM_SPAN = 4.0
 _KNOB_FAST = {"on": False}
 # Residual codebooks drawn when a knob is off default. The other graph still draws all of them.
 _KNOB_DEPTH_STEPS = 4
+# One quiet code per codec codebook, filled in by the codec installer before weights are released.
+# idx[0] is the semantic book. Depth slot j is codec book j + 1, because the backbone token is book 0.
+_KNOB_QUIET = {"idx": None}
 
 
 def _knobs_request_fast(settings):
@@ -42,6 +45,65 @@ def _knobs_request_fast(settings):
         or float(got["style"]) != float(base["style"])
         or bool(got["use_speaker_boost"]) != bool(base["use_speaker_boost"])
     )
+
+
+def _knob_tail_codes(drawn, need, quiet):
+    """Keep the drawn residual codes. Later books take that book's quiet code, not the last draw.
+
+    The codec frame is [backbone code, depth codes...], so depth slot j reads quiet[j + 1].
+    """
+    import numpy as np
+
+    n = int(drawn.shape[0])
+    need = int(need)
+    if n < 1 or n > need:
+        raise RuntimeError("breeze knob draw %d outside 1..%d" % (n, need))
+    if n == need:
+        return drawn
+    if quiet is None or len(quiet) < need + 1:
+        raise RuntimeError("breeze knob quiet codes are missing")
+    fill = np.array([int(quiet[j + 1]) for j in range(n, need)], dtype=drawn.dtype)
+    return np.concatenate([drawn, fill])
+
+
+def _codec_quiet_indices(dec):
+    """Index in each codebook whose decoded vector is smallest after that RVQ's output projection."""
+    import torch
+
+    quant = getattr(dec, "quantizer", None)
+    first = getattr(quant, "rvq_first", None)
+    rest = getattr(quant, "rvq_rest", None)
+    if first is None or rest is None:
+        raise RuntimeError("breeze codec quantizer has no split RVQ")
+    if int(getattr(quant, "n_q_semantic", 0)) != 1:
+        raise RuntimeError(
+            "breeze knob quiet fill expects one semantic codebook, got %s"
+            % getattr(quant, "n_q_semantic", None)
+        )
+    indices = []
+    with torch.no_grad():
+        for rvq in (first, rest):
+            weight = rvq.output_proj.weight.detach().float().reshape(rvq.output_proj.weight.shape[0], -1)
+            for layer in rvq.vq.layers:
+                book = layer._codebook
+                usage = book.cluster_usage.detach().float()
+                emb = book.embedding_sum.detach().float() / usage.clamp(min=float(book.epsilon))[:, None]
+                vec = layer.project_out(emb)
+                if vec.dim() != 2:
+                    vec = vec.reshape(emb.shape[0], -1)
+                if int(vec.shape[-1]) != int(weight.shape[1]):
+                    raise RuntimeError(
+                        "breeze quiet code shape %s does not match output proj %s"
+                        % (tuple(vec.shape), tuple(weight.shape))
+                    )
+                contrib = vec.float() @ weight.t()
+                bias = getattr(rvq.output_proj, "bias", None)
+                if bias is not None:
+                    contrib = contrib + bias.detach().float()
+                indices.append(int(contrib.norm(dim=-1).argmin()))
+    if len(indices) < 2:
+        raise RuntimeError("breeze quiet codes found %d books" % len(indices))
+    return indices
 
 
 def _cfg_mix(cond, uncond, scale):
@@ -1207,11 +1269,7 @@ def _install_breeze_depth_ov(model, path, device):
                         "breeze depth knob returned %d tokens, expected at most %d"
                         % (int(drawn.shape[0]), need)
                     )
-                if int(drawn.shape[0]) < need:
-                    fill = np.full(need - int(drawn.shape[0]), int(drawn[-1]), dtype=drawn.dtype)
-                    toks = np.concatenate([drawn, fill])
-                else:
-                    toks = drawn
+                toks = _knob_tail_codes(drawn, need, _KNOB_QUIET["idx"])
             else:
                 uniform = np.ascontiguousarray(
                     torch.rand(n_tokens, vocab).numpy().astype(np.float32)
@@ -1379,6 +1437,8 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
     finally:
         _restore_codec_trace_masks(patched)
     downsample = int(tok_model.get_encode_downsample_rate())
+    _KNOB_QUIET["idx"] = _codec_quiet_indices(dec)
+    log.info("breeze knob quiet codes %s", _KNOB_QUIET["idx"])
     tts_ov.release_parameters(tok_model, "breeze audio tokenizer")
 
     def _bind_codec():
