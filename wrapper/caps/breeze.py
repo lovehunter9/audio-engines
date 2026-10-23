@@ -166,12 +166,14 @@ def _sim_gain(scale):
 
 
 def _sim_logits(cond, scale):
-    """Sharpen or flatten the conditional logits. Gain 1 returns the same tensor."""
-    gain = _sim_gain(scale)
-    if abs(gain - 1.0) < 1e-6:
-        return cond
-    center = cond.mean(dim=-1, keepdim=True)
-    return center + (cond - center) * gain
+    """Leave the backbone distribution alone.
+
+    Words and EOS are this tensor. Scaling it swaps characters or walks to
+    max_new_tokens. The knob stays on the depth temperature and the short frame.
+    """
+    if scale is None:
+        raise RuntimeError("breeze backbone scale is missing")
+    return cond
 
 
 def _sim_temperature(temperature, scale):
@@ -1000,7 +1002,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         gain = 1.0
         if int(self.batch_size) == 2:
             scale = float(self.guidance_scale.detach().float().reshape(-1)[0])
-            gain = _sim_gain(scale)
             cond = self.logits_buf[: self.half]
             self.cfg_logits_buf.copy_(_sim_logits(cond, scale))
         else:

@@ -51,8 +51,8 @@ class BreezeOvCfgTest(unittest.TestCase):
         if not _HAS_TORCH:
             self.skipTest("torch is not installed")
         cond = torch.tensor([[0.0, 2.0, 1.0]])
-        got = _sim_logits(cond, 2.0)
-        self.assertTrue(torch.allclose(got, torch.tensor([[-4.0, 6.0, 1.0]])))
+        self.assertTrue(torch.equal(_sim_logits(cond, 2.0), cond))
+        self.assertTrue(torch.equal(_sim_logits(cond, 0.4), cond))
         self.assertLess(_sim_temperature(1.0, 2.0), 1.0)
         self.assertLess(_sim_top_p(0.8, 2.0), 0.8)
         # A flat knob keeps the model's temperature and closes an open nucleus.
