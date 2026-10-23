@@ -20,12 +20,51 @@ _CTX_SECONDS = 10.0
 # infer.py's --seed default, and set_deterministic's own signature default.
 _UPSTREAM_SEED = 42
 _CTX_TOKENS = int(_CTX_SECONDS * _FPS) + 40
-_DEPTH_CFG_MAX = 32
+# How far a CFG step moves the one-pass draw. 1 keeps the official scale; 4 makes
+# the four EL knobs audible without a second backbone or depth pass.
+_SIM_SPAN = 4.0
 
 
 def _cfg_mix(cond, uncond, scale):
     """Official single CFG: uncond + scale * (cond - uncond)."""
     return uncond + scale * (cond - uncond)
+
+
+def _sim_gain(scale):
+    """Map a CFG scale onto one forward. Scale 1 is gain 1, so the fast path is unchanged."""
+    try:
+        s = float(scale)
+    except (TypeError, ValueError):
+        s = 1.0
+    if s != s or s <= 0:
+        s = 1.0
+    s = max(0.3, min(8.0, s))
+    gain = 1.0 + _SIM_SPAN * (s - 1.0)
+    return max(0.25, min(6.0, gain))
+
+
+def _sim_logits(cond, scale):
+    """Sharpen or flatten the conditional logits. Gain 1 returns the same tensor."""
+    gain = _sim_gain(scale)
+    if abs(gain - 1.0) < 1e-6:
+        return cond
+    center = cond.mean(dim=-1, keepdim=True)
+    return center + (cond - center) * gain
+
+
+def _sim_temperature(temperature, scale):
+    gain = _sim_gain(scale)
+    return max(0.12, min(2.5, float(temperature) / gain))
+
+
+def _sim_top_p(top_p, scale):
+    gain = _sim_gain(scale)
+    p = float(top_p)
+    if gain >= 1.0:
+        p = p ** min(gain, 4.0)
+    else:
+        p = 1.0 - (1.0 - p) * gain
+    return max(0.1, min(1.0, p))
 
 
 def _ov_real_rows(embeds, mask):
@@ -690,8 +729,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         precision="f16",
     )
     runner = tts_ov.FixedSlotRunner(compiled, n_layers, max_t, n_kv, head_dim)
-    runner_u = tts_ov.FixedSlotRunner(compiled, n_layers, max_t, n_kv, head_dim)
-    cfg_pair = {"on": False}
     orig_bb = backbone.forward
 
     def _as_embeds(states, embeds):
@@ -715,7 +752,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         if past_in is None:
             t0 = time.perf_counter()
             if batch == 1:
-                cfg_pair["on"] = False
                 n = int(embeds.shape[1])
                 if n > max_t:
                     raise RuntimeError(
@@ -729,27 +765,23 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
                     n, time.perf_counter() - t0,
                 )
             else:
+                # Conditional row only. The uncond branch is not a second GPU pass.
                 rows = _ov_real_rows(embeds, kwargs.get("attention_mask"))
-                for i, row in enumerate(rows):
-                    if int(row.shape[1]) > max_t:
-                        raise RuntimeError(
-                            "breeze ov cfg row %d length %d exceeds static %d"
-                            % (i, int(row.shape[1]), max_t)
-                        )
-                runner.isolate = True
-                runner_u.isolate = True
+                n = int(rows[0].shape[1])
+                if n > max_t:
+                    raise RuntimeError(
+                        "breeze ov cfg row 0 length %d exceeds static %d" % (n, max_t)
+                    )
+                runner.isolate = False
                 runner.reset()
-                runner_u.reset()
                 h0 = runner.prefill(rows[0].detach())
-                h1 = runner_u.prefill(rows[1].detach())
-                cfg_pair["on"] = True
                 states = embeds.new_zeros(embeds.shape)
-                states[0, -1] = _as_embeds(h0[0, -1], states)
-                states[1, -1] = _as_embeds(h1[0, -1], states)
+                last = _as_embeds(h0[0, -1], states)
+                states[0, -1] = last
+                states[1, -1] = last
                 log.info(
-                    "breeze cfg prefill tokens=%d/%d %.3fs",
-                    int(rows[0].shape[1]), int(rows[1].shape[1]),
-                    time.perf_counter() - t0,
+                    "breeze cfg sim prefill tokens=%d skipped_uncond=%d %.3fs",
+                    n, int(rows[1].shape[1]), time.perf_counter() - t0,
                 )
         else:
             if int(embeds.shape[1]) != 1:
@@ -758,16 +790,14 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
                     % (tuple(embeds.shape),)
                 )
             if batch == 2:
-                if not cfg_pair["on"] or runner.slot <= 0 or runner_u.slot <= 0:
+                if runner.slot <= 0:
                     raise RuntimeError("breeze ov cfg continuation before a prefill")
-                if runner.slot >= max_t or runner_u.slot >= max_t:
+                if runner.slot >= max_t:
                     raise RuntimeError(
-                        "breeze ov cfg slot %d/%d exceeds %d"
-                        % (runner.slot, runner_u.slot, max_t)
+                        "breeze ov cfg slot %d exceeds %d" % (runner.slot, max_t)
                     )
                 h0 = runner.step(embeds[0:1].detach())
-                h1 = runner_u.step(embeds[1:2].detach())
-                states = torch.cat([h0, h1], 0)
+                states = torch.cat([h0, h0], 0)
             else:
                 if runner.slot <= 0:
                     raise RuntimeError("breeze ov continuation before a prefill")
@@ -787,8 +817,6 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
 
     def prefill_kv(self, past_key_values):
         seq_len = int(runner.slot)
-        if cfg_pair["on"]:
-            seq_len = max(seq_len, int(runner_u.slot))
         if seq_len <= 0:
             raise RuntimeError("breeze ov prefill_kv before a prefill")
         if seq_len > self.max_seq_len:
@@ -825,11 +853,12 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
             self.hidden_buf[:, -1, :].to(dtype=self.lm_head.weight.dtype)
         )
         self.logits_buf.copy_(logits)
+        gain = 1.0
         if int(self.batch_size) == 2:
             scale = float(self.guidance_scale.detach().float().reshape(-1)[0])
+            gain = _sim_gain(scale)
             cond = self.logits_buf[: self.half]
-            uncond = self.logits_buf[self.half:self.half * 2]
-            self.cfg_logits_buf.copy_(_cfg_mix(cond, uncond, scale))
+            self.cfg_logits_buf.copy_(_sim_logits(cond, scale))
         else:
             self.cfg_logits_buf.copy_(self.logits_buf[: self.half])
         t3 = time.perf_counter()
@@ -839,8 +868,8 @@ def _install_breeze_ov(model, path, device, audio_tokenizer=None):
         step_t["head"] += t3 - t2
         if step_t["n"] % 8 == 0:
             log.info(
-                "breeze backbone steps=%d embed=%.3fs ov=%.3fs head=%.3fs",
-                step_t["n"], step_t["embed"], step_t["ov"], step_t["head"],
+                "breeze backbone steps=%d embed=%.3fs ov=%.3fs head=%.3fs sim_gain=%.2f",
+                step_t["n"], step_t["embed"], step_t["ov"], step_t["head"], gain,
             )
 
     prefill_kv._ov = True
@@ -987,7 +1016,7 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """One f32 infer per depth frame, drawn as the official multinomial. Put the tied codebook embedding back on the projector dtype before the copy."""
+    """One f32 infer per depth frame. A CFG batch stays on this frame and only retunes temperature and top-p."""
     import time
 
     import numpy as np
@@ -1019,7 +1048,7 @@ def _install_breeze_depth_ov(model, path, device):
         )
     cfg = inner.config
     hidden = int(cfg.hidden_size)
-    n_layers, n_kv, head_dim = tts_ov.kv_meta(cfg)
+    n_layers, _, _ = tts_ov.kv_meta(cfg)
     n_codebooks = int(
         getattr(head, "num_codebooks", 0) or getattr(cfg, "num_codebooks", 0) or 0
     )
@@ -1050,30 +1079,6 @@ def _install_breeze_depth_ov(model, path, device):
         frame_mod, frame_example, frame_xml, frame_stamp, device,
         dynamize_ranks=(), compile_graph=False, precision="f32",
     )
-    if n_codebooks > _DEPTH_CFG_MAX:
-        raise RuntimeError(
-            "breeze ov cfg depth max %d < codebooks %d" % (_DEPTH_CFG_MAX, n_codebooks)
-        )
-    cfg_past = []
-    for _ in range(n_layers):
-        cfg_past.append(torch.zeros(1, n_kv, _DEPTH_CFG_MAX, head_dim, dtype=torch.float32))
-        cfg_past.append(torch.zeros(1, n_kv, _DEPTH_CFG_MAX, head_dim, dtype=torch.float32))
-    cfg_example = (
-        torch.zeros(1, 2, hidden, dtype=torch.float32),
-        torch.ones(1, 2, _DEPTH_CFG_MAX, dtype=torch.long),
-        torch.arange(2, dtype=torch.long).unsqueeze(0),
-        torch.arange(2, dtype=torch.long),
-        *cfg_past,
-    )
-    _, cfg_xml, cfg_stamp = tts_ov.ir_paths(
-        str(path), "breeze_depth_cfg", ".ov-breeze-depth-cfg-v1",
-    )
-    cfg_mod = tts_ov.causal_fixed_slot_module(inner, _DEPTH_CFG_MAX)
-    tts_ov.compile_causal(
-        cfg_mod, cfg_example, cfg_xml, cfg_stamp, device,
-        dynamize_ranks=(1, 2, 3), compile_graph=False, precision="f32",
-    )
-    cfg_head = head.weight.detach().float().cpu().contiguous().clone()
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
     tts_ov.release_parameters(head, "breeze depth head")
@@ -1083,56 +1088,6 @@ def _install_breeze_depth_ov(model, path, device):
             frame_mod, frame_example, frame_xml, frame_stamp, device,
             dynamize_ranks=(), precision="f32",
         )
-
-        cfg_compiled = tts_ov.compile_causal(
-            cfg_mod, cfg_example, cfg_xml, cfg_stamp, device,
-            dynamize_ranks=(1, 2, 3), precision="f32",
-        )
-        depth_a = tts_ov.FixedSlotRunner(
-            cfg_compiled, n_layers, _DEPTH_CFG_MAX, n_kv, head_dim, isolate=True,
-        )
-        depth_b = tts_ov.FixedSlotRunner(
-            cfg_compiled, n_layers, _DEPTH_CFG_MAX, n_kv, head_dim, isolate=True,
-        )
-
-        def _depth_cfg_frame(self, seq, t0):
-            if int(seq.shape[0]) != 2 or int(seq.shape[1]) != 2:
-                raise RuntimeError(
-                    "breeze ov depth cfg prefill is [2, 2, H]; got %s" % (tuple(seq.shape),)
-                )
-            depth_a.reset()
-            depth_b.reset()
-            last = [
-                depth_a.prefill(seq[0:1].detach())[:, -1, :],
-                depth_b.prefill(seq[1:2].detach())[:, -1, :],
-            ]
-            temp = float(self.temperature_buf.detach().float().reshape(-1)[0])
-            topk = int(self.top_k_buf.detach().cpu().reshape(-1)[0])
-            topp = float(self.top_p_buf.detach().float().reshape(-1)[0])
-            dos = int(self.do_sample_buf.detach().cpu().reshape(-1)[0])
-            scale = float(self.guidance_scale.detach().float().reshape(-1)[0])
-            for cb in range(n_tokens):
-                cond = last[0].reshape(-1).float().cpu() @ cfg_head[cb]
-                uncond = last[1].reshape(-1).float().cpu() @ cfg_head[cb]
-                mixed = _cfg_mix(cond, uncond, scale)
-                tok = _depth_cfg_token(
-                    mixed, temp, topk, topp, dos, codebook_size, vocab,
-                )
-                self.output_tokens[:, cb] = int(tok)
-                if cb + 1 >= n_tokens:
-                    break
-                ids = torch.tensor(
-                    [[int(tok) + (cb + 1) * int(vocab)]], dtype=torch.long,
-                ).clamp(0, int(n_codebooks) * int(vocab) - 1)
-                emb = self.embed_tokens(ids)
-                proj = self.inputs_embeds_projector
-                emb = proj(emb.to(dtype=proj.weight.dtype)).detach()
-                last[0] = depth_a.step(emb)[:, -1, :]
-                last[1] = depth_b.step(emb)[:, -1, :]
-            log.info(
-                "breeze depth cfg codebooks=%d %.3fs",
-                n_tokens, time.perf_counter() - t0,
-            )
 
         def full_loop(self):
             t0 = time.perf_counter()
@@ -1149,9 +1104,11 @@ def _install_breeze_depth_ov(model, path, device):
                 backbone_h = self.backbone_hidden_state_projector(backbone_h)
             prefill_embeds[:, 0] = backbone_h
             seq = self.inputs_embeds_projector(prefill_embeds)
+            scale = 1.0
             if bsz == 2:
-                _depth_cfg_frame(self, seq, t0)
-                return
+                # Same fused frame as the fast path. The conditional row stands in for CFG.
+                seq = seq[0:1]
+                scale = float(self.guidance_scale.detach().float().reshape(-1)[0])
             if seq.shape[0] != 1 or int(seq.shape[1]) != 2:
                 raise RuntimeError(
                     "breeze ov depth prefill is [1, 2, H]; got %s" % (tuple(seq.shape),)
@@ -1168,6 +1125,13 @@ def _install_breeze_depth_ov(model, path, device):
             dos = np.ascontiguousarray(
                 self.do_sample_buf[:1].detach().cpu().numpy().astype(np.int64)
             )
+            if bsz == 2:
+                temp = np.ascontiguousarray(
+                    np.array([_sim_temperature(float(temp.reshape(-1)[0]), scale)], dtype=np.float32)
+                )
+                topp = np.ascontiguousarray(
+                    np.array([_sim_top_p(float(topp.reshape(-1)[0]), scale)], dtype=np.float32)
+                )
             uniform = np.ascontiguousarray(
                 torch.rand(n_tokens, vocab).numpy().astype(np.float32)
             )
@@ -1182,10 +1146,17 @@ def _install_breeze_depth_ov(model, path, device):
                 )
             for i, tok in enumerate(toks):
                 self.output_tokens[:, i] = int(tok)
-            log.info(
-                "breeze depth frame codebooks=%d %.3fs",
-                int(toks.shape[0]), time.perf_counter() - t0,
-            )
+            if bsz == 2:
+                log.info(
+                    "breeze depth sim codebooks=%d scale=%.3f temp=%.3f top_p=%.3f %.3fs",
+                    int(toks.shape[0]), scale, float(temp.reshape(-1)[0]),
+                    float(topp.reshape(-1)[0]), time.perf_counter() - t0,
+                )
+            else:
+                log.info(
+                    "breeze depth frame codebooks=%d %.3fs",
+                    int(toks.shape[0]), time.perf_counter() - t0,
+                )
 
         DepthDecoderGraph._full_loop = full_loop
         log.info(

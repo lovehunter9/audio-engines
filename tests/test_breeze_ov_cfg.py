@@ -6,7 +6,10 @@ _HAS_TORCH = importlib.util.find_spec("torch") is not None
 if _HAS_TORCH:
     import torch
 
-    from wrapper.caps.breeze import _cfg_mix, _depth_cfg_token, _ov_real_rows
+    from wrapper.caps.breeze import (
+        _cfg_mix, _depth_cfg_token, _ov_real_rows,
+        _sim_logits, _sim_temperature, _sim_top_p,
+    )
 
 
 class BreezeOvCfgTest(unittest.TestCase):
@@ -35,6 +38,25 @@ class BreezeOvCfgTest(unittest.TestCase):
         mask = torch.tensor([[1, 0, 1, 1], [1, 1, 1, 1]])
         with self.assertRaises(RuntimeError):
             _ov_real_rows(embeds, mask)
+
+    def test_sim_matches_the_fast_path_at_scale_one(self):
+        if not _HAS_TORCH:
+            self.skipTest("torch is not installed")
+        cond = torch.tensor([[1.0, 3.0, 2.0]])
+        self.assertTrue(torch.equal(_sim_logits(cond, 1.0), cond))
+        self.assertEqual(_sim_temperature(0.8, 1.0), 0.8)
+        self.assertAlmostEqual(_sim_top_p(0.9, 1.0), 0.9)
+
+    def test_sim_sharpens_above_one_and_flattens_below(self):
+        if not _HAS_TORCH:
+            self.skipTest("torch is not installed")
+        cond = torch.tensor([[0.0, 2.0, 1.0]])
+        got = _sim_logits(cond, 2.0)
+        self.assertTrue(torch.allclose(got, torch.tensor([[-4.0, 6.0, 1.0]])))
+        self.assertLess(_sim_temperature(1.0, 2.0), 1.0)
+        self.assertLess(_sim_top_p(0.8, 2.0), 0.8)
+        self.assertGreater(_sim_temperature(1.0, 0.7), 1.0)
+        self.assertGreater(_sim_top_p(0.5, 0.7), 0.5)
 
     def test_depth_cfg_greedy_and_masked_tail(self):
         if not _HAS_TORCH:
