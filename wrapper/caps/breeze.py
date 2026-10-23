@@ -472,7 +472,8 @@ class BreezeBackend:
         # No speed in the written direction: the tempo filter already sets the rate.
         kn = tts_el.resolve_settings(kw.get("settings"), base_cfg,
                                      direction or "Speak clearly and naturally.", text=text,
-                                     include_speed_direction=False)
+                                     include_speed_direction=False,
+                                     include_style_direction=False)
         wav = tts_long.collect(prompt_audio)
         rate = int(prompt_sr or self.sample_rate)
         reserve = _CTX_TOKENS if kn.context else 0
@@ -573,6 +574,7 @@ class BreezeBackend:
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
                                      instruction, text=text,
                                      include_speed_direction=False,
+                                     include_style_direction=False,
                                      seed_jitter=int(kw.get("seed_jitter") or 0))
         _KNOB_FAST["on"] = _knobs_request_fast(kw.get("settings"))
         _KNOB_HOLD["prev"] = None

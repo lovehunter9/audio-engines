@@ -5276,6 +5276,10 @@ def t_speed_is_applied_once():
         waived = src.count("include_speed_direction=False")
         check("%s never asks the model to hurry as well" % name, calls == waived,
               "%d resolve_settings, %d waived" % (calls, waived))
+        if name == "breeze":
+            check("breeze does not write the style sentence into the prompt",
+                  src.count("include_style_direction=False") == calls,
+                  src.count("include_style_direction=False"))
 
 
 def t_design_alternates_are_opt_in():
