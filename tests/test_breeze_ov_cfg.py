@@ -87,6 +87,18 @@ class BreezeOvCfgTest(unittest.TestCase):
         self.assertTrue(_knobs_request_fast({"style": 1.0}))
         self.assertTrue(_knobs_request_fast({"use_speaker_boost": False}))
 
+    def test_short_frame_only_when_the_knob_sharpens(self):
+        try:
+            from wrapper.caps.breeze import _knob_uses_short_frame
+        except Exception as exc:
+            self.skipTest("breeze deps missing: %s" % exc)
+        self.assertFalse(_knob_uses_short_frame(False, 4.0))
+        self.assertFalse(_knob_uses_short_frame(True, 1.0))
+        self.assertFalse(_knob_uses_short_frame(True, 0.85))
+        self.assertFalse(_knob_uses_short_frame(True, 0.4))
+        self.assertTrue(_knob_uses_short_frame(True, 1.15))
+        self.assertTrue(_knob_uses_short_frame(True, 1.825))
+
     def test_knob_tail_uses_each_later_books_quiet_code(self):
         try:
             import numpy as np

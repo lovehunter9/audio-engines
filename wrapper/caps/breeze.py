@@ -47,6 +47,11 @@ def _knobs_request_fast(settings):
     )
 
 
+def _knob_uses_short_frame(knob_on, scale):
+    """Four residual steps only when a knob sharpens the draw. A flatter draw keeps all 15 codebooks."""
+    return bool(knob_on) and float(scale) > 1.0
+
+
 def _knob_tail_codes(drawn, need, quiet):
     """Keep the drawn residual codes. Later books take that book's quiet code, not the last draw.
 
@@ -1255,7 +1260,7 @@ def _install_breeze_depth_ov(model, path, device):
                     np.array([_sim_top_p(float(topp.reshape(-1)[0]), scale)], dtype=np.float32)
                 )
             embeds = np.ascontiguousarray(seq.detach().float().cpu().numpy())
-            use_knob = bool(_KNOB_FAST["on"])
+            use_knob = _knob_uses_short_frame(_KNOB_FAST["on"], scale)
             if use_knob:
                 uniform = np.ascontiguousarray(
                     torch.rand(knob_steps, vocab).numpy().astype(np.float32)

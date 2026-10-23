@@ -2976,6 +2976,8 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertIn("breeze_depth_knob", depth)
         self.assertIn("_KNOB_FAST", depth)
         self.assertIn("_knob_tail_codes", depth)
+        self.assertIn("_knob_uses_short_frame", depth)
+        self.assertIn("> 1.0", inspect.getsource(breeze._knob_uses_short_frame))
         self.assertIn('_KNOB_QUIET["idx"]', depth)
         self.assertNotIn("drawn[-1]", depth)
         codec = inspect.getsource(breeze._install_breeze_codec_ov)
