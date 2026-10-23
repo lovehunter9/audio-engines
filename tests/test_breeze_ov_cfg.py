@@ -117,6 +117,29 @@ class BreezeOvCfgTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _knob_tail_codes(drawn, 15, quiet[:5])
 
+    def test_collapsed_short_frame_repeats_the_previous_draw(self):
+        try:
+            import numpy as np
+
+            from wrapper.caps.breeze import _knob_keep_speech
+        except Exception as exc:
+            self.skipTest("breeze deps missing: %s" % exc)
+        quiet = [0, 0, 0, 0, 0]
+        # Book 0 is the backbone. Depth slots read books 1..4. Floor energy is 1+1+1+1.
+        norms = [[1.0, 9.0]] + [[1.0, 8.0, 30.0] for _ in range(4)]
+        prev = np.array([2, 2, 2, 2])
+        collapsed = np.array([0, 0, 0, 0])
+        held, did = _knob_keep_speech(collapsed, quiet, norms, prev)
+        self.assertTrue(did)
+        self.assertTrue(np.array_equal(held, prev))
+        speech = np.array([2, 2, 2, 2])
+        kept, did = _knob_keep_speech(speech, quiet, norms, prev)
+        self.assertFalse(did)
+        self.assertTrue(np.array_equal(kept, speech))
+        first, did = _knob_keep_speech(collapsed, quiet, norms, None)
+        self.assertFalse(did)
+        self.assertTrue(np.array_equal(first, collapsed))
+
     def test_depth_cfg_sample_keeps_the_only_finite_logit(self):
         if not _HAS_TORCH:
             self.skipTest("torch is not installed")
