@@ -23,6 +23,25 @@ _CTX_TOKENS = int(_CTX_SECONDS * _FPS) + 40
 # How far a CFG step moves the one-pass draw. 1 keeps the official scale; 4 makes
 # the four EL knobs audible without a second backbone or depth pass.
 _SIM_SPAN = 4.0
+# Off unless this request moved stability, similarity, style, or speaker boost.
+# Speed does not set it: the tempo filter is the only speed path.
+_KNOB_FAST = {"on": False}
+# Residual codebooks drawn when a knob is off default. The other graph still draws all of them.
+_KNOB_DEPTH_STEPS = 4
+
+
+def _knobs_request_fast(settings):
+    """True when one of the four EL knobs leaves its default. Speed stays on the full frame."""
+    base = tts_el._DEFAULT_SETTINGS
+    got = dict(base)
+    if isinstance(settings, dict):
+        got.update(tts_el._normalize_settings(settings, partial=True))
+    return (
+        float(got["stability"]) != float(base["stability"])
+        or float(got["similarity_boost"]) != float(base["similarity_boost"])
+        or float(got["style"]) != float(base["style"])
+        or bool(got["use_speaker_boost"]) != bool(base["use_speaker_boost"])
+    )
 
 
 def _cfg_mix(cond, uncond, scale):
@@ -359,6 +378,7 @@ class BreezeBackend:
         # One tempo filter for the whole reading; a filter per chunk would seam every 80 ms.
         tempo = tts_long.TempoStream(self.sample_rate, kn.speed) if kw.get("pace_each") else None
         try:
+            _KNOB_FAST["on"] = _knobs_request_fast(kw.get("settings"))
             sf.write(path, wav, rate, format="WAV", subtype="PCM_16")
             ctx = kw.get("ctx")
             total = len(parts)
@@ -403,6 +423,7 @@ class BreezeBackend:
                 for paced in tempo.finish():
                     yield paced, self.sample_rate
         finally:
+            _KNOB_FAST["on"] = False
             if tempo is not None:
                 tempo.abort()
             tts_long.vram(log, "clone")
@@ -434,12 +455,16 @@ class BreezeBackend:
                                      instruction, text=text,
                                      include_speed_direction=False,
                                      seed_jitter=int(kw.get("seed_jitter") or 0))
-        tts_el.job_tick(ctx, 0, 1, stage="design")
-        audio, sr = self._generate(text, kn.instruction or instruction,
-                                   cfg=kn.cfg, ctx=ctx, seed=kn.seed)
-        audio, sr = tts_long.pace(audio, sr, kn.speed)
-        tts_el.job_tick(ctx, 1, 1, stage="design")
-        return audio, sr, {}
+        _KNOB_FAST["on"] = _knobs_request_fast(kw.get("settings"))
+        try:
+            tts_el.job_tick(ctx, 0, 1, stage="design")
+            audio, sr = self._generate(text, kn.instruction or instruction,
+                                       cfg=kn.cfg, ctx=ctx, seed=kn.seed)
+            audio, sr = tts_long.pace(audio, sr, kn.speed)
+            tts_el.job_tick(ctx, 1, 1, stage="design")
+            return audio, sr, {}
+        finally:
+            _KNOB_FAST["on"] = False
 
 
 def _is_ov():
@@ -1016,7 +1041,11 @@ def _install_breeze_text_ov(model, path, device):
 
 
 def _install_breeze_depth_ov(model, path, device):
-    """One f32 infer per depth frame. A CFG batch stays on this frame and only retunes temperature and top-p."""
+    """One f32 infer per depth frame. A CFG batch stays on this frame and only retunes temperature and top-p.
+
+    Default settings and speed keep that full frame. A request that moves one of the four knobs
+    uses a second, shorter frame that is compiled onto the device on first use.
+    """
     import time
 
     import numpy as np
@@ -1079,6 +1108,27 @@ def _install_breeze_depth_ov(model, path, device):
         frame_mod, frame_example, frame_xml, frame_stamp, device,
         dynamize_ranks=(), compile_graph=False, precision="f32",
     )
+    knob_steps = int(_KNOB_DEPTH_STEPS)
+    if knob_steps >= n_tokens:
+        raise RuntimeError("knob depth steps must be shorter than the full frame")
+    _, knob_xml, knob_stamp = tts_ov.ir_paths(
+        str(path), "breeze_depth_knob", ".ov-breeze-depth-knob-k%d" % knob_steps,
+    )
+    knob_mod = tts_ov.fused_depth_frame(
+        inner, head, n_codebooks, vocab, codebook_size, step_limit=knob_steps,
+    )
+    knob_example = (
+        torch.zeros(1, 2, hidden, dtype=torch.float32),
+        torch.ones(1, dtype=torch.float32),
+        torch.ones(1, dtype=torch.long),
+        torch.ones(1, dtype=torch.float32),
+        torch.ones(1, dtype=torch.long),
+        torch.full((knob_steps, vocab), 0.5, dtype=torch.float32),
+    )
+    tts_ov.compile_causal(
+        knob_mod, knob_example, knob_xml, knob_stamp, device,
+        dynamize_ranks=(), compile_graph=False, precision="f32",
+    )
     tts_ov.release_parameters(inner.layers, "breeze depth layers")
     tts_ov.release_parameters(inner.norm, "breeze depth norm")
     tts_ov.release_parameters(head, "breeze depth head")
@@ -1088,6 +1138,16 @@ def _install_breeze_depth_ov(model, path, device):
             frame_mod, frame_example, frame_xml, frame_stamp, device,
             dynamize_ranks=(), precision="f32",
         )
+        knob_box = {"fn": None}
+
+        def _knob_frame():
+            # First knob request pays the device compile. Default requests never load this graph.
+            if knob_box["fn"] is None:
+                knob_box["fn"] = tts_ov.compile_causal(
+                    knob_mod, knob_example, knob_xml, knob_stamp, device,
+                    dynamize_ranks=(), precision="f32",
+                )
+            return knob_box["fn"]
 
         def full_loop(self):
             t0 = time.perf_counter()
@@ -1132,21 +1192,47 @@ def _install_breeze_depth_ov(model, path, device):
                 topp = np.ascontiguousarray(
                     np.array([_sim_top_p(float(topp.reshape(-1)[0]), scale)], dtype=np.float32)
                 )
-            uniform = np.ascontiguousarray(
-                torch.rand(n_tokens, vocab).numpy().astype(np.float32)
-            )
             embeds = np.ascontiguousarray(seq.detach().float().cpu().numpy())
-            toks = np.array(
-                frame(embeds, temp, topk, topp, dos, uniform)[0]
-            ).reshape(-1)
-            if int(toks.shape[0]) != int(self.num_decode_codebooks):
-                raise RuntimeError(
-                    "breeze depth frame returned %d tokens, expected %d"
-                    % (int(toks.shape[0]), int(self.num_decode_codebooks))
+            use_knob = bool(_KNOB_FAST["on"])
+            if use_knob:
+                uniform = np.ascontiguousarray(
+                    torch.rand(knob_steps, vocab).numpy().astype(np.float32)
                 )
+                drawn = np.array(
+                    _knob_frame()(embeds, temp, topk, topp, dos, uniform)[0]
+                ).reshape(-1)
+                need = int(self.num_decode_codebooks)
+                if int(drawn.shape[0]) > need or int(drawn.shape[0]) < 1:
+                    raise RuntimeError(
+                        "breeze depth knob returned %d tokens, expected at most %d"
+                        % (int(drawn.shape[0]), need)
+                    )
+                if int(drawn.shape[0]) < need:
+                    fill = np.full(need - int(drawn.shape[0]), int(drawn[-1]), dtype=drawn.dtype)
+                    toks = np.concatenate([drawn, fill])
+                else:
+                    toks = drawn
+            else:
+                uniform = np.ascontiguousarray(
+                    torch.rand(n_tokens, vocab).numpy().astype(np.float32)
+                )
+                toks = np.array(
+                    frame(embeds, temp, topk, topp, dos, uniform)[0]
+                ).reshape(-1)
+                if int(toks.shape[0]) != int(self.num_decode_codebooks):
+                    raise RuntimeError(
+                        "breeze depth frame returned %d tokens, expected %d"
+                        % (int(toks.shape[0]), int(self.num_decode_codebooks))
+                    )
             for i, tok in enumerate(toks):
                 self.output_tokens[:, i] = int(tok)
-            if bsz == 2:
+            if use_knob:
+                log.info(
+                    "breeze depth knob codebooks=%d kept=%d scale=%.3f temp=%.3f top_p=%.3f %.3fs",
+                    int(toks.shape[0]), knob_steps, scale, float(temp.reshape(-1)[0]),
+                    float(topp.reshape(-1)[0]), time.perf_counter() - t0,
+                )
+            elif bsz == 2:
                 log.info(
                     "breeze depth sim codebooks=%d scale=%.3f temp=%.3f top_p=%.3f %.3fs",
                     int(toks.shape[0]), scale, float(temp.reshape(-1)[0]),

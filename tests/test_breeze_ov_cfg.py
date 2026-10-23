@@ -67,6 +67,26 @@ class BreezeOvCfgTest(unittest.TestCase):
         masked = _depth_cfg_token(torch.tensor([0.0, 9.0]), 1.0, 0, 1.0, 0, 1, 2)
         self.assertEqual(masked, 0)
 
+    def test_four_knobs_gate_the_short_frame_and_speed_does_not(self):
+        try:
+            from wrapper.caps.breeze import _knobs_request_fast
+        except Exception as exc:
+            self.skipTest("breeze deps missing: %s" % exc)
+        self.assertFalse(_knobs_request_fast(None))
+        self.assertFalse(_knobs_request_fast({}))
+        self.assertFalse(_knobs_request_fast({"speed": 1.25}))
+        self.assertFalse(_knobs_request_fast({
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.0,
+            "use_speaker_boost": True,
+            "speed": 0.5,
+        }))
+        self.assertTrue(_knobs_request_fast({"stability": 0.0}))
+        self.assertTrue(_knobs_request_fast({"similarity_boost": 1.0}))
+        self.assertTrue(_knobs_request_fast({"style": 1.0}))
+        self.assertTrue(_knobs_request_fast({"use_speaker_boost": False}))
+
     def test_depth_cfg_sample_keeps_the_only_finite_logit(self):
         if not _HAS_TORCH:
             self.skipTest("torch is not installed")

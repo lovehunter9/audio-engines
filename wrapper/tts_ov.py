@@ -744,8 +744,12 @@ class FixedSlotRunner:
         return self._infer(embeds)
 
 
-def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_proj=None):
-    """One infer per audio frame. Gumbel-max draws each codebook; a boolean CDF reduce compiled to a constant and came out as noise."""
+def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_proj=None,
+                      step_limit=None):
+    """One infer per audio frame. Gumbel-max draws each codebook; a boolean CDF reduce compiled to a constant and came out as noise.
+
+    step_limit shortens that loop for a second graph. None keeps every codebook, which is the default frame.
+    """
     import torch
     import torch.nn as nn
 
@@ -759,6 +763,11 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
     max_k = min(1024, int(vocab))
     if n_tokens < 1:
         raise RuntimeError("fused depth frame needs codebooks, got %d" % n_codebooks)
+    limit = n_tokens if step_limit is None else int(step_limit)
+    if limit < 1 or limit > n_tokens:
+        raise RuntimeError(
+            "fused depth frame steps %d outside 1..%d" % (limit, n_tokens)
+        )
 
     class _Frame(nn.Module):
         def __init__(self):
@@ -850,7 +859,7 @@ def fused_depth_frame(inner, head, n_codebooks, vocab, codebook_size, backbone_p
                 uniform[0], temperature, top_k, top_p, do_sample,
             )
             tokens.append(tok)
-            for cb_idx in range(1, n_tokens):
+            for cb_idx in range(1, limit):
                 ids = (tok + cb_idx * int(vocab)).view(1, 1).clamp(
                     0, int(n_codebooks) * int(vocab) - 1,
                 )
