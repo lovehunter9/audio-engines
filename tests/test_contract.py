@@ -2150,6 +2150,11 @@ class EngineSurfaceTest(unittest.TestCase):
         self.assertEqual(response.json(), {"max_concurrency": 1})
         self.assertNotIn("queue", response.json())
 
+    def test_engine_capacity_takes_the_configured_width(self):
+        for raw, expected in (("4", 4), ("0", 1), ("-2", 1), ("many", 1), ("", 1)):
+            with self.subTest(raw=raw), mock.patch.dict(os.environ, {"ENGINE_MAX_CONCURRENCY": raw}):
+                self.assertEqual(self.client.get("/api/engine-capacity").json(), {"max_concurrency": expected})
+
     def test_metrics_expose_exactly_the_four_generic_gpu_gauges(self):
         response = self.client.get("/metrics")
         expected = {

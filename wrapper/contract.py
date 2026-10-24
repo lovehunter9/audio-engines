@@ -45,6 +45,22 @@ def parse_supports():
     return caps, bad
 
 
+def max_concurrency():
+    """How many requests Router may hold open on this engine at once.
+
+    Inference still runs one call at a time on the shared worker. A wider gate only lets
+    requests wait here instead of being refused upstream, which suits streams whose steps
+    interleave (several sockets taking turns on the lock). ENGINE_MAX_CONCURRENCY widens it;
+    anything unset or unreadable keeps 1.
+    """
+    raw = (os.environ.get("ENGINE_MAX_CONCURRENCY") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 1
+    return value if value > 0 else 1
+
+
 def base_name():
     """The base image identity, as baked in at build time."""
     return (os.environ.get("AUDIO_BASE") or "").strip()
@@ -396,9 +412,7 @@ def register(app, *, model_name, module, served, is_ready, error=None, task_api=
 
     @app.get("/api/engine-capacity")
     def engine_capacity():
-        # Every audio process owns one model and funnels synchronous and
-        # asynchronous inference through the same single worker.
-        return {"max_concurrency": 1}
+        return {"max_concurrency": max_concurrency()}
 
     @app.get("/health")
     def health():
