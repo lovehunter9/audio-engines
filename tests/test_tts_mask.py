@@ -4,6 +4,7 @@ import os
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -52,12 +53,21 @@ class PatchFunctionTest(unittest.TestCase):
             spec = importlib.util.spec_from_file_location("fake_streaming", path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            before = mod.build(3072, 2150)
+            before, shipped = mod.build(3072, 2150), mod.build.__code__
             self.assertEqual(tts_mask._patch_function(mod, "build"), 1)
             self.assertEqual(tts_mask._patch_function(mod, "missing"), 0)
+            self.assertIsNot(mod.build.__code__, shipped)
+            # The loop's per-index store is gone from the bytecode the module now runs.
+            self.assertNotIn("i", mod.build.__code__.co_varnames)
             np.testing.assert_array_equal(mod.build(3072, 2150), before)
-            # Patched once is patched for good: a second pass finds nothing left to replace.
-            self.assertEqual(tts_mask._patch_function(mod, "build"), 0)
+
+    def test_apply_runs_once(self):
+        with mock.patch.object(tts_mask, "_applied", []), \
+                mock.patch.object(tts_mask, "_patch_function", return_value=1) as patch:
+            with mock.patch.dict("sys.modules", {"faster_qwen3_tts": mock.MagicMock()}):
+                self.assertEqual(tts_mask.apply(), 3)
+                self.assertEqual(tts_mask.apply(), 3)
+            self.assertEqual(patch.call_count, 3)
 
 
 if __name__ == "__main__":

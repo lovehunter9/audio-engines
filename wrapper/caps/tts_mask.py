@@ -51,8 +51,17 @@ def _patch_function(module, name):
     return n
 
 
+_applied = []
+
+
 def apply():
-    """Patch the generate loops of an imported faster_qwen3_tts; returns how many were replaced."""
+    """Patch the generate loops of an imported faster_qwen3_tts; returns how many were replaced.
+
+    Once per process: getsource reads the file on disk, not the redefinition, so a second pass
+    would find the shipped loop again and redefine everything for nothing.
+    """
+    if _applied:
+        return _applied[0]
     try:
         from faster_qwen3_tts import generate, streaming
     except ImportError:
@@ -60,6 +69,7 @@ def apply():
     targets = ((streaming, "fast_generate_streaming"), (streaming, "parity_generate_streaming"),
                (generate, "fast_generate"))
     done = sum(_patch_function(mod, name) for mod, name in targets)
+    _applied.append(done)
     if done:
         log.info("suppress mask built with slice writes in %d faster-qwen3-tts loops", done)
     else:
