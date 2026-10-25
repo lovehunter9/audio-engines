@@ -90,6 +90,9 @@ def _model_path():
 
 def _load():
     from faster_qwen3_tts import FasterQwen3TTS
+    from . import tts_mask
+
+    tts_mask.apply()
     path = _model_path()
     log.info("loading %s from %s (max_seq_len=%d, attn=%s)", MODEL_NAME, path, MAX_SEQ_LEN, ATTN)
     m = FasterQwen3TTS.from_pretrained(path, device="cuda", attn_implementation=ATTN,
