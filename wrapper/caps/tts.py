@@ -44,6 +44,14 @@ CHUNK_SIZE = int(_args.number("--chunk-size", 8))
 DEFAULT_LANGUAGE = str(_args.text("--language", "Auto") or "Auto")
 DEFAULT_VOICE = str(_args.text("--voice", "") or "")
 ATTN = str(_args.text("--attn-implementation", "sdpa") or "sdpa")
+# A sentence that never emits EOS runs to max_new_tokens -- the library's 2048 frames, ~170 s --
+# holding the GPU and _gen_lock throughout. Unless the caller sets max_new_tokens, a request gets
+# 3 s plus this much per character (CJK 1, any other non-space 0.4): about twice the slowest
+# speech measured on the 1.7B (0.23 s per Chinese character). 0 turns the bound off.
+SECONDS_PER_CHAR = _args.number("--seconds-per-char", 0.4)
+# Off where the loader is not faster-qwen3-tts (tts_ov), whose generate has not been measured with it.
+FRAME_BUDGET = True
+FRAME_HZ = 12  # the 12Hz checkpoints: one codec frame per 1/12 s
 
 # The codec decodes at 24 kHz family-wide; a constant because /v1/models predates the weights.
 OUT_SR = 24000
@@ -82,7 +90,6 @@ def _model_path():
 
 def _load():
     from faster_qwen3_tts import FasterQwen3TTS
-
     path = _model_path()
     log.info("loading %s from %s (max_seq_len=%d, attn=%s)", MODEL_NAME, path, MAX_SEQ_LEN, ATTN)
     m = FasterQwen3TTS.from_pretrained(path, device="cuda", attn_implementation=ATTN,
@@ -244,6 +251,20 @@ def _wav_stream_header(sr, channels=1, bits=16):
             + b"data" + struct.pack("<I", 0xFFFFFFFF - 36))
 
 
+def _is_cjk(ch):
+    o = ord(ch)
+    return (0x3040 <= o <= 0x30FF or 0x3400 <= o <= 0x9FFF or 0xAC00 <= o <= 0xD7AF
+            or 0xF900 <= o <= 0xFAFF)
+
+
+def _frame_budget(text):
+    """The most frames a text can plausibly need, or None when the bound is off."""
+    if not FRAME_BUDGET or SECONDS_PER_CHAR <= 0:
+        return None
+    weight = sum(1.0 if _is_cjk(ch) else 0.4 for ch in str(text) if not ch.isspace())
+    return min(int(FRAME_HZ * (3.0 + SECONDS_PER_CHAR * weight)) + 1, MAX_SEQ_LEN)
+
+
 def _gen_kwargs(payload):
     """The sampling knobs OpenAI's body does not carry, read off the request when present."""
     out = {}
@@ -254,7 +275,19 @@ def _gen_kwargs(payload):
                 out[key] = cast(payload[key])
             except (TypeError, ValueError):
                 raise HTTPException(status_code=400, detail="%s must be a number" % key)
+    if "max_new_tokens" not in out:
+        budget = _frame_budget(payload.get("input") or "")
+        if budget:
+            out["max_new_tokens"] = budget
     return out
+
+
+def _note_budget(kw, audio_samples, sr):
+    """Say so when a generation used its whole budget: the likeliest reason is a missing EOS."""
+    budget = kw.get("max_new_tokens")
+    if budget and sr and audio_samples >= (budget - 1) * sr / FRAME_HZ:
+        log.warning("synthesis reached its %d-frame budget (%.1fs of audio); the model "
+                    "probably never emitted EOS, so the tail was cut", budget, audio_samples / sr)
 
 
 def _clone_args(payload):
@@ -276,14 +309,18 @@ def _synthesize_blocking(payload, ref_path):
     with _gen_lock:
         if ref_path:
             ref_text, xvec = _clone_args(payload)
-            return m.generate_voice_clone(text=text, language=language, ref_audio=ref_path,
-                                          ref_text=ref_text, xvec_only=xvec, instruct=instruct,
-                                          **kw)
-        if _state["voice_design"]:
-            return m.generate_voice_design(text=text, language=language, instruct=instruct, **kw)
-        return m.generate_custom_voice(text=text, speaker=str(payload.get("voice")
-                                                              or _default_voice()),
-                                       language=language, instruct=instruct, **kw)
+            audio, sr = m.generate_voice_clone(text=text, language=language, ref_audio=ref_path,
+                                               ref_text=ref_text, xvec_only=xvec,
+                                               instruct=instruct, **kw)
+        elif _state["voice_design"]:
+            audio, sr = m.generate_voice_design(text=text, language=language, instruct=instruct,
+                                                **kw)
+        else:
+            audio, sr = m.generate_custom_voice(text=text, speaker=str(payload.get("voice")
+                                                                       or _default_voice()),
+                                                language=language, instruct=instruct, **kw)
+    _note_budget(kw, _to_mono(audio).shape[0], sr)
+    return audio, sr
 
 
 def _stream_blocking(payload, ref_path, chunk_size):
@@ -308,33 +345,61 @@ def _stream_blocking(payload, ref_path, chunk_size):
                                                                or _default_voice()),
                                                    language=language, instruct=instruct,
                                                    chunk_size=chunk_size, **kw)
+        samples, rate = 0, 0
         for chunk, sr, _timing in it:
+            samples, rate = samples + _to_mono(chunk).shape[0], sr
             yield chunk, sr
+    _note_budget(kw, samples, rate)
 
 
-async def _aiter(make_gen):
-    """Drive a blocking generator on a worker thread and yield its items on the event loop."""
+async def _aiter(make_gen, depth=8):
+    """Drive a blocking generator on a worker thread and yield its items on the event loop.
+
+    The consumer leaving early (a client that hangs up mid-sentence, a barge-in) stops the
+    producer at its next item and closes the generator on its own thread, which releases
+    _gen_lock. The producer used to wait on a full queue instead: once a sentence ran past
+    `depth` chunks with nobody reading, that thread parked forever holding the lock, and every
+    later synthesis hung while /v1/models still answered 200.
+    """
     loop = asyncio.get_running_loop()
-    queue = asyncio.Queue(maxsize=8)
-    done = object()
+    queue = asyncio.Queue()
+    room = threading.Semaphore(depth)  # backpressure without a put that can block forever
+    stop = threading.Event()
+
+    def post(kind, value):
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, (kind, value))
+        except RuntimeError:  # the loop is gone; nobody is left to tell
+            pass
 
     def pump():
+        gen = make_gen()
         try:
-            for item in make_gen():
-                asyncio.run_coroutine_threadsafe(queue.put(("item", item)), loop).result()
+            for item in gen:
+                while not room.acquire(timeout=0.5):
+                    if stop.is_set():
+                        return
+                if stop.is_set():
+                    return
+                post("item", item)
         except Exception as e:  # surfaced to the consumer, which decides how to report it
-            asyncio.run_coroutine_threadsafe(queue.put(("error", e)), loop).result()
+            post("error", e)
         finally:
-            asyncio.run_coroutine_threadsafe(queue.put(("done", done)), loop).result()
+            gen.close()
+            post("done", None)
 
     threading.Thread(target=pump, daemon=True).start()
-    while True:
-        kind, value = await queue.get()
-        if kind == "done":
-            return
-        if kind == "error":
-            raise value
-        yield value
+    try:
+        while True:
+            kind, value = await queue.get()
+            if kind == "done":
+                return
+            if kind == "error":
+                raise value
+            room.release()
+            yield value
+    finally:
+        stop.set()
 
 
 def build_app(supports):

@@ -215,4 +215,5 @@ def build_app(supports):
 
 def run(supports):
     tts._load = _load
+    tts.FRAME_BUDGET = False
     tts.run(supports)
