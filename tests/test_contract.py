@@ -1189,6 +1189,10 @@ class OpenVINOModeTest(unittest.TestCase):
         self.assertEqual(catalog.implements("enhanceov"), ["enhance"])
         self.assertEqual(catalog.module_of("enhanceov", "enhance"), "enhance")
         self.assertNotEqual(catalog.module_of("ov", "stt"), "whisper_ov")
+        self.assertEqual(catalog.implements("breezeov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("breezeov", "tts"), "breeze")
+        self.assertEqual(catalog.implements("fireredov"), ["tts", "tts_clone", "tts_design"])
+        self.assertEqual(catalog.module_of("fireredov", "tts"), "firered")
 
     def test_ov_engine_spec_is_v2_like_main(self):
         with mock.patch.dict(os.environ, {"AUDIO_BASE": "ov",
@@ -2658,7 +2662,7 @@ class NemotronRecipeTest(unittest.TestCase):
 
 
 class BaseRegistrationTests(unittest.TestCase):
-    """A base directory, the routing table and the README table name the same 12 bases.
+    """A base directory, the routing table and the README table name the same bases.
 
     Adding a base means adding a key to catalog.BASES: app.py routes on AUDIO_BASE, which
     append-image.sh sets from the directory name, and a base missing from that table exits at
@@ -2818,6 +2822,369 @@ class RawBodyIsReachedOnlyThroughItsWrapperTest(unittest.TestCase):
                 "the raw-body scan reads %r as %d offence(s), not %d -- so every call site "
                 "written that way is invisible to the assertion above"
                 % (source, len(self._offences(source, "<control>")), expected))
+
+
+class FireRedOvDeviceLieTest(unittest.TestCase):
+    def test_force_cpu_torch_device_stays_a_type(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+
+        from wrapper import tts_ov
+
+        restore = tts_ov.force_cpu_torch_device()
+        try:
+            self.assertTrue(isinstance(torch.device, type))
+            self.assertFalse(isinstance(None, torch.device))
+            self.assertEqual(str(torch.device("cuda")), "cpu")
+            self.assertTrue(isinstance(torch.device("cpu"), torch.device))
+        finally:
+            restore()
+        self.assertEqual(str(torch.device("cuda")), "cuda")
+
+
+class TtsOvCausalHelpersTest(unittest.TestCase):
+    def test_mask_np_ones_and_additive(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        ones = tts_ov.mask_np(None, 3, 0)
+        self.assertEqual(ones.shape, (1, 3))
+        add = torch.zeros(1, 1, 1, 5)
+        add[..., :2] = torch.finfo(torch.float32).min
+        keep = tts_ov.mask_np(add, 1, 4)
+        self.assertEqual(keep.shape, (1, 5))
+        self.assertEqual(int(keep[0, 0]), 0)
+        self.assertEqual(int(keep[0, 2]), 1)
+
+    def test_release_parameters_drops_storage(self):
+        try:
+            from torch import nn
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        class _M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.layers = nn.Linear(8, 8)
+
+        mod = _M()
+        before = mod.layers.weight.numel()
+        self.assertGreater(before, 0)
+        n = tts_ov.release_parameters(mod.layers, "test")
+        self.assertGreater(n, 0)
+        self.assertEqual(int(mod.layers.weight.numel()), 0)
+        self.assertEqual(tts_ov.release_parameters(None, "empty"), 0)
+
+    def test_breeze_install_does_not_swallow_export_failure(self):
+        import inspect
+        from wrapper import tts_ov
+        from wrapper.caps import breeze
+
+        load = inspect.getsource(breeze._load)
+        ov_branch = load.split("if _is_ov():", 1)[1].split("else:", 1)[0]
+        cuda_branch = load.split("else:", 1)[1].split("update_generation_config_for_breeze", 1)[0]
+        self.assertIn("_wait_breeze_snapshot(path)", ov_branch)
+        self.assertIn("_register_breeze_tokenizer()", ov_branch)
+        self.assertLess(ov_branch.index("_wait_breeze_snapshot("), ov_branch.index("load_runtime("))
+        self.assertLess(ov_branch.index("_register_breeze_tokenizer()"), ov_branch.index("load_runtime("))
+        self.assertNotIn("_wait_breeze_snapshot", cuda_branch)
+        self.assertNotIn("_register_breeze_tokenizer", cuda_branch)
+        self.assertNotIn("_install_breeze_ov", cuda_branch)
+        self.assertNotIn('device="cpu"', cuda_branch)
+        self.assertIn("resolve_device()", cuda_branch)
+        wait = inspect.getsource(breeze._wait_breeze_snapshot)
+        self.assertIn("breeze snapshot incomplete", wait)
+        missing = inspect.getsource(breeze._breeze_snapshot_missing)
+        self.assertIn("tokenizer.json", missing)
+        self.assertIn("weight_map", missing)
+        self.assertIn("audio_tokenizer/model.safetensors", missing)
+        self.assertIn("refusing to load the tokenizer", inspect.getsource(breeze._wait_breeze_snapshot))
+        load = inspect.getsource(breeze._load)
+        self.assertIn("_register_breeze_tokenizer()", load)
+        reg = inspect.getsource(breeze._register_breeze_tokenizer)
+        self.assertIn("AutoTokenizer.register", reg)
+        self.assertIn("GemmaTokenizerFast", reg)
+        self.assertIn("exist_ok=True", reg)
+        src = inspect.getsource(breeze._install_breeze_ov)
+        self.assertNotIn("leaving official eager on CPU", src)
+        self.assertIn("release_parameters", src)
+        self.assertIn('getattr(backbone, "layers", None)', src)
+        self.assertIn("breeze_backbone_slot", src)
+        self.assertIn("causal_fixed_slot_module", src)
+        self.assertIn("FixedSlotRunner", src)
+        self.assertIn("compile_causal", src)
+        self.assertNotIn("StatefulKvRunner", src)
+        self.assertNotIn("DeviceKvRunner", src)
+        self.assertNotIn("breeze_backbone_prefill", src)
+        self.assertNotIn("breeze_backbone_decode", src)
+        self.assertNotIn("external_position=True", src)
+        self.assertIn("backbone.float()", src)
+        self.assertNotIn('np.concatenate([prefix["emb"], piece]', src)
+        self.assertNotIn("prefix[\"emb\"]", src)
+        self.assertIn("_cache_backbone_suppress_mask()", src)
+        self.assertIn("_cache_prompt_encode()", src)
+        self.assertNotIn("_cache_prompt_encode", cuda_branch)
+        enc = inspect.getsource(breeze._cache_prompt_encode)
+        self.assertIn("encode_prompt_audio", enc)
+        self.assertIn("sha1", enc)
+        mask_src = inspect.getsource(breeze._cache_backbone_suppress_mask)
+        self.assertIn("suppress_mask", mask_src)
+        self.assertIn("fast_streaming.sample_logits", mask_src)
+        self.assertIn(".ov-breeze-slot-v4", src)
+        self.assertNotIn(".ov-breeze-slot-v3", src)
+        self.assertIn("lm_head", src)
+        self.assertIn('precision="f16"', src)
+        self.assertIn("_OV_AFTER_EXPORT", src)
+        self.assertIn("max_t = int(tts_el.MAX_SEQ_LEN)", src)
+        self.assertNotIn("max_t = 320", src)
+        self.assertIn("example_q = 8", src)
+        self.assertIn("dynamize_ranks=(1, 2, 3)", src)
+        self.assertNotIn("dynamize_ranks=()", src)
+        self.assertNotIn("prefill_t = 320", src)
+        self.assertNotIn(".ov-breeze-v7", src)
+        self.assertNotIn("prefill_fit", src)
+        self.assertNotIn("fit128", src)
+        self.assertLess(src.index("compile_graph=False"), src.index("release_parameters"))
+        self.assertLess(src.index("release_parameters"), src.index("FixedSlotRunner"))
+        self.assertLess(src.index("backbone.float()"), src.index("breeze_backbone_slot"))
+        self.assertNotIn("backbone.float()", cuda_branch)
+        self.assertIn("_untie_depth_codebooks", src)
+        self.assertNotIn("_install_breeze_embed_ov", src)
+        self.assertNotIn("release_parameters(lm_head", src)
+        self.assertNotIn("lm_head.forward", src)
+        self.assertLess(src.index("_untie_depth_codebooks"), src.index("_install_breeze_depth_ov"))
+        self.assertIn("_install_breeze_text_ov", src)
+        self.assertIn("_install_breeze_depth_ov", src)
+        self.assertIn("_install_breeze_codec_ov", src)
+        text = inspect.getsource(breeze._install_breeze_text_ov)
+        self.assertIn("release_parameters", text)
+        self.assertIn("breeze_text_encoder", text)
+        self.assertIn("_batched_text_encoder_forward", text)
+        self.assertIn("text_encoder_proj", text)
+        self.assertIn("dtype=wdtype", text)
+        self.assertIn("proj.float()", text)
+        self.assertLess(
+            text.index("wdtype = next(proj.parameters())"),
+            text.index("proj.float()"),
+        )
+        depth = inspect.getsource(breeze._install_breeze_depth_ov)
+        self.assertIn("breeze depth sim", depth)
+        self.assertIn("_sim_temperature", depth)
+        self.assertIn("_sim_top_p", depth)
+        self.assertNotIn("breeze depth knob", depth)
+        self.assertNotIn("breeze_depth_knob", depth)
+        self.assertNotIn("_KNOB_FAST", depth)
+        self.assertNotIn("_knob_tail_codes", depth)
+        self.assertNotIn("_knob_uses_short_frame", depth)
+        self.assertNotIn("_KNOB_QUIET", depth)
+        self.assertNotIn("_knob_keep_speech", depth)
+        self.assertNotIn("_KNOB_HOLD", depth)
+        self.assertIn("Keep the model temperature", inspect.getsource(breeze._sim_temperature))
+        self.assertIn("0.95", inspect.getsource(breeze._sim_top_p))
+        self.assertNotIn("drawn[-1]", depth)
+        codec = inspect.getsource(breeze._install_breeze_codec_ov)
+        self.assertNotIn("_codec_quiet_indices", codec)
+        self.assertNotIn("breeze knob quiet", codec)
+        self.assertNotIn("breeze_codec_dec_quiet", codec)
+        self.assertIn("breeze depth frame", depth)
+        clone_src = inspect.getsource(breeze.BreezeBackend.iter_clone)
+        design_src = inspect.getsource(breeze.BreezeBackend.design)
+        self.assertNotIn("_knobs_request_fast", clone_src)
+        self.assertNotIn("_KNOB_FAST", clone_src)
+        self.assertNotIn("_KNOB_HOLD", clone_src)
+        self.assertNotIn("_knobs_request_fast", design_src)
+        self.assertNotIn("_KNOB_FAST", design_src)
+        self.assertNotIn("_KNOB_HOLD", design_src)
+        self.assertIn("include_style_direction=False", clone_src)
+        self.assertIn("include_style_direction=False", design_src)
+        self.assertNotIn("breeze_depth_cfg", depth)
+        self.assertNotIn("_depth_cfg_frame", depth)
+        self.assertIn("inputs_embeds_projector", depth)
+        self.assertIn("embed_tokens", depth)
+        self.assertIn("to(dtype=wdtype)", depth)
+        self.assertIn("fused_depth_frame", depth)
+        self.assertIn("breeze_depth_frame", depth)
+        self.assertIn(".ov-breeze-depth-frame-v26", depth)
+        self.assertNotIn(".ov-breeze-depth-frame-v25", depth)
+        self.assertNotIn("layers[-1:]", depth)
+        self.assertNotIn("layers.half()", depth)
+        self.assertNotIn("norm.half()", depth)
+        self.assertNotIn("q_proj.half()", depth)
+        self.assertNotIn("k_proj.half()", depth)
+        self.assertNotIn("v_proj.half()", depth)
+        self.assertNotIn("o_proj.half()", depth)
+        self.assertNotIn("gate_proj.half()", depth)
+        self.assertNotIn("up_proj.half()", depth)
+        self.assertNotIn("down_proj.half()", depth)
+        self.assertNotIn("pin_f32=True", depth)
+        self.assertNotIn("latency=True", depth)
+        self.assertIn('precision="f32"', depth)
+        self.assertNotIn('precision="f16"', depth)
+        self.assertIn("prefill_embeds", depth)
+        self.assertIn("inputs_embeds_projector", depth)
+        self.assertNotIn("release_parameters(inner.embed_tokens", depth)
+        self.assertIn("backbone_hidden_state_projector", depth)
+        self.assertIn("layers.float()", depth)
+        self.assertLess(depth.index("layers.float()"), depth.index("fused_depth_frame"))
+        self.assertIn("compile_causal", depth)
+        self.assertIn("compile_graph=False", depth)
+        self.assertLess(depth.index("compile_graph=False"), depth.index("release_parameters"))
+        self.assertIn("DepthDecoderGraph._full_loop =", depth)
+        self.assertIn('release_parameters(inner.layers', depth)
+        self.assertIn('release_parameters(head', depth)
+        self.assertNotIn("StatefulKvRunner", depth)
+        fused = inspect.getsource(tts_ov.fused_depth_frame)
+        self.assertIn("embed_tokens", fused)
+        self.assertIn("inputs_embeds_projector", fused)
+        self.assertIn("backbone_h", fused)
+        self.assertIn("first_id", fused)
+        self.assertIn("_mlp_wide_f16", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("_proj_native(attn.q_proj", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("_proj_native(attn.o_proj", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("_proj_native", inspect.getsource(tts_ov._mlp_wide_f16))
+        self.assertNotIn("x.half()", inspect.getsource(tts_ov._mlp_wide_f16))
+        self.assertIn("-torch.log(-torch.log(", fused)
+        self.assertIn("argmax", fused)
+        self.assertNotIn("cdf <", fused)
+        codec = inspect.getsource(breeze._install_breeze_codec_ov)
+        self.assertIn("left_context", codec)
+        self.assertIn("dec.float()", codec)
+        self.assertIn("enc.float()", codec)
+        self.assertLess(codec.index("dec.float()"), codec.index("compile_static"))
+        self.assertIn("return self.dec(codes)", codec)
+        self.assertIn("compile_static", codec)
+        self.assertIn("compile_dyn_last", codec)
+        self.assertIn("release_parameters", codec)
+        self.assertIn("compile_graph=False", codec)
+        self.assertLess(codec.index("compile_graph=False"), codec.index("release_parameters"))
+        self.assertLess(codec.index("_patch_codec_trace_masks"), codec.index("compile_static"))
+        self.assertIn("create_sliding_window_causal_mask", inspect.getsource(breeze._patch_codec_trace_masks))
+        self.assertIn("modeling_mimi", inspect.getsource(breeze._patch_codec_trace_masks))
+        self.assertEqual(src.count("compile_causal("), 2)
+        self.assertIn('precision="f16"', codec)
+        self.assertNotIn("official streaming decoder", codec)
+        self.assertNotIn("ExecutionLane.run_step", codec)
+        self.assertNotIn("load_request_state", codec)
+        cm = inspect.getsource(tts_ov.compile_module)
+        self.assertIn("_freeze_for_export", cm)
+        self.assertIn("requires_grad_(False)", inspect.getsource(tts_ov._freeze_for_export))
+        self.assertIn("inference_mode", cm)
+        self.assertIn("jit.trace", cm)
+        st = inspect.getsource(tts_ov.compile_static)
+        self.assertIn("reshape", st)
+        self.assertIn("validate_nodes_and_infer_types", st)
+        self.assertIn("froze", st)
+        self.assertIn("compile_dyn_last", inspect.getsource(tts_ov.compile_dyn_last))
+        kv = inspect.getsource(tts_ov.causal_kv_module)
+        self.assertNotIn("create_causal_mask", kv)
+        self.assertIn("self_attn", inspect.getsource(tts_ov._layer_kv))
+        self.assertIn("wdtype", kv)
+        self.assertIn("causal_attn_bias", kv)
+        from wrapper.caps import firered
+        fr_load = inspect.getsource(firered._load)
+        fr_ov = fr_load.split("if _is_ov():", 1)[1].split("else:", 1)[0]
+        fr_cuda = fr_load.split("else:", 1)[1]
+        self.assertIn("_wait_firered_snapshot(", fr_ov)
+        self.assertLess(fr_ov.index("_wait_firered_snapshot("), fr_ov.index("FireRedTTS3Instruct("))
+        self.assertNotIn("_wait_firered_snapshot", fr_cuda)
+        self.assertNotIn("_firered_snapshot_missing", fr_cuda)
+        fr_need = inspect.getsource(firered._firered_snapshot_missing)
+        self.assertIn("redae/model.safetensors", fr_need)
+        self.assertIn("fireredtts3_instruct/model.safetensors", fr_need)
+        self.assertIn("text_tokenizer/tokenizer.json", fr_need)
+        ov_src = inspect.getsource(firered._install_firered_ov)
+        self.assertIn("_install_firered_backbone(", ov_src)
+        self.assertIn("_install_firered_decoder_ov(", ov_src)
+        self.assertIn("_install_firered_redae_cache(", ov_src)
+        self.assertIn("_install_firered_decode_log(", ov_src)
+        self.assertIn("device-KV decode", ov_src)
+        self.assertIn("dit_req", ov_src)
+        self.assertIn("create_infer_request", ov_src)
+        dec_ov = inspect.getsource(firered._install_firered_decoder_ov)
+        self.assertIn("firered_redae_dec", dec_ov)
+        self.assertIn(".ov-firered-dec-v2", dec_ov)
+        self.assertIn("compile_causal", dec_ov)
+        self.assertIn("sliding_attention", dec_ov)
+        self.assertIn("_firered_sliding_mask", dec_ov)
+        self.assertNotIn("inputs_embeds=embeds", dec_ov)
+        self.assertIn("istft_head", dec_ov)
+        self.assertIn("firered redae decoder stayed on torch", dec_ov)
+        slide = inspect.getsource(firered._firered_sliding_mask)
+        self.assertIn("kv_idx <= q_idx - window", slide)
+        self.assertIn("torch.triu", slide)
+        dec = inspect.getsource(firered._install_firered_decode_log)
+        self.assertIn("firered ov slice", dec)
+        self.assertIn("redae.decode", dec)
+        redae = inspect.getsource(firered._install_firered_redae_cache)
+        self.assertIn("_tokenize_audio", redae)
+        self.assertIn("firered redae", redae)
+        self.assertIn("cache[key]", redae)
+        bb = inspect.getsource(firered._install_firered_backbone)
+        self.assertIn("DeviceKvRunner", bb)
+        self.assertNotIn("stateful=", bb)
+        self.assertNotIn("StatefulKvRunner", bb)
+        self.assertNotIn("seed_flat", bb)
+        self.assertIn(".ov-firered-prefill-v15", bb)
+        self.assertIn(".ov-firered-decode-q1-v16", bb)
+        self.assertIn("external_position=True", bb)
+        self.assertNotIn(".ov-firered-decode-q1-v15", bb)
+        self.assertIn("firered_llm_prefill", bb)
+        self.assertIn("firered_llm_decode_q1", bb)
+        self.assertIn("dynamize_ranks=(2, 3)", bb)
+        self.assertIn("input_embeds[:, i:i + 1]", bb)
+        self.assertIn("dynamize_ranks=(2, 4)", bb)
+        self.assertNotIn("firered_llm_decode_q4", bb)
+        self.assertNotIn("tts_ov.KvRunner", bb)
+        self.assertNotIn("patch_stateful_kv", inspect.getsource(tts_ov.compile_causal))
+        self.assertNotIn("StatefulKvRunner", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("run.compiled", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("_device_props", inspect.getsource(tts_ov.compile_causal))
+        self.assertIn("INFERENCE_PRECISION_HINT", inspect.getsource(tts_ov._device_props))
+        self.assertIn('prec = "f32" if cpu', inspect.getsource(tts_ov._device_props))
+        self.assertIn("device-KV decode", inspect.getsource(firered._install_firered_backbone))
+        dev_runner = inspect.getsource(tts_ov.DeviceKvRunner)
+        self.assertIn("create_infer_request", dev_runner)
+        self.assertIn("set_input_tensor", dev_runner)
+        self.assertIn("external_position", dev_runner)
+        self.assertIn("np.arange", dev_runner)
+        self.assertIn("torch.triu", inspect.getsource(tts_ov.causal_attn_bias))
+
+    def test_causal_attn_bias_prefill_and_patch_decode(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch")
+        from wrapper import tts_ov
+
+        h = torch.zeros(1, 4, 8)
+        pre = tts_ov.causal_attn_bias(h, 4, 0)
+        self.assertEqual(tuple(pre.shape), (1, 1, 4, 4))
+        self.assertTrue(torch.isfinite(pre[0, 0, 1, 0]))
+        self.assertFalse(torch.isfinite(pre[0, 0, 0, 1]))
+        dec = tts_ov.causal_attn_bias(h, 4, 16)
+        self.assertEqual(tuple(dec.shape), (1, 1, 4, 20))
+        self.assertTrue(torch.isfinite(dec[0, 0, 0, 16]))
+        self.assertFalse(torch.isfinite(dec[0, 0, 0, 17]))
+        self.assertTrue(torch.isfinite(dec[0, 0, 3, 19]))
+        self.assertTrue(torch.isfinite(dec[0, 0, 3, 16]))
+
+
+class SlimTtsOvRecipeTest(unittest.TestCase):
+    def test_intel_tts_bases_have_openvino_and_no_cuda(self):
+        root = os.path.join(os.path.dirname(__file__), "../bases")
+        for name in ("breezeov", "fireredov"):
+            path = os.path.join(root, name, "deps.Dockerfile")
+            with open(path) as fh:
+                text = fh.read()
+            self.assertNotIn("nvidia/cuda", text, path)
+            self.assertIn("openvino", text, path)
+            self.assertIn("download.pytorch.org/whl/cpu", text, path)
 
 
 if __name__ == "__main__":

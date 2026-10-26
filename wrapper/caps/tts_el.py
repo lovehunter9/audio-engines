@@ -1267,7 +1267,7 @@ def _is_cjk(*parts):
     return any("\u4e00" <= ch <= "\u9fff" for part in parts for ch in (part or ""))
 
 
-def _settings_direction(settings, instruction="", text="", include_speed=True):
+def _settings_direction(settings, instruction="", text="", include_speed=True, include_style=True):
     """Style / speed have no engine flag: wrap them into the speak instruction."""
     style = float((settings or {}).get("style") or 0.0)
     try:
@@ -1276,9 +1276,9 @@ def _settings_direction(settings, instruction="", text="", include_speed=True):
         speed = 1.0
     zh = _is_cjk(instruction, text)
     extra = []
-    if style >= 0.7:
+    if include_style and style >= 0.7:
         extra.append("语气夸张，富有表现力。" if zh else "Deliver with strong expressive style.")
-    elif style >= 0.35:
+    elif include_style and style >= 0.35:
         extra.append("带一点语气和情绪。" if zh else "Speak with noticeable style and emotion.")
     if include_speed:
         if speed <= 0.85:
@@ -1303,7 +1303,7 @@ class Knobs:
 
 
 def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_direction=True,
-                     seed_jitter=0):
+                     include_style_direction=True, seed_jitter=0):
     """EL knobs → CFG / seed / instruction / acoustic-edit; the defaults are a no-op."""
     s = dict(_DEFAULT_SETTINGS)
     if isinstance(settings, dict):
@@ -1334,7 +1334,8 @@ def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_
         seed = (anchor + int(seed_jitter) * 7919) & 0x7FFFFFFF
     return Knobs(cfg, seed, speed,
                  _settings_direction(s, instruction, text,
-                                     include_speed=include_speed_direction), boost)
+                                     include_speed=include_speed_direction,
+                                     include_style=include_style_direction), boost)
 
 
 def _public_voice(meta):
