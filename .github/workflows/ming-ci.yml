@@ -1,0 +1,31 @@
+# ming CI: dev builds go out by workflow_dispatch. No v* tag until this is a listing engine.
+name: ming-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace (empty = repository owner; the fork is lovehunter9)'
+        required: false
+        default: ''
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ming-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: ming
+      repo: audio-ming
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
