@@ -1,0 +1,32 @@
+# Ming OpenVINO CI (image audio-ming-ov). Triggers only; build is build-image.yml.
+name: ming-ov-ci
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace (empty = repository owner; the fork is lovehunter9)'
+        required: false
+        default: ''
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ming-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: mingov
+      repo: audio-ming-ov
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
