@@ -288,6 +288,8 @@ def _parameter_size(*names):
 def models_payload(model_name, capabilities, description="", repo=None, module="",
                    model_format=None, quantization=None, sample_rate=None):
     """Ollama models[] and OpenAI data[] for the one model this process serves."""
+    if callable(sample_rate):
+        sample_rate = sample_rate()
     repo = repo or model_name
     size, mtime, fmt = _disk(repo)
     fmt = model_format or fmt
