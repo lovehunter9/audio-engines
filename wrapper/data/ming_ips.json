@@ -1,0 +1,3878 @@
+[
+  {
+    "voice_id": "灵小安",
+    "name": "灵小安",
+    "language": "zh",
+    "gender": "female",
+    "description": "声线甜美清脆，带有标志性的二次元“萌系”特征，语气充满活力与亲和力，展现出随时待命的乖巧形象。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵语汐",
+    "name": "灵语汐",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满朝气的少女音，音色清脆明亮，展现出阳光活力的形象。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小萌",
+    "name": "灵小萌",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语速干练爽利，听感元气且可靠。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小柔",
+    "name": "灵小柔",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清亮甜美，发音清晰标准，语调中带有礼貌的询问感，展现出耐心专业的服务态度。",
+    "group": "zh",
+    "recommended": true
+  },
+  {
+    "voice_id": "灵小雅",
+    "name": "灵小雅",
+    "language": "zh",
+    "gender": "female",
+    "description": "元气满满的甜美少女音，音色清脆明亮",
+    "group": "zh"
+  },
+  {
+    "voice_id": "花小呗",
+    "name": "花小呗",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的幼态特征，语调轻快活泼",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵韵",
+    "name": "灵韵",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语速干练爽利，听感元气且可靠。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "妩媚妲己",
+    "name": "妩媚妲己",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，语调轻盈上扬，表现性感妩媚",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵婉",
+    "name": "灵婉",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，充满亲密感与治愈力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小月",
+    "name": "灵小月",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜且充满元气，语调轻快洋溢着迎接朋友的喜悦，展现出极具感染力的青春气息。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵朵儿",
+    "name": "灵朵儿",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温润如玉，兼具知性与亲和力，如同一位优雅的智者在午后娓娓道来，充满治愈力量。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵岩",
+    "name": "灵岩",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清晰正式且专业",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小锋",
+    "name": "灵小锋",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语气自然笃定，既有邻家大男孩的亲切，又不失成熟男性的稳重感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小川",
+    "name": "灵小川",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的治愈系青年男声，嗓音温暖醇厚，在表达感官体验时语调深情细腻，极具感染力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小甄",
+    "name": "灵小甄",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮清脆，语速轻快且充满活力，语气中带有强烈的推荐感和亲和力，典型的带货主播风格。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小知",
+    "name": "灵小知",
+    "language": "zh",
+    "gender": "female",
+    "description": "一位干练自信的职场女性声音，音色明亮清脆，语语气铿锵有力，具有极强的商业说服力和感染力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小惠",
+    "name": "灵小惠",
+    "language": "zh",
+    "gender": "female",
+    "description": "语速极快且穿透力强的电商主播音，充满紧迫感与热情，在制造抢购氛围的同时透着专业干练。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小晴",
+    "name": "灵小晴",
+    "language": "zh",
+    "gender": "female",
+    "description": "语速极快且清晰的职业带货主播音，充满爆发力与紧迫感，擅长用高亢明亮的声线瞬间点燃抢购欲望。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小琪",
+    "name": "灵小琪",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，语气亲切自然，带有强烈的分享欲和种草感，听感清爽舒适，极具感染力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵梦",
+    "name": "灵梦",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满糖分的高甜少女音，语气娇憨任性，完美演绎了想要人陪伴时的撒娇状态。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵恬",
+    "name": "灵恬",
+    "language": "zh",
+    "gender": "female",
+    "description": "嗓音如蜜糖般甜美，透着一丝娇嗔与笃定的深情，充满了恋爱中的少女气息。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小汐",
+    "name": "灵小汐",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女音色，语气自然松弛，充满生活气息，透着一股无辜与可爱的亲切感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小棠",
+    "name": "灵小棠",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温暖，语调舒缓从容，自带南方女子的温婉气质，充满生活阅历带来的故事感与亲和力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小梨",
+    "name": "灵小梨",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜透亮，如同江南水乡的微风，既有少女的灵动俏皮，又蕴含着温婉深情的叙述感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵舒",
+    "name": "灵舒",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，语流中夹杂自然的思考停顿与语气词，极具生活气息与画面感的叙述型女声。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵娇",
+    "name": "灵娇",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜明亮的少女音，语感轻快活泼，在讲述生活趣事时充满画面感与青春朝气，极具感染力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵小芸",
+    "name": "灵小芸",
+    "language": "zh",
+    "gender": "female",
+    "description": "温暖知性的年轻女性声音，如同闺蜜般真诚分享生活感悟，语气平和细腻，具有抚慰人心的疗愈力量。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵锐",
+    "name": "灵锐",
+    "language": "zh",
+    "gender": "male",
+    "description": "发音标准的年轻男声，语气真实自然，通过中途的改口与停顿，生动传达出为了梦想决定复读的艰难抉择与坚定信念。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵空",
+    "name": "灵空",
+    "language": "zh",
+    "gender": "male",
+    "description": "低沉磁性的嗓音如同暖流，带有明显的贴耳气声，充满了无限的宠溺与安抚感，令人心安。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵宇",
+    "name": "灵宇",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的青年公子音，语气中带着自信的笑意与轻微的戏谑，听感温柔且极具撩拨感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵朗",
+    "name": "灵朗",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的低沉嗓音，语气中融合了自信的笑意与深情的宠溺，极具苏感与安全感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵楷",
+    "name": "灵楷",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，如深夜电台般温暖治愈，用慢节奏的叙述抚平都市的喧嚣与匆忙。",
+    "group": "zh",
+    "recommended": true
+  },
+  {
+    "voice_id": "灵旭",
+    "name": "灵旭",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈干净，富有少年感和书卷气。语调平缓温和，如同邻家学长在午后阳光下娓娓道来，给人一种治愈、宁静的听感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵骁",
+    "name": "灵骁",
+    "language": "zh",
+    "gender": "male",
+    "description": "一位温和诚挚的青年男性，用略带迟疑和重复的自然口吻讲述往事，声音中充满了对过去的怀念与温情。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵江",
+    "name": "灵江",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调舒缓深情，如同老友般讲述着关于青春与热爱的无悔回忆。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "悲伤女声",
+    "name": "悲伤女声",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有故事感的都市知性女声，温柔中透着坚定的力量，像是在深夜里低声诉说心事，极具情感共鸣与治愈力。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "皮六",
+    "name": "皮六",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满朝气与自信的青年男声，音质明亮干脆，语气中带有强烈的对比感与戏剧张力，极具煽动性。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "说唱小哥",
+    "name": "说唱小哥",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有律动的年轻男声，音色清澈干练，用类说唱的节奏讲述生活选择，透着一股洒脱与随性的松弛感。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "蜡笔小新",
+    "name": "蜡笔小新",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音低沉厚实且带有明显的憨态，语速较慢，透着一种天真傻气的呆萌感，极具辨识度的动画角色声线。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "悟空",
+    "name": "悟空",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音极具表现力和画面感，语气夸张而不失分寸，善于用声音演戏，像一位眉飞色舞的讲故事高手。",
+    "group": "zh"
+  },
+  {
+    "voice_id": "蜡笔小新_野原新之助 (小新)",
+    "name": "蜡笔小新_野原新之助 (小新)",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "蜡笔小新_野原美伢 (美伢)",
+    "name": "蜡笔小新_野原美伢 (美伢)",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "小猪佩奇_佩奇",
+    "name": "小猪佩奇_佩奇",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "康熙王朝_康熙",
+    "name": "康熙王朝_康熙",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "西游记_唐僧",
+    "name": "西游记_唐僧",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "甄嬛传_四郎",
+    "name": "甄嬛传_四郎",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "潜伏_余则成",
+    "name": "潜伏_余则成",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "水浒传_武松",
+    "name": "水浒传_武松",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "水浒传_潘金莲",
+    "name": "水浒传_潘金莲",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "雍正王朝_雍正",
+    "name": "雍正王朝_雍正",
+    "language": "zh",
+    "gender": "",
+    "description": "-",
+    "group": "zh"
+  },
+  {
+    "voice_id": "灵信远_生气",
+    "name": "灵信远_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_厌恶",
+    "name": "灵信远_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_惊讶",
+    "name": "灵信远_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_高兴",
+    "name": "灵信远_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_恐惧",
+    "name": "灵信远_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_中性",
+    "name": "灵信远_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵信远_悲伤",
+    "name": "灵信远_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，夹杂着轻微的笑意和呼吸声，既有少年的清爽感，又有成熟伴侣的深情与宠溺。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_高兴",
+    "name": "灵思齐_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_恐惧",
+    "name": "灵思齐_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_生气",
+    "name": "灵思齐_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_厌恶",
+    "name": "灵思齐_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_中性",
+    "name": "灵思齐_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_惊讶",
+    "name": "灵思齐_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵思齐_悲伤",
+    "name": "灵思齐_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满阳光活力的青年男声，音色清亮且富有感染力，语气中透着由衷的赞许与亲切感，如同邻家大哥哥般温暖。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_高兴",
+    "name": "灵叙柔_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_恐惧",
+    "name": "灵叙柔_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_惊讶",
+    "name": "灵叙柔_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_悲伤",
+    "name": "灵叙柔_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_生气",
+    "name": "灵叙柔_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_中性",
+    "name": "灵叙柔_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵叙柔_厌恶",
+    "name": "灵叙柔_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音端庄大气，兼具新闻播报的权威感与人文叙述的温婉感，吐字清晰，极具信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_悲伤",
+    "name": "灵绮木_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_厌恶",
+    "name": "灵绮木_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_中性",
+    "name": "灵绮木_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_恐惧",
+    "name": "灵绮木_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_惊讶",
+    "name": "灵绮木_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_高兴",
+    "name": "灵绮木_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵绮木_生气",
+    "name": "灵绮木_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音既有专业人士的信服力，又兼具邻家姐姐般的亲切感，语气温柔笃定，像是在向闺蜜分享保养秘籍。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_恐惧",
+    "name": "灵书悦_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_厌恶",
+    "name": "灵书悦_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_高兴",
+    "name": "灵书悦_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_惊讶",
+    "name": "灵书悦_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_悲伤",
+    "name": "灵书悦_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_生气",
+    "name": "灵书悦_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书悦_中性",
+    "name": "灵书悦_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，兼具叙述的客观性与吐槽的生动感，善于通过语气的反差来制造喜剧效果。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_厌恶",
+    "name": "灵渊霆_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_中性",
+    "name": "灵渊霆_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_恐惧",
+    "name": "灵渊霆_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_惊讶",
+    "name": "灵渊霆_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_悲伤",
+    "name": "灵渊霆_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_生气",
+    "name": "灵渊霆_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵渊霆_高兴",
+    "name": "灵渊霆_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满青春气息的年轻男声，语气自然松弛，像一位关系熟络的朋友在发出随意的邀请。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_高兴",
+    "name": "灵素心_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_惊讶",
+    "name": "灵素心_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_恐惧",
+    "name": "灵素心_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_中性",
+    "name": "灵素心_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_生气",
+    "name": "灵素心_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_悲伤",
+    "name": "灵素心_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵素心_厌恶",
+    "name": "灵素心_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音甜美清脆，充满元气少女感，语调活泼且带有明显的好奇色彩，极具辨识度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_惊讶",
+    "name": "灵晓声_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_厌恶",
+    "name": "灵晓声_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_高兴",
+    "name": "灵晓声_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_生气",
+    "name": "灵晓声_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_中性",
+    "name": "灵晓声_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵晓声_悲伤",
+    "name": "灵晓声_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气中透露出掌控全局的自信与从容，带有一种让人脸红心跳的压迫感与苏感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_生气",
+    "name": "灵风信_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_中性",
+    "name": "灵风信_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_厌恶",
+    "name": "灵风信_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_高兴",
+    "name": "灵风信_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_惊讶",
+    "name": "灵风信_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_悲伤",
+    "name": "灵风信_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵风信_恐惧",
+    "name": "灵风信_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "清甜透亮的少女音色，如同春日暖阳般温暖，语气中充满对他人的关切与担忧，极具治愈感与亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_惊讶",
+    "name": "灵采薇_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_厌恶",
+    "name": "灵采薇_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_恐惧",
+    "name": "灵采薇_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_生气",
+    "name": "灵采薇_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_悲伤",
+    "name": "灵采薇_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_中性",
+    "name": "灵采薇_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵采薇_高兴",
+    "name": "灵采薇_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖而富有知性美，兼具专业度与亲和力，吐字颗粒感清晰，语调平稳柔和，给人以值得信赖的安心感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_厌恶",
+    "name": "灵卓然_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_中性",
+    "name": "灵卓然_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_恐惧",
+    "name": "灵卓然_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_惊讶",
+    "name": "灵卓然_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_高兴",
+    "name": "灵卓然_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_悲伤",
+    "name": "灵卓然_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵卓然_生气",
+    "name": "灵卓然_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音醇厚且富有磁性，发音字正腔圆，以客观冷静的语调进行陈述，展现出极高的专业度和信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_中性",
+    "name": "灵惜梦_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_厌恶",
+    "name": "灵惜梦_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_高兴",
+    "name": "灵惜梦_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_悲伤",
+    "name": "灵惜梦_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_恐惧",
+    "name": "灵惜梦_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_惊讶",
+    "name": "灵惜梦_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜梦_生气",
+    "name": "灵惜梦_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆如珠落玉盘，既有邻家女孩的亲切感，又透着都市女性的独立与果敢，听感明媚舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_高兴",
+    "name": "灵浅忧_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_生气",
+    "name": "灵浅忧_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_厌恶",
+    "name": "灵浅忧_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_悲伤",
+    "name": "灵浅忧_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_惊讶",
+    "name": "灵浅忧_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_恐惧",
+    "name": "灵浅忧_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵浅忧_中性",
+    "name": "灵浅忧_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "音色清脆明亮，咬字精准有力。语调专业客观，展现出新闻播音员的干练与自信，适合严肃或资讯类内容的播报。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_生气",
+    "name": "灵昭野_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_高兴",
+    "name": "灵昭野_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_悲伤",
+    "name": "灵昭野_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_中性",
+    "name": "灵昭野_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_厌恶",
+    "name": "灵昭野_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_恐惧",
+    "name": "灵昭野_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵昭野_惊讶",
+    "name": "灵昭野_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有少年感的清亮男声，语气中透着真诚的赞赏与一丝陶醉，温暖而迷人。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_厌恶",
+    "name": "灵心澜_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_惊讶",
+    "name": "灵心澜_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_生气",
+    "name": "灵心澜_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_中性",
+    "name": "灵心澜_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_高兴",
+    "name": "灵心澜_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_悲伤",
+    "name": "灵心澜_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心澜_恐惧",
+    "name": "灵心澜_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "富有阅历的中年女性嗓音，沉稳中透着精明，语气笃定，自带一种雍容华贵的审视感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_悲伤",
+    "name": "灵犀言_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_厌恶",
+    "name": "灵犀言_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_恐惧",
+    "name": "灵犀言_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_中性",
+    "name": "灵犀言_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_惊讶",
+    "name": "灵犀言_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_高兴",
+    "name": "灵犀言_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵犀言_生气",
+    "name": "灵犀言_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音苍劲浑厚，透着岁月沉淀的威严与从容，吐字如金石掷地，极具官方权威感与正气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_悲伤",
+    "name": "灵语冰_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_厌恶",
+    "name": "灵语冰_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_高兴",
+    "name": "灵语冰_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_恐惧",
+    "name": "灵语冰_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_惊讶",
+    "name": "灵语冰_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_中性",
+    "name": "灵语冰_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语冰_生气",
+    "name": "灵语冰_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音知性干练，咬字精准有力，语气客观笃定，展现出极强的专业度与公信力，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_生气",
+    "name": "灵逸风_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_悲伤",
+    "name": "灵逸风_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_惊讶",
+    "name": "灵逸风_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_中性",
+    "name": "灵逸风_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_恐惧",
+    "name": "灵逸风_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_高兴",
+    "name": "灵逸风_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵逸风_厌恶",
+    "name": "灵逸风_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻清爽，语调慵懒随意，透着一股大男孩特有的直率与推脱责任的小傲娇。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_中性",
+    "name": "灵悦澜_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_高兴",
+    "name": "灵悦澜_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_厌恶",
+    "name": "灵悦澜_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_恐惧",
+    "name": "灵悦澜_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_生气",
+    "name": "灵悦澜_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_悲伤",
+    "name": "灵悦澜_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦澜_惊讶",
+    "name": "灵悦澜_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，带有明显的笑意与亲和力，语气轻松活泼，展现出邻家女孩般的元气感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_厌恶",
+    "name": "灵惊鸿_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_高兴",
+    "name": "灵惊鸿_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_中性",
+    "name": "灵惊鸿_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_惊讶",
+    "name": "灵惊鸿_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_恐惧",
+    "name": "灵惊鸿_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_生气",
+    "name": "灵惊鸿_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊鸿_悲伤",
+    "name": "灵惊鸿_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音听起来像是一位干练爽快的年轻车商，语气自然随和，透着一种做生意特有的利落与自信。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_高兴",
+    "name": "灵御心_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_中性",
+    "name": "灵御心_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_生气",
+    "name": "灵御心_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_恐惧",
+    "name": "灵御心_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_厌恶",
+    "name": "灵御心_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_惊讶",
+    "name": "灵御心_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵御心_悲伤",
+    "name": "灵御心_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调干练直率不拖泥带水，透着一股年轻职场人的利落与朝气。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_厌恶",
+    "name": "灵语恬_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_高兴",
+    "name": "灵语恬_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_恐惧",
+    "name": "灵语恬_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_悲伤",
+    "name": "灵语恬_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_惊讶",
+    "name": "灵语恬_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_生气",
+    "name": "灵语恬_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语恬_中性",
+    "name": "灵语恬_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清澈温婉，语调中透着关切与认真，像是一位知心好友在给予善意的提醒。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_厌恶",
+    "name": "灵心恬_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_惊讶",
+    "name": "灵心恬_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_悲伤",
+    "name": "灵心恬_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_中性",
+    "name": "灵心恬_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_恐惧",
+    "name": "灵心恬_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_高兴",
+    "name": "灵心恬_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵心恬_生气",
+    "name": "灵心恬_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆利落，语气客观冷静，具有极强的叙事感和画面构建能力，适合讲述情节。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_惊讶",
+    "name": "灵惜蕊_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_厌恶",
+    "name": "灵惜蕊_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_恐惧",
+    "name": "灵惜蕊_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_高兴",
+    "name": "灵惜蕊_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_中性",
+    "name": "灵惜蕊_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_悲伤",
+    "name": "灵惜蕊_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜蕊_生气",
+    "name": "灵惜蕊_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，发音字正腔圆，语调既专业又带有服务行业的亲切感，像是一位耐心的工作人员在做细致引导。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_厌恶",
+    "name": "灵语萱_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_高兴",
+    "name": "灵语萱_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_惊讶",
+    "name": "灵语萱_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_恐惧",
+    "name": "灵语萱_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_生气",
+    "name": "灵语萱_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_悲伤",
+    "name": "灵语萱_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语萱_中性",
+    "name": "灵语萱_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "清澈甜美的少女声线，语气温柔而坚定，充满了对听者的信任与依赖，如同邻家女孩般给人以无尽的安全感与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_生气",
+    "name": "灵语烟_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_恐惧",
+    "name": "灵语烟_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_中性",
+    "name": "灵语烟_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_厌恶",
+    "name": "灵语烟_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_惊讶",
+    "name": "灵语烟_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_高兴",
+    "name": "灵语烟_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语烟_悲伤",
+    "name": "灵语烟_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满活力，生动地传达出惊讶与吐槽的情绪，极具生活气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_恐惧",
+    "name": "灵律雅_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_生气",
+    "name": "灵律雅_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_惊讶",
+    "name": "灵律雅_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_高兴",
+    "name": "灵律雅_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_厌恶",
+    "name": "灵律雅_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_中性",
+    "name": "灵律雅_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵律雅_悲伤",
+    "name": "灵律雅_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音具有极强的都市生活气息，语气干练中透着一丝对现实的无奈，情感克制而真实。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_厌恶",
+    "name": "灵惊涛_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_恐惧",
+    "name": "灵惊涛_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_高兴",
+    "name": "灵惊涛_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_悲伤",
+    "name": "灵惊涛_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_中性",
+    "name": "灵惊涛_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_惊讶",
+    "name": "灵惊涛_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊涛_生气",
+    "name": "灵惊涛_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "操着一口魔性南宁口音的年轻男生，语气中充满了被网吧空调冷气打败的真实无奈与幽默感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_生气",
+    "name": "灵寒陌_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_厌恶",
+    "name": "灵寒陌_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_恐惧",
+    "name": "灵寒陌_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_高兴",
+    "name": "灵寒陌_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_中性",
+    "name": "灵寒陌_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_惊讶",
+    "name": "灵寒陌_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵寒陌_悲伤",
+    "name": "灵寒陌_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "具有少年感的清亮男声，语气中透着被误解后的急切与无辜，像极了急于向女友撇清关系的“小奶狗”男友。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_悲伤",
+    "name": "灵决冥_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_厌恶",
+    "name": "灵决冥_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_生气",
+    "name": "灵决冥_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_中性",
+    "name": "灵决冥_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_惊讶",
+    "name": "灵决冥_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_恐惧",
+    "name": "灵决冥_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵决冥_高兴",
+    "name": "灵决冥_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，咬字精准有力，语调冷静客观，在平铺直叙中透出一种引人入胜的新闻纪实感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_中性",
+    "name": "灵亦尘_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_厌恶",
+    "name": "灵亦尘_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_高兴",
+    "name": "灵亦尘_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_恐惧",
+    "name": "灵亦尘_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_生气",
+    "name": "灵亦尘_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_悲伤",
+    "name": "灵亦尘_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵亦尘_惊讶",
+    "name": "灵亦尘_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满生活气息的温暖青年音，磁性中透着温柔的关切，如春风般让人感到安心与舒适。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_生气",
+    "name": "灵语尘_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_高兴",
+    "name": "灵语尘_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_厌恶",
+    "name": "灵语尘_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_惊讶",
+    "name": "灵语尘_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_中性",
+    "name": "灵语尘_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_悲伤",
+    "name": "灵语尘_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵语尘_恐惧",
+    "name": "灵语尘_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满故事感的沧桑大叔音，嗓音沙哑低沉，语气中透着深深的无力感与对命运的妥协。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_高兴",
+    "name": "灵慈萱_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_厌恶",
+    "name": "灵慈萱_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_惊讶",
+    "name": "灵慈萱_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_生气",
+    "name": "灵慈萱_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_中性",
+    "name": "灵慈萱_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_悲伤",
+    "name": "灵慈萱_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵慈萱_恐惧",
+    "name": "灵慈萱_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆悦耳，充满青春活力，语气中带着一丝急切与熟稔，展现出邻家女孩般自然直率的形象。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_中性",
+    "name": "灵妙音_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_悲伤",
+    "name": "灵妙音_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_惊讶",
+    "name": "灵妙音_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_厌恶",
+    "name": "灵妙音_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_生气",
+    "name": "灵妙音_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_高兴",
+    "name": "灵妙音_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙音_恐惧",
+    "name": "灵妙音_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "充满磁性的冷艳御姐音，语气强势且干练，在质问中透露出不容置疑的威严与掌控力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_悲伤",
+    "name": "灵断尘_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_高兴",
+    "name": "灵断尘_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_惊讶",
+    "name": "灵断尘_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_恐惧",
+    "name": "灵断尘_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_中性",
+    "name": "灵断尘_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_生气",
+    "name": "灵断尘_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵断尘_厌恶",
+    "name": "灵断尘_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音年轻且富有生活气息，疑问时语气轻快，拒绝时干脆利落，展现出一种对人际关系界限分明的态度。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_高兴",
+    "name": "灵悦兮_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_中性",
+    "name": "灵悦兮_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_生气",
+    "name": "灵悦兮_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_惊讶",
+    "name": "灵悦兮_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_厌恶",
+    "name": "灵悦兮_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_悲伤",
+    "name": "灵悦兮_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦兮_恐惧",
+    "name": "灵悦兮_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆明亮，语调轻快且充满行动力，既有年轻女性的元气，又透着做事靠谱的自信与干练。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_恐惧",
+    "name": "灵若虚_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_惊讶",
+    "name": "灵若虚_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_中性",
+    "name": "灵若虚_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_悲伤",
+    "name": "灵若虚_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_高兴",
+    "name": "灵若虚_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_厌恶",
+    "name": "灵若虚_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵若虚_生气",
+    "name": "灵若虚_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音干净利落，透着一种现代职业女性的干练与知性，语调客观而不失温度，适合传递资讯。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_厌恶",
+    "name": "灵熙婉_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_生气",
+    "name": "灵熙婉_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_惊讶",
+    "name": "灵熙婉_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_高兴",
+    "name": "灵熙婉_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_中性",
+    "name": "灵熙婉_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_恐惧",
+    "name": "灵熙婉_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵熙婉_悲伤",
+    "name": "灵熙婉_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般甜美透亮，自带微笑感的叙述风格，能瞬间拉近与听众的距离，充满治愈系的活力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_中性",
+    "name": "灵旭扬_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_生气",
+    "name": "灵旭扬_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_恐惧",
+    "name": "灵旭扬_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_高兴",
+    "name": "灵旭扬_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_惊讶",
+    "name": "灵旭扬_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_悲伤",
+    "name": "灵旭扬_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵旭扬_厌恶",
+    "name": "灵旭扬_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "温润磁性的青年男声，语气亲昵，后半段带有一丝因病痛而产生的虚弱感与求关注的撒娇意味。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_生气",
+    "name": "灵阅川_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_悲伤",
+    "name": "灵阅川_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_高兴",
+    "name": "灵阅川_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_厌恶",
+    "name": "灵阅川_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_惊讶",
+    "name": "灵阅川_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_中性",
+    "name": "灵阅川_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵阅川_恐惧",
+    "name": "灵阅川_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音浑厚而富有磁性，仿佛一位阅历丰富的讲述者，以沉稳庄重的语调铺陈宏大叙事，极具画面感与说服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_高兴",
+    "name": "灵未央_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_中性",
+    "name": "灵未央_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_惊讶",
+    "name": "灵未央_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_悲伤",
+    "name": "灵未央_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_厌恶",
+    "name": "灵未央_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_恐惧",
+    "name": "灵未央_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵未央_生气",
+    "name": "灵未央_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美，语调上扬带有一种理直气壮的俏皮感，像是一位正在撒娇或辩解的邻家元气少女。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_厌恶",
+    "name": "灵妩月_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_生气",
+    "name": "灵妩月_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_中性",
+    "name": "灵妩月_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_惊讶",
+    "name": "灵妩月_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_恐惧",
+    "name": "灵妩月_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_高兴",
+    "name": "灵妩月_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妩月_悲伤",
+    "name": "灵妩月_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温婉知性，透着关切与理智，如同贴心的姐姐或伴侣在耳边轻声劝诫，兼具温柔与力量。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_中性",
+    "name": "灵梦瑶_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_恐惧",
+    "name": "灵梦瑶_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_高兴",
+    "name": "灵梦瑶_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_悲伤",
+    "name": "灵梦瑶_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_惊讶",
+    "name": "灵梦瑶_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵梦瑶_生气",
+    "name": "灵梦瑶_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清甜软糯，如同邻家女孩般亲切自然，在讲述知识时透着一股认真且治愈的气息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_中性",
+    "name": "灵妙声_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_恐惧",
+    "name": "灵妙声_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_高兴",
+    "name": "灵妙声_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_悲伤",
+    "name": "灵妙声_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_惊讶",
+    "name": "灵妙声_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵妙声_生气",
+    "name": "灵妙声_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音甜美清脆，发音极其标准，具有极高的亲和力与专业度，如同邻家女孩般清新自然。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_中性",
+    "name": "灵烈瑶_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_厌恶",
+    "name": "灵烈瑶_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_恐惧",
+    "name": "灵烈瑶_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_悲伤",
+    "name": "灵烈瑶_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_惊讶",
+    "name": "灵烈瑶_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_生气",
+    "name": "灵烈瑶_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵烈瑶_高兴",
+    "name": "灵烈瑶_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮干练，吐字如珠，语气客观冷静且富有逻辑感，展现出专业资讯主播的知性风采。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_中性",
+    "name": "灵幽月_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_厌恶",
+    "name": "灵幽月_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_恐惧",
+    "name": "灵幽月_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_悲伤",
+    "name": "灵幽月_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_惊讶",
+    "name": "灵幽月_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_生气",
+    "name": "灵幽月_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵幽月_高兴",
+    "name": "灵幽月_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如清泉般透亮且充满知性温暖，发音精准，语气中透着对世界多样性的包容与欣赏。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_中性",
+    "name": "灵悦心_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_厌恶",
+    "name": "灵悦心_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_恐惧",
+    "name": "灵悦心_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_悲伤",
+    "name": "灵悦心_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_惊讶",
+    "name": "灵悦心_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_生气",
+    "name": "灵悦心_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵悦心_高兴",
+    "name": "灵悦心_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性，咬字精准圆润，语调柔和且富有感染力，传递出一种积极向上的治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_中性",
+    "name": "灵汐月_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_厌恶",
+    "name": "灵汐月_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_恐惧",
+    "name": "灵汐月_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_悲伤",
+    "name": "灵汐月_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_惊讶",
+    "name": "灵汐月_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_生气",
+    "name": "灵汐月_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵汐月_高兴",
+    "name": "灵汐月_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如暖阳般治愈，甜美而不腻，语调舒缓深情，充满亲密感和信赖感，能瞬间抚平听者的情绪。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_中性",
+    "name": "灵书意_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_厌恶",
+    "name": "灵书意_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_恐惧",
+    "name": "灵书意_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_悲伤",
+    "name": "灵书意_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_惊讶",
+    "name": "灵书意_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_生气",
+    "name": "灵书意_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵书意_高兴",
+    "name": "灵书意_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "充满磁性的温暖男声，语调平稳且富有感染力，如同深夜电台的陪伴，给人带来安宁与舒适的听感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_中性",
+    "name": "灵知远_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_厌恶",
+    "name": "灵知远_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_恐惧",
+    "name": "灵知远_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_悲伤",
+    "name": "灵知远_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_惊讶",
+    "name": "灵知远_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_生气",
+    "name": "灵知远_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵知远_高兴",
+    "name": "灵知远_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音清澈温暖，兼具沉稳与朝气，如清晨阳光般给人以井然有序的安定感与对未来的美好憧憬。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_中性",
+    "name": "灵温言_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_厌恶",
+    "name": "灵温言_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_恐惧",
+    "name": "灵温言_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_悲伤",
+    "name": "灵温言_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_惊讶",
+    "name": "灵温言_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_生气",
+    "name": "灵温言_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵温言_高兴",
+    "name": "灵温言_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的青年男声，语气理性而温和，如同深夜电台的讲述者，客观地娓娓道来，给人以信服感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_中性",
+    "name": "灵傲尘_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_厌恶",
+    "name": "灵傲尘_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_恐惧",
+    "name": "灵傲尘_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_悲伤",
+    "name": "灵傲尘_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_生气",
+    "name": "灵傲尘_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵傲尘_高兴",
+    "name": "灵傲尘_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音温暖醇厚且富有磁性，语调平稳客观，透着一种历经沉淀后的成熟感，像是在真诚地分享人生感悟。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_中性",
+    "name": "灵佑安_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_厌恶",
+    "name": "灵佑安_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_恐惧",
+    "name": "灵佑安_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_悲伤",
+    "name": "灵佑安_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_惊讶",
+    "name": "灵佑安_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_生气",
+    "name": "灵佑安_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵佑安_高兴",
+    "name": "灵佑安_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "嗓音醇厚富有磁性，语气波澜不惊却充满说服力，展现出极高的专业素养与稳重感，适合传递客观信息。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_中性",
+    "name": "灵惜晨_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_厌恶",
+    "name": "灵惜晨_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_恐惧",
+    "name": "灵惜晨_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_悲伤",
+    "name": "灵惜晨_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_惊讶",
+    "name": "灵惜晨_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_生气",
+    "name": "灵惜晨_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惜晨_高兴",
+    "name": "灵惜晨_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音清脆甜美如同邻家姐姐，语调轻快且充满活力，展现出知性且热情的分享者形象，极具感染力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_中性",
+    "name": "灵宛溪_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_厌恶",
+    "name": "灵宛溪_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_恐惧",
+    "name": "灵宛溪_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_悲伤",
+    "name": "灵宛溪_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_惊讶",
+    "name": "灵宛溪_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_生气",
+    "name": "灵宛溪_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵宛溪_高兴",
+    "name": "灵宛溪_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "温婉大气的知性御姐音，语气舒缓深情，充满岁月沉淀的磁性与治愈感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_中性",
+    "name": "灵言澈_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_厌恶",
+    "name": "灵言澈_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_恐惧",
+    "name": "灵言澈_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_悲伤",
+    "name": "灵言澈_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_惊讶",
+    "name": "灵言澈_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_生气",
+    "name": "灵言澈_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵言澈_高兴",
+    "name": "灵言澈_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "如冬日暖阳般治愈的磁性青年音，语调温柔缱绻，在平稳的叙述中透着浓浓的关切，极具安全感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_中性",
+    "name": "灵溯光_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_厌恶",
+    "name": "灵溯光_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_恐惧",
+    "name": "灵溯光_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_悲伤",
+    "name": "灵溯光_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_惊讶",
+    "name": "灵溯光_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_生气",
+    "name": "灵溯光_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵溯光_高兴",
+    "name": "灵溯光_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有亲和力的现代青年男声，语气中透露出对内容的浓厚兴趣与肯定，听感如沐春风，适合分享与推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_中性",
+    "name": "灵惊弦_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_厌恶",
+    "name": "灵惊弦_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_恐惧",
+    "name": "灵惊弦_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_悲伤",
+    "name": "灵惊弦_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_惊讶",
+    "name": "灵惊弦_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_生气",
+    "name": "灵惊弦_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵惊弦_高兴",
+    "name": "灵惊弦_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音明亮且富有质感，发音精准如教科书般标准。语调中透着知性与干练，既有新闻播音的权威感，又兼具解说的客观性，完美传递出时代发展的确定感。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_中性",
+    "name": "灵嘉肴_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_厌恶",
+    "name": "灵嘉肴_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_恐惧",
+    "name": "灵嘉肴_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_悲伤",
+    "name": "灵嘉肴_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_惊讶",
+    "name": "灵嘉肴_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_生气",
+    "name": "灵嘉肴_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵嘉肴_高兴",
+    "name": "灵嘉肴_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "声音明亮且富有朝气，咬字字正腔圆，透着一种理性的自信，既有专业度又不失亲和力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_中性",
+    "name": "灵黛嗔_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_厌恶",
+    "name": "灵黛嗔_厌恶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_恐惧",
+    "name": "灵黛嗔_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_悲伤",
+    "name": "灵黛嗔_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_惊讶",
+    "name": "灵黛嗔_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_生气",
+    "name": "灵黛嗔_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵黛嗔_高兴",
+    "name": "灵黛嗔_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音温暖知性且富有感染力，语气真诚肯定，如同身边品味极佳的朋友在向你郑重推荐。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_中性",
+    "name": "灵孤影_中性",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_厌恶",
+    "name": "灵孤影_厌恶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_恐惧",
+    "name": "灵孤影_恐惧",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_悲伤",
+    "name": "灵孤影_悲伤",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_惊讶",
+    "name": "灵孤影_惊讶",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_生气",
+    "name": "灵孤影_生气",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵孤影_高兴",
+    "name": "灵孤影_高兴",
+    "language": "zh",
+    "gender": "male",
+    "description": "富有磁性的温暖男声，语调沉稳而真诚，在表达赞赏时流露出自然的满足感与信服力。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_中性",
+    "name": "灵雨汐_中性",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_恐惧",
+    "name": "灵雨汐_恐惧",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_高兴",
+    "name": "灵雨汐_高兴",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_悲伤",
+    "name": "灵雨汐_悲伤",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_惊讶",
+    "name": "灵雨汐_惊讶",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "灵雨汐_生气",
+    "name": "灵雨汐_生气",
+    "language": "zh",
+    "gender": "female",
+    "description": "声音如棉花糖般软糯甜美，带有自然的呼吸感与撒娇意味，听感亲切治愈，透着少女特有的慵懒与乖巧。",
+    "group": "zh-emotion"
+  },
+  {
+    "voice_id": "US_Emma",
+    "name": "US_Emma",
+    "language": "en",
+    "gender": "female",
+    "description": "美式. 语音助手、旁白、产品对话语音",
+    "group": "en"
+  },
+  {
+    "voice_id": "US_James",
+    "name": "US_James",
+    "language": "en",
+    "gender": "male",
+    "description": "美式. 旁白、解说、纪录片朗读",
+    "group": "en",
+    "recommended": true
+  },
+  {
+    "voice_id": "US_Stella",
+    "name": "US_Stella",
+    "language": "en",
+    "gender": "female",
+    "description": "美式. 旁白、自然对话、温暖、年轻",
+    "group": "en",
+    "recommended": true
+  },
+  {
+    "voice_id": "UK_George",
+    "name": "UK_George",
+    "language": "en",
+    "gender": "male",
+    "description": "英式. 有声书、正式播报",
+    "group": "en"
+  },
+  {
+    "voice_id": "UK_Charlotte",
+    "name": "UK_Charlotte",
+    "language": "en",
+    "gender": "female",
+    "description": "英式. 有声书、节奏从容的旁白",
+    "group": "en"
+  }
+]

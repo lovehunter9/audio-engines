@@ -242,6 +242,8 @@ passes. For the same reason the build's final import check must go **through**
 | `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
 | `breezeov` | `beclab/audio-breeze-ov` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 → OpenVINO GPU (amd64) | in progress |
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
+| `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
+| `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
@@ -654,6 +656,16 @@ single 3B. Both images clone upstream at a pinned SHA (same `.pth` trick as
 `soulx`) and run official PyTorch in-process. `flash_attn` is not built: Instruct
 accepts SDPA. Clone always needs the reference transcript (`description` /
 `ref_text`).
+
+**`ming`.** Ming-3.0-tts-0.5B, one CUDA image (`bases/ming`). OpenAI
+`POST /v1/audio/speech` is the trial surface: `voice`, `ref_audio`+`ref_text`,
+and `instructions` are three tasks and a request may carry only one. The Turn
+and the voice library are not inside that route, so ElevenLabs routes, EL
+knobs, and an Intel `load_model` can be added without a second voice store.
+Model IP voices (`origin=model`) and the shared pack (`origin=pack`) are both
+premade. `flash_attn` and `pynini` are not installed.
+
+**`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

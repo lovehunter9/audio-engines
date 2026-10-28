@@ -94,6 +94,14 @@ BASES = {
     "fireredov": [
         (("tts", "tts_clone", "tts_design"), "firered"),
     ],
+    # Ming-3.0-tts-0.5B. One checkpoint does ip, clone, and design. OpenAI HTTP first; the Turn is shared with a later EL surface.
+    "ming": [
+        (("tts", "tts_clone", "tts_design"), "ming"),
+    ],
+    # Intel Ming: same HTTP. VAE, DiT, Qwen2 and campplus compile for the GPU.
+    "mingov": [
+        (("tts", "tts_clone", "tts_design"), "ming"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
@@ -117,6 +125,7 @@ FAMILIES = {
     "crispasr_tts": "voxtral-tts",
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
+    "ming": "ming-tts",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -274,6 +283,31 @@ _MOUNTS = {
         ("POST", "/v1/voices/add",
          "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
     ],
+    # One speech route. voice / ref_audio / instructions each select one Ming task.
+    ("ming", "tts"): [
+        ("POST", "/v1/audio/speech",
+         "Text to speech, OpenAI shape. `voice` speaks a stored voice (model IP or the "
+         "shared pack). Do not combine it with ref_audio or instructions.", True),
+        ("GET", "/v1/audio/voices",
+         "List voices. origin=model is a Ming IP voice; origin=pack is zh-f/zh-m/en-f/en-m. "
+         "Both are premade. origin=user is a voice saved with POST.", False),
+        ("POST", "/v1/audio/voices",
+         "Save a user voice. JSON or multipart. Clone: name + ref_audio (or file) + ref_text. "
+         "Design: name + instructions. Exactly one of those. The voice id is the name. "
+         "A premade id returns 400.", False),
+        ("DELETE", "/v1/audio/voices/{voice_id}",
+         "Delete a user voice. Premade voices (model and pack) return 400.", False),
+    ],
+    ("ming", "tts_clone"): [
+        ("POST", "/v1/audio/speech/clone",
+         "Clone from reference audio (multipart: file + input + ref_text). One-shot; "
+         "the transcript is required. To keep the voice, POST /v1/audio/voices.", True),
+    ],
+    ("ming", "tts_design"): [
+        ("POST", "/v1/audio/speech",
+         "Design a voice from `instructions` on the OpenAI speech body. No voice and no "
+         "ref_audio on that request. To keep the description, POST /v1/audio/voices.", True),
+    ],
     # One endpoint: a script is already the unit of work, and the model has no streaming decode.
     ("tts_dialogue", "tts_dialogue"): [
         ("POST", "/v1/audio/speech",
@@ -316,7 +350,9 @@ _OPERATION_IDS = {
     ("POST", "/v1/audio/speech/batch"): "speech.synthesize.batch",
     ("WS", "/v1/audio/speech/stream"): "speech.synthesize.stream",
     ("GET", "/v1/audio/voices"): "voice.list",
+    ("POST", "/v1/audio/voices"): "voice.create",
     ("POST", "/v1/audio/speech/clone"): "speech.synthesize.reference",
+    ("DELETE", "/v1/audio/voices/{voice_id}"): "voice.delete",
     ("GET", "/v1/voices"): "voice.list",
     ("GET", "/v1/voices/settings/default"): "voice.settings.default",
     ("GET", "/v1/voices/{voice_id}"): "voice.read",

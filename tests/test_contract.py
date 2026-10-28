@@ -119,6 +119,17 @@ for _el_mod in ("firered", "breeze"):
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
             "async_supported": _async,
         }
+for _ming_method, _ming_path, _ming_async, _ming_cap in (
+    ("POST", "/v1/audio/speech", True, "tts"),
+    ("GET", "/v1/audio/voices", False, "tts"),
+    ("POST", "/v1/audio/voices", False, "tts"),
+    ("DELETE", "/v1/audio/voices/{voice_id}", False, "tts"),
+    ("POST", "/v1/audio/speech/clone", True, "tts_clone"),
+    ("POST", "/v1/audio/speech", True, "tts_design"),
+):
+    EXPECTED_CAPABILITY_ENDPOINTS[("ming", _ming_cap, _ming_method, _ming_path)] = {
+        "async_supported": _ming_async,
+    }
 for _tts_key, _tts_meta in list(EXPECTED_CAPABILITY_ENDPOINTS.items()):
     _tts_mod, _tts_cap, _tts_method, _tts_path = _tts_key
     if _tts_mod == "tts":
@@ -158,6 +169,9 @@ class CatalogContractTest(unittest.TestCase):
         clone = catalog.describe_endpoint("tts", "tts_clone", "POST", "/v1/audio/speech", True)
         self.assertEqual(clone["operation_id"], "speech.synthesize.reference")
         self.assertNotEqual(clone["operation_id"], "voice.design.preview")
+        saved = catalog.describe_endpoint("ming", "tts", "POST", "/v1/audio/voices", False)
+        self.assertEqual(saved["operation_id"], "voice.create")
+        self.assertEqual(saved["resource_scope"], "voice")
         persisted = catalog.describe_endpoint("tts", "tts_clone", "POST", "/v1/audio/speech/clone", True)
         self.assertEqual(persisted["operation_id"], "speech.synthesize.reference")
         self.assertEqual(persisted["resource_scope"], "model")
@@ -3178,7 +3192,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
-        for name in ("breezeov", "fireredov"):
+        for name in ("breezeov", "fireredov", "mingov"):
             path = os.path.join(root, name, "deps.Dockerfile")
             with open(path) as fh:
                 text = fh.read()
