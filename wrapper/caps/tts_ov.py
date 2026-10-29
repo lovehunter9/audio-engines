@@ -209,6 +209,38 @@ def _load():
             kind == "custom_voice", kind == "voice_design")
 
 
+def load_checkpoint(path, model_name):
+    """Compile one checkpoint. The three-in-one image calls this per repo; _load stays the single-checkpoint path."""
+    from optimum.intel import OVModelForTextToSpeechSeq2Seq
+
+    device = _device()
+    slug = "".join(ch if ch.isalnum() else "-" for ch in str(model_name))[:80].strip("-") or "model"
+    cache = os.path.join(_hub_cache(), "ov-cache", slug)
+    os.makedirs(cache, exist_ok=True)
+    int8 = _igpu_int8()
+    load_8bit = _load_in_8bit(int8, model_name)
+    log.info(
+        "loading %s from %s on OpenVINO %s %s",
+        model_name, path, device, "int8" if int8 else "fp32")
+    ov = OVModelForTextToSpeechSeq2Seq.from_pretrained(
+        path, export=True, device=device, local_files_only=True,
+        cache_dir=_hub_cache(), token=tts.HF_TOKEN,
+        load_in_8bit=load_8bit,
+        ov_config={"CACHE_DIR": cache})
+    kind = str(getattr(ov, "_tts_model_type", "") or "").strip().lower()
+    speakers = []
+    if kind == "custom_voice":
+        speakers = list(ov.get_supported_speakers() or [])
+    elif not kind:
+        kind = "base"
+    rate = int(getattr(ov, "sampling_rate", tts.OUT_SR) or tts.OUT_SR)
+    _install_codec_buckets(ov)
+    from . import tts_ov_frame
+    tts_ov_frame.install(ov, path, device, cache, compress_frame_int8 if int8 else None)
+    return (_OpenVINOQwen3TTS(ov, rate), speakers,
+            kind == "custom_voice", kind == "voice_design")
+
+
 def build_app(supports):
     return tts.build_app(supports)
 

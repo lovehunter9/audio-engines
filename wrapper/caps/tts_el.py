@@ -19,7 +19,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response, StreamingResponse
 
 from .. import hfgate
@@ -244,6 +244,11 @@ _FORMAT_TOKENS = {
     "wav_44100": ("wav", 44100, None),
     "wav_48000": ("wav", 48000, None),
     "pcm_24000": ("pcm", 24000, None),
+    # OpenAI response_format names. wav/pcm/flac stay at the model's 24 kHz.
+    "wav": ("wav", 24000, None),
+    "pcm": ("pcm", 24000, None),
+    "flac": ("flac", 24000, None),
+    "ogg": ("opus", 24000, None),
 }
 
 
@@ -653,6 +658,25 @@ def _patch_card(target, want, pack=None):
     (target / "meta.json").write_text(json.dumps(have, ensure_ascii=False, indent=2))
 
 
+def _native_pack(backend):
+    """A backend's own premade directory. Absent on FireRed and Breeze."""
+    getter = getattr(backend, "native_voices_dir", None)
+    if not callable(getter):
+        return None
+    path = getter()
+    if not path:
+        return None
+    path = Path(path)
+    return path if path.is_dir() else None
+
+
+def _pack_for(vid, pack, native_pack):
+    """Official-speaker wavs live beside the shared pack, not inside it."""
+    if native_pack is not None and (native_pack / vid / "meta.json").is_file():
+        return native_pack
+    return pack
+
+
 def seed_builtins(module, dest, backend=None, cards=None, pack=None):
     """Reconcile premade cards with the current union. User clones / designs stay.
 
@@ -681,6 +705,7 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
         pack = builtin_voices_dir(module)
     else:
         pack = Path(pack)
+    native_pack = _native_pack(backend)
     for child in list(dest.iterdir()):
         if not _premade_dir(child):
             continue
@@ -688,16 +713,17 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
             shutil.rmtree(child)
     for vid, card in want.items():
         target = dest / vid
+        card_pack = _pack_for(vid, pack, native_pack)
         if target.exists() and not _premade_dir(target):
             continue
         if not target.exists():
-            _plant(target, card, pack)
+            _plant(target, card, card_pack)
             continue
-        if _replant_needed(target, card, pack):
+        if _replant_needed(target, card, card_pack):
             shutil.rmtree(target)
-            _plant(target, card, pack)
+            _plant(target, card, card_pack)
             continue
-        _patch_card(target, card, pack)
+        _patch_card(target, card, card_pack)
     planted = {c["voice_id"]: c for c in load_voice_cards(dest, category="premade")}
     return [planted[vid] for vid in want if vid in planted]
 
@@ -1968,14 +1994,15 @@ def _audio_response(audio, sr, fmt, stream=False, *, meta=None, text="", setting
     return tasks.Binary(body, mime, suffix="." + fmt, headers=headers)
 
 
-def build_app(supports, module=None):
+def build_app(supports, module=None, openai_alias=False, task_legacy=False):
     module = module or _MODULE["name"] or "firered"
     _MODULE["name"] = module
-    app = FastAPI(title="audio-tts (%s, ElevenLabs shape)" % module)
+    kind = "OpenAI and ElevenLabs" if openai_alias else "ElevenLabs shape"
+    app = FastAPI(title="audio-tts (%s, %s)" % (module, kind))
     mount_metrics(app)
     register(app, model_name=MODEL_NAME, module=module, served=supports, repo=repo_id(),
              is_ready=lambda: _state["ready"], error=lambda: _state["error"],
-             task_api=True, task_legacy=False,
+             task_api=True, task_legacy=task_legacy,
              sample_rate=_state.get("sample_rate") or 24000)
     _args.warn_unclaimed(log)
 
@@ -2210,6 +2237,7 @@ def build_app(supports, module=None):
             text = str(payload.get("text") or "").strip() or _preview_text(instruction)
             async_ = request.query_params.get("async")
             takes = _preview_takes(payload)
+            settings = _merged_settings(None, payload)
 
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="design")
@@ -2217,8 +2245,8 @@ def build_app(supports, module=None):
                 for take in range(takes):
                     # Take 0 is the one this endpoint has always returned.
                     with _gen_lock:
-                        audio, sr, extra = _backend().design(instruction, text, ctx=ctx,
-                                                             seed_jitter=take)
+                        audio, sr, extra = _backend().design(
+                            instruction, text, ctx=ctx, settings=settings, seed_jitter=take)
                     gid, wav, sr = _store().put_preview(instruction, audio, sr, text, extra=extra)
                     ctx.meter(output_seconds=seconds(audio, sr))
                     ctx.progress(ratio=(take + 1) / float(takes), stage="design")
@@ -2350,6 +2378,217 @@ def build_app(supports, module=None):
             return await tasks.dispatch(async_, "tts_clone", MODEL_NAME, _work,
                                         fail="voice clone failed")
 
+    if openai_alias and has_tts:
+        @app.post("/v1/audio/speech")
+        async def openai_speech(request: Request):
+            try:
+                payload = dict(await request.json())
+            except Exception:
+                raise HTTPException(
+                    status_code=400,
+                    detail="body must be JSON in the OpenAI /v1/audio/speech shape")
+            return await _synthesize_payload(payload, request.query_params.get("async"),
+                                             default_fmt="wav")
+
+        @app.get("/v1/audio/voices")
+        def openai_voices():
+            _require_ready()
+            rows = []
+            for meta in _store().list():
+                row = _public_voice(meta)
+                row["id"] = row["voice_id"]
+                row["voice"] = row["voice_id"]
+                rows.append(row)
+            return {"model": MODEL_NAME, "voices": rows}
+
+        def _openai_row(meta):
+            row = _public_voice(meta)
+            row["id"] = row["voice_id"]
+            row["voice"] = row["voice_id"]
+            return row
+
+        @app.post("/v1/audio/voices")
+        async def openai_voices_add(request: Request):
+            _require_ready()
+            ctype = request.headers.get("content-type") or ""
+            upload = None
+            if "multipart/form-data" in ctype:
+                form = await request.form()
+                name = str(form.get("name") or "")
+                ref_text = str(form.get("ref_text") or "")
+                instructions = str(form.get("instructions") or "")
+                sample = str(form.get("input") or form.get("text") or "")
+                upload = form.get("file")
+                data = await upload.read() if upload is not None and hasattr(upload, "read") else b""
+                async_flag = form.get("async")
+            else:
+                try:
+                    body = dict(await request.json())
+                except Exception:
+                    raise HTTPException(
+                        status_code=400, detail="body must be JSON or multipart")
+                name = str(body.get("name") or "")
+                ref_text = str(body.get("ref_text") or "")
+                instructions = str(body.get("instructions") or "")
+                sample = str(body.get("input") or body.get("text") or "")
+                data = b""
+                if body.get("ref_audio"):
+                    data, _suffix = _ref_bytes(body.get("ref_audio"))
+                async_flag = request.query_params.get("async")
+            if not name.strip():
+                raise HTTPException(status_code=400, detail="name is required")
+            has_ref = bool(data)
+            has_design = bool(instructions.strip())
+            if has_ref == has_design:
+                raise HTTPException(
+                    status_code=400,
+                    detail="send exactly one of ref_audio (with ref_text) or instructions")
+            if has_ref:
+                if not ref_text.strip():
+                    raise HTTPException(
+                        status_code=400,
+                        detail="ref_text (the exact transcript of the reference) is required")
+                _check_ref_audio(data)
+                meta = _store().add_clone(name.strip(), _as_prompt_wav(data), ref_text.strip())
+                return _openai_row(meta)
+            if not sample.strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="input (a sample line to bake the designed voice) is required")
+            _check_design_text(instructions)
+
+            def _work(ctx):
+                ctx.progress(ratio=0.0, stage="design")
+                audio, sr = _speak_design(instructions.strip(), sample.strip(), ctx=ctx)
+                gid, _wav, _sr = _store().put_preview(
+                    instructions.strip(), audio, sr, sample.strip())
+                meta = _store().promote_preview(gid, name.strip(), instructions.strip())
+                ctx.progress(ratio=1.0, stage="done")
+                return _openai_row(meta)
+
+            return await tasks.dispatch(async_flag, "tts_design", MODEL_NAME, _work,
+                                        fail="voice design save failed")
+
+        @app.delete("/v1/audio/voices/{voice_id}")
+        def openai_voices_delete(voice_id: str):
+            _require_ready()
+            return _store().delete(voice_id)
+
+        @app.websocket("/v1/audio/speech/stream")
+        async def openai_speech_stream(ws: WebSocket):
+            await ws.accept()
+            if not _state["ready"]:
+                await ws.send_text(json.dumps({
+                    "type": "error", "message": _state["error"] or "engine not ready"}))
+                await ws.close()
+                return
+            cfg = {"voice": "", "instructions": ""}
+            pending = ""
+            await ws.send_text(json.dumps({
+                "type": "session.ready", "model": MODEL_NAME,
+                "sample_rate": int(_state.get("sample_rate") or 24000), "format": "pcm"}))
+
+            def split_sentences(buf):
+                out, start = [], 0
+                for i, ch in enumerate(buf):
+                    if ch in "。！？!?\n" or (ch == "." and i + 1 < len(buf) and buf[i + 1] == " "):
+                        piece = buf[start:i + 1].strip()
+                        if piece:
+                            out.append(piece)
+                        start = i + 1
+                return out, buf[start:]
+
+            async def speak_one(text):
+                voice = cfg["voice"].strip()
+                instructions = cfg["instructions"].strip()
+                if voice:
+                    audio, _sr = await asyncio.to_thread(
+                        _speak_voice, voice, text, instructions or None)
+                elif instructions:
+                    audio, _sr = await asyncio.to_thread(_speak_design, instructions, text)
+                else:
+                    raise HTTPException(status_code=400, detail="voice or instructions is required")
+                await ws.send_bytes(_pcm16(audio))
+
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg["type"] == "websocket.disconnect":
+                        return
+                    raw = msg.get("text")
+                    if not raw:
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "the socket carries JSON text frames"}))
+                        continue
+                    try:
+                        frame = json.loads(raw)
+                    except json.JSONDecodeError:
+                        await ws.send_text(json.dumps({"type": "error", "message": "frame is not JSON"}))
+                        continue
+                    kind = str(frame.get("type") or "")
+                    session = frame.get("session") if isinstance(frame.get("session"), dict) else frame
+                    if kind == "session.update":
+                        if session.get("voice"):
+                            cfg["voice"] = str(session.get("voice"))
+                        if session.get("instructions"):
+                            cfg["instructions"] = str(session.get("instructions"))
+                    elif kind == "input.text":
+                        pending += str(frame.get("text") or "")
+                        ready, pending = split_sentences(pending)
+                        for piece in ready:
+                            await speak_one(piece)
+                    elif kind == "input.done":
+                        tail = (pending + str(frame.get("text") or "")).strip()
+                        pending = ""
+                        if tail:
+                            await speak_one(tail)
+                        await ws.send_text(json.dumps({"type": "session.done"}))
+                    elif kind == "session.close":
+                        await ws.close()
+                        return
+                    else:
+                        await ws.send_text(json.dumps({
+                            "type": "error", "message": "unknown frame type %r" % kind}))
+            except WebSocketDisconnect:
+                return
+            except Exception as e:
+                detail = getattr(e, "detail", None) or str(e)
+                try:
+                    await ws.send_text(json.dumps({"type": "error", "message": detail}))
+                    await ws.close()
+                except Exception:
+                    return
+
+    if openai_alias and has_clone:
+        @app.post("/v1/audio/speech/clone")
+        async def openai_clone(file: UploadFile = File(...),
+                               text: str = Form(..., alias="input"),
+                               ref_text: str = Form(default=""),
+                               instructions: str = Form(default=""),
+                               fmt: str = Form(default="wav", alias="response_format"),
+                               async_: str = Form(default=None, alias="async")):
+            _require_ready()
+            data = await file.read()
+            if not data:
+                raise HTTPException(status_code=400, detail="file (the reference audio) is empty")
+            transcript = (ref_text or "").strip()
+            if not transcript:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ref_text (the exact transcript of the reference) is required")
+            _check_ref_audio(data)
+            mime = file.content_type or "audio/wav"
+            payload = {
+                "input": text,
+                "response_format": fmt or "wav",
+                "ref_text": transcript,
+                "ref_audio": "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii")),
+            }
+            if instructions.strip():
+                payload["instructions"] = instructions.strip()
+            return await _synthesize_payload(payload, async_, default_fmt="wav")
+
     return app
 
 
@@ -2388,7 +2627,8 @@ def install(backend, store=None, sample_rate=24000):
     return _state["store"]
 
 
-def run(supports, *, module, watchdog, load, sample_rate=24000):
+def run(supports, *, module, watchdog, load, sample_rate=24000, openai_alias=False,
+        task_legacy=False):
     _MODULE["name"] = module
 
     def _boot():
@@ -2402,5 +2642,8 @@ def run(supports, *, module, watchdog, load, sample_rate=24000):
             log.exception("load failed: %s", _state["error"])
             raise
 
-    _runtime.serve(supports, _boot, lambda caps: build_app(caps, module=module), watchdog,
-                   timeout_s=BOOT_TIMEOUT_S + WARMUP_TIMEOUT_S)
+    _runtime.serve(
+        supports, _boot,
+        lambda caps: build_app(caps, module=module, openai_alias=openai_alias,
+                                task_legacy=task_legacy),
+        watchdog, timeout_s=BOOT_TIMEOUT_S + WARMUP_TIMEOUT_S)
