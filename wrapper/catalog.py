@@ -66,6 +66,14 @@ BASES = {
     "qwen3ttsov": [
         (("tts", "tts_clone"), "tts_ov"),
     ],
+    # One product: Base speaks, VoiceDesign previews, nine official speakers are this image's cards; OpenAI aliases sit next to ElevenLabs.
+    "qwen3voice": [
+        (("tts", "tts_clone", "tts_design"), "qwen3_voice"),
+    ],
+    # Intel iGPU / Arc. Same module and the same HTTP as qwen3voice; weights compile through OpenVINO.
+    "qwen3voiceov": [
+        (("tts", "tts_clone", "tts_design"), "qwen3_voice"),
+    ],
     # Dasheng-AudioGen: sound effects from English-only captions, so translation sits upstream.
     "dasheng": [
         (("sound_fx",), "sound_fx"),
@@ -120,6 +128,7 @@ FAMILIES = {
     "diar_nemotron": "nemotron-3-diarization",
     "tts": "qwen3-tts",
     "tts_ov": "qwen3-tts",
+    "qwen3_voice": "qwen3-tts",
     "sound_fx": "dasheng-audiogen",
     "tts_dialogue": "soulx-podcast",
     "crispasr_tts": "voxtral-tts",
@@ -308,6 +317,51 @@ _MOUNTS = {
          "Design a voice from `instructions` on the OpenAI speech body. No voice and no "
          "ref_audio on that request. To keep the description, POST /v1/audio/voices.", True),
     ],
+    ("qwen3_voice", "tts"): [
+        ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
+        ("GET", "/v1/voices/settings/default", "Default voice_settings (ElevenLabs)", False),
+        ("GET", "/v1/voices/{voice_id}", "Get one voice by id", False),
+        ("GET", "/v1/voices/{voice_id}/settings", "Get stored voice_settings for a voice", False),
+        ("POST", "/v1/voices/{voice_id}/settings/edit",
+         "Edit the five voice_settings: stability, similarity_boost, style, "
+         "use_speaker_boost, speed. Defaults are a no-op. Premade voices can be edited.", False),
+        ("DELETE", "/v1/voices/{voice_id}",
+         "Delete a cloned or designed voice; premade voices return 400", False),
+        ("POST", "/v1/voices/{voice_id}/edit",
+         "Edit a cloned or designed voice (multipart: name required); premade returns 400", False),
+        ("POST", "/v1/text-to-speech/{voice_id}",
+         "Speak with a stored voice_id (ElevenLabs JSON: text, not input)", True),
+        ("POST", "/v1/text-to-speech/{voice_id}/stream",
+         "Speak and flush each slice (output_format: pcm_24000 / mp3_44100_128 / wav_24000 / …)", False),
+        ("GET", "/v1/history", "List generated speech history", False),
+        ("POST", "/v1/history/download", "Download multiple history items", False),
+        ("GET", "/v1/history/{history_item_id}", "Read speech history metadata", False),
+        ("GET", "/v1/history/{history_item_id}/audio", "Read generated speech audio", False),
+        ("DELETE", "/v1/history/{history_item_id}", "Delete generated speech history", False),
+        ("POST", "/v1/audio/speech",
+         "OpenAI speech: JSON input + voice, or instructions with no voice to design once", True),
+        ("GET", "/v1/audio/voices", "OpenAI list of the same voice table", False),
+        ("POST", "/v1/audio/voices",
+         "Save a user voice. Clone: name + ref_audio (or file) + ref_text. "
+         "Design: name + instructions + input (the line baked into the sample). "
+         "Exactly one of ref_audio or instructions.", False),
+        ("DELETE", "/v1/audio/voices/{voice_id}",
+         "Delete a user voice. Premade voices return 400.", False),
+        ("WS", "/v1/audio/speech/stream",
+         "OpenAI streaming speech (JSON text frames, pcm out)", False),
+    ],
+    ("qwen3_voice", "tts_design"): [
+        ("POST", "/v1/text-to-voice/design",
+         "Voice design preview (JSON voice_description; returns generated_voice_id + audio)", True),
+        ("POST", "/v1/text-to-voice",
+         "Persist a design preview as a voice_id (JSON generated_voice_id + voice_name)", True),
+    ],
+    ("qwen3_voice", "tts_clone"): [
+        ("POST", "/v1/voices/add",
+         "Clone a voice (multipart name + files[]; description/ref_text is the transcript)", True),
+        ("POST", "/v1/audio/speech/clone",
+         "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
+    ],
     # One endpoint: a script is already the unit of work, and the model has no streaming decode.
     ("tts_dialogue", "tts_dialogue"): [
         ("POST", "/v1/audio/speech",
@@ -430,7 +484,7 @@ def _parameters(module, operation_id):
         else:
             params.append({"name": "response_format", "type": "string", "default": "wav",
                            "enum": ["wav", "pcm", "mp3", "flac", "ogg"]})
-    if module in ("firered", "breeze") and operation_id.startswith(("speech.", "voice.settings")):
+    if module in ("firered", "breeze", "qwen3_voice") and operation_id.startswith(("speech.", "voice.settings")):
         params.extend([
             {"name": "speed", "type": "number", "default": 1.0, "minimum": 0.25, "maximum": 4.0},
             {"name": "stability", "type": "number", "default": 0.5, "minimum": 0.0, "maximum": 1.0},

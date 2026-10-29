@@ -235,6 +235,8 @@ passes. For the same reason the build's final import check must go **through**
 | `nemotron-ov` | `beclab/audio-nemotron-ov` | `diar`, `diar_stream` | the same Sortformer; pre-encode, acoustic encoder, speaker head and mel on OpenVINO (Intel GPU, amd64 only) | in progress |
 | `qwen3tts` | `beclab/audio-qwen3tts` | `tts`, `tts_clone` | faster-qwen3-tts (in-process) | in progress |
 | `qwen3ttsov` | `beclab/audio-qwen3tts-ov` | `tts`, `tts_clone` | Qwen3-TTS on OpenVINO (Intel iGPU / Arc, amd64); same HTTP as `qwen3tts` | in progress |
+| `qwen3voice` | `beclab/audio-qwen3voice` | `tts`, `tts_clone`, `tts_design` | Qwen3-TTS Base + on-demand VoiceDesign; official speakers are private cards; OpenAI and ElevenLabs | in progress |
+| `qwen3voiceov` | `beclab/audio-qwen3voice-ov` | `tts`, `tts_clone`, `tts_design` | same three-in-one on OpenVINO (Intel iGPU / Arc, amd64); same HTTP as `qwen3voice` | in progress |
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
