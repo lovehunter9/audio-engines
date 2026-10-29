@@ -1,0 +1,29 @@
+# qwen3voice OpenVINO CI: dev images only. Dispatch on the fork; do not publish to beclab from here.
+name: qwen3voice-ov-ci
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: lovehunter9
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: qwen3voice-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: qwen3voiceov
+      repo: audio-qwen3voice-ov
+      # Intel GPU is x86_64. There is no arm64 OpenVINO GPU plugin we would ship.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
