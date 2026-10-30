@@ -252,20 +252,52 @@ _FORMAT_TOKENS = {
 }
 
 
-def _output_format(raw, default="mp3_44100_128"):
-    """ElevenLabs `mp3_44100_128` / `wav_44100` / raw `pcm_24000` → OutSpec."""
+def _output_format(raw, default="mp3_44100_128", *, openai=False):
+    """ElevenLabs `mp3_44100_128` / `wav_44100` / raw `pcm_24000` → OutSpec. `opus` is an OpenAI response_format name, and ElevenLabs output_format stays as it was."""
     if isinstance(raw, OutSpec):
         return raw
     token = str(raw or default).strip().lower()
     if not token:
         token = default
+    if token == "opus" and openai:
+        return OutSpec("opus", 24000, None, "opus")
     if token in _FORMAT_TOKENS:
         kind, sr, br = _FORMAT_TOKENS[token]
         return OutSpec(kind, sr, br, token)
+    names = [k for k in _FORMAT_TOKENS if k != "mp3"]
+    if openai:
+        names.append("opus")
     raise HTTPException(
         status_code=400,
-        detail="output_format must be one of %s" % ", ".join(
-            k for k in _FORMAT_TOKENS if k != "mp3"))
+        detail="output_format must be one of %s" % ", ".join(names))
+
+
+def _openai_sampling(payload):
+    """Sampling fields the three separate Qwen models accept. Ming applies the ones it has."""
+    out = {}
+    casts = (("temperature", float), ("top_k", int), ("top_p", float),
+             ("max_new_tokens", int), ("repetition_penalty", float))
+    for key, cast in casts:
+        if payload.get(key) is None:
+            continue
+        try:
+            out[key] = cast(payload[key])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="%s must be a number" % key)
+    lang = payload.get("language")
+    if lang is not None and str(lang).strip():
+        out["language"] = str(lang).strip()
+    xvec = payload.get("x_vector_only_mode")
+    if xvec is not None:
+        if isinstance(xvec, bool):
+            out["x_vector_only"] = xvec
+        else:
+            out["x_vector_only"] = str(xvec).strip().lower() in ("1", "true", "yes", "on")
+    return out
+
+
+def _sampling_kw(sampling):
+    return {"sampling": sampling} if sampling else {}
 
 
 def _as_spec(fmt):
@@ -1269,7 +1301,10 @@ def _normalize_settings(raw, partial=False):
         if v is not None:
             out["speed"] = v
     if "use_speaker_boost" in raw:
-        out["use_speaker_boost"] = bool(raw["use_speaker_boost"])
+        flag = raw["use_speaker_boost"]
+        if isinstance(flag, str):
+            flag = flag.strip().lower() not in ("0", "false", "no", "off", "")
+        out["use_speaker_boost"] = bool(flag)
     return out
 
 
@@ -1544,8 +1579,29 @@ def _design_identity(meta):
     return cat == "premade"
 
 
-def _speak_voice(vid, text, instruction=None, ctx=None, settings=None):
+def _native_premade(vid):
+    """A premade card with no sample and no design text. Ming IP voices speak this way."""
     backend = _backend()
+    fn = getattr(backend, "speak_native", None)
+    if not callable(fn):
+        return None
+    meta = _store().get(vid)
+    if not meta or str(meta.get("category") or "") != "premade":
+        return None
+    wav_path, _transcript, _stored = _store().prompt(vid)
+    if wav_path is not None or (meta.get("instruction") or "").strip():
+        return None
+    return meta, fn
+
+
+def _speak_voice(vid, text, instruction=None, ctx=None, settings=None, sampling=None):
+    backend = _backend()
+    extra = _sampling_kw(sampling)
+    native = _native_premade(vid)
+    if native:
+        meta, fn = native
+        with _gen_lock:
+            return fn(meta, text, instruction=instruction, ctx=ctx, settings=settings, **extra)
     meta, wav_path, transcript = _ensure_frozen(vid, ctx=ctx)
     # FireRed design-identity stays on generate_voice_design; Breeze factory blurbs are not Voice Direction.
     if getattr(backend, "prefer_design_speak", False) and _design_identity(meta):
@@ -1562,10 +1618,11 @@ def _speak_voice(vid, text, instruction=None, ctx=None, settings=None):
     prompt, sr = _load_prompt_wav(wav_path)
     with _gen_lock:
         return backend.clone(text, prompt, sr, transcript or text,
-                             instruction=speak_as, ctx=ctx, settings=settings)
+                             instruction=speak_as, ctx=ctx, settings=settings, **extra)
 
 
-def _speak_ref(text, wav_bytes, transcript, instruction=None, ctx=None, settings=None):
+def _speak_ref(text, wav_bytes, transcript, instruction=None, ctx=None, settings=None,
+               sampling=None):
     import soundfile as sf
 
     backend = _backend()
@@ -1578,19 +1635,26 @@ def _speak_ref(text, wav_bytes, transcript, instruction=None, ctx=None, settings
     with _gen_lock:
         return backend.clone(text, audio, int(sr), transcript or "",
                              instruction=(instruction or "").strip(), ctx=ctx,
-                             settings=settings)
+                             settings=settings, **_sampling_kw(sampling))
 
 
-def _speak_design(instruction, text, ctx=None, settings=None):
+def _speak_design(instruction, text, ctx=None, settings=None, sampling=None):
     backend = _backend()
     with _gen_lock:
-        audio, sr, _extra = backend.design(instruction, text, ctx=ctx, settings=settings)
+        audio, sr, _extra = backend.design(
+            instruction, text, ctx=ctx, settings=settings, **_sampling_kw(sampling))
     return audio, sr
 
 
 def _iter_speak_voice(vid, text, instruction=None, ctx=None, settings=None):
     """Yield (wave, sr) as each slice finishes. Caller holds no lock; we take _gen_lock."""
     backend = _backend()
+    native = _native_premade(vid)
+    if native:
+        meta, fn = native
+        with _gen_lock:
+            yield fn(meta, text, instruction=instruction, ctx=ctx, settings=settings)
+        return
     meta, wav_path, transcript = _ensure_frozen(vid, ctx=ctx)
     if getattr(backend, "prefer_design_speak", False) and _design_identity(meta):
         speak_as = (instruction or _design_instruction(meta) or "").strip()
@@ -2020,7 +2084,8 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
     def _voice_of(payload):
         return str(payload.get("voice_id") or payload.get("voice") or "").strip()
 
-    async def _synthesize_payload(payload, async_flag, *, stream=False, default_fmt="wav"):
+    async def _synthesize_payload(payload, async_flag, *, stream=False, default_fmt="wav",
+                                  openai=False):
         _require_ready()
         if stream and tasks.truthy(async_flag):
             raise HTTPException(status_code=400,
@@ -2029,13 +2094,30 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
         text = _text_of(payload)
         if not text:
             raise HTTPException(status_code=400, detail="text (the words to speak) is required")
+        if openai and payload.get("stream"):
+            asked = str(payload.get("response_format") or payload.get("output_format")
+                        or default_fmt).strip().lower()
+            if asked not in ("pcm", "wav"):
+                raise HTTPException(
+                    status_code=400,
+                    detail="stream supports response_format pcm or wav; "
+                           "%s only exists as a whole file" % asked)
+            stream = True
         fmt = _output_format(payload.get("output_format") or payload.get("response_format"),
-                             default_fmt)
+                             default_fmt, openai=openai)
         voice = _voice_of(payload)
         instructions = str(payload.get("instructions") or payload.get("voice_description") or "").strip()
         ref = payload.get("ref_audio")
         ref_text = str(payload.get("ref_text") or payload.get("description") or "").strip()
         settings = _merged_settings(_store().get(voice) if voice else None, payload)
+        sampling = _openai_sampling(payload) if openai else None
+        if openai and voice and not ref and _store().get(voice) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="unknown voice %r; see GET /v1/audio/voices" % voice)
+        if openai and ref and (not ref_text or (sampling or {}).get("x_vector_only")):
+            sampling = dict(sampling or {})
+            sampling["x_vector_only"] = True
 
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="synthesize")
@@ -2043,25 +2125,27 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                 data, _suffix = _ref_bytes(ref)
                 if not ref_text and not has_clone:
                     raise HTTPException(status_code=400, detail="this instance does not clone")
-                if not ref_text:
+                if not ref_text and not (sampling or {}).get("x_vector_only"):
                     raise HTTPException(status_code=400,
                                         detail="ref_text (the exact transcript of the reference) is required")
                 _check_ref_audio(data)
                 audio, sr = _speak_ref(text, data, ref_text, instruction=instructions, ctx=ctx,
-                                       settings=settings)
+                                       settings=settings, sampling=sampling)
             elif voice:
                 audio, sr = _speak_voice(voice, text, instruction=instructions, ctx=ctx,
-                                         settings=settings)
+                                         settings=settings, sampling=sampling)
             elif instructions:
                 _check_design_text(instructions)
-                audio, sr = _speak_design(instructions, text, ctx=ctx, settings=settings)
+                audio, sr = _speak_design(instructions, text, ctx=ctx, settings=settings,
+                                         sampling=sampling)
             else:
                 voices = _store().list()
                 if not voices:
                     raise HTTPException(status_code=400,
                                         detail="voice_id is required (this instance has no voices yet)")
                 audio, sr = _speak_voice(voices[0]["voice_id"], text, ctx=ctx,
-                                         settings=_merged_settings(voices[0], payload))
+                                         settings=_merged_settings(voices[0], payload),
+                                         sampling=sampling)
             ctx.meter(output_seconds=seconds(audio, sr))
             ctx.progress(ratio=1.0, stage="done")
             voice_meta = _store().get(voice) if voice else None
@@ -2388,7 +2472,7 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                     status_code=400,
                     detail="body must be JSON in the OpenAI /v1/audio/speech shape")
             return await _synthesize_payload(payload, request.query_params.get("async"),
-                                             default_fmt="wav")
+                                             default_fmt="wav", openai=True)
 
         @app.get("/v1/audio/voices")
         def openai_voices():
@@ -2474,6 +2558,80 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
             _require_ready()
             return _store().delete(voice_id)
 
+        @app.post("/v1/audio/speech/batch")
+        async def openai_speech_batch(request: Request):
+            _require_ready()
+            try:
+                payload = dict(await request.json())
+            except Exception:
+                raise HTTPException(
+                    status_code=400, detail="body must be JSON for /v1/audio/speech/batch")
+            items = payload.get("items")
+            if not isinstance(items, list) or not items or len(items) > 32:
+                raise HTTPException(status_code=400, detail="items must be a non-empty array (1–32)")
+            shared = {k: v for k, v in payload.items() if k != "items"}
+            rows = []
+            for i, item in enumerate(items):
+                if not isinstance(item, dict):
+                    raise HTTPException(status_code=400, detail="items[%d] must be an object" % i)
+                row = dict(shared)
+                row.update(item)
+                row.pop("stream", None)
+                if not str(row.get("input") or row.get("text") or "").strip():
+                    raise HTTPException(status_code=400, detail="input (the text to speak) is required")
+                voice = str(row.get("voice") or row.get("voice_id") or "").strip()
+                if voice and not row.get("ref_audio") and _store().get(voice) is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="unknown voice %r; see GET /v1/audio/voices" % voice)
+                _openai_sampling(row)
+                _output_format(row.get("output_format") or row.get("response_format"),
+                               "wav", openai=True)
+                rows.append(row)
+
+            def _work(ctx):
+                n = len(rows)
+                ctx.progress(ratio=0.0, stage="batch", done=0, total=n)
+                out = []
+                for i, row in enumerate(rows):
+                    text = str(row.get("input") or row.get("text") or "").strip()
+                    voice = str(row.get("voice") or row.get("voice_id") or "").strip()
+                    instructions = str(row.get("instructions") or "").strip()
+                    ref = row.get("ref_audio")
+                    ref_text = str(row.get("ref_text") or "").strip()
+                    sampling = _openai_sampling(row)
+                    if ref and (not ref_text or sampling.get("x_vector_only")):
+                        sampling["x_vector_only"] = True
+                    settings = _merged_settings(_store().get(voice) if voice else None, row)
+                    if ref:
+                        data, _suffix = _ref_bytes(ref)
+                        _check_ref_audio(data)
+                        audio, sr = _speak_ref(text, data, ref_text, instruction=instructions,
+                                               settings=settings, sampling=sampling)
+                    elif voice:
+                        audio, sr = _speak_voice(voice, text, instruction=instructions,
+                                                 settings=settings, sampling=sampling)
+                    elif instructions:
+                        _check_design_text(instructions)
+                        audio, sr = _speak_design(instructions, text, settings=settings,
+                                                 sampling=sampling)
+                    else:
+                        raise HTTPException(status_code=400, detail="voice or instructions is required")
+                    spec = _output_format(row.get("output_format") or row.get("response_format"),
+                                          "wav", openai=True)
+                    body, kind = _encode_edge(audio, sr, spec)
+                    ctx.meter(output_seconds=seconds(audio, sr))
+                    out.append({
+                        "index": i, "format": kind,
+                        "sample_rate": int(spec.sr or sr),
+                        "audio": base64.b64encode(body).decode("ascii"),
+                    })
+                    ctx.progress(ratio=(i + 1) / n, stage="batch", done=i + 1, total=n)
+                return {"model": MODEL_NAME, "items": out}
+
+            return await tasks.dispatch(request.query_params.get("async"), "tts", MODEL_NAME, _work,
+                                        fail="speech batch failed")
+
         @app.websocket("/v1/audio/speech/stream")
         async def openai_speech_stream(ws: WebSocket):
             await ws.accept()
@@ -2482,7 +2640,12 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                     "type": "error", "message": _state["error"] or "engine not ready"}))
                 await ws.close()
                 return
-            cfg = {"voice": "", "instructions": ""}
+            cfg = {
+                "voice": "", "instructions": "", "language": None, "ref_audio": None,
+                "ref_text": "", "x_vector_only_mode": None, "chunk_size": None,
+            }
+            session_keys = ("voice", "instructions", "language", "ref_audio", "ref_text",
+                            "x_vector_only_mode", "chunk_size")
             pending = ""
             await ws.send_text(json.dumps({
                 "type": "session.ready", "model": MODEL_NAME,
@@ -2498,14 +2661,56 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                         start = i + 1
                 return out, buf[start:]
 
+            def session_fields(frame):
+                nested = frame.get("session") if isinstance(frame.get("session"), dict) else {}
+                merged = dict(nested)
+                for key in session_keys:
+                    if frame.get(key) is not None:
+                        merged[key] = frame[key]
+                return merged
+
+            async def apply_session(session, echo_ready):
+                previous = cfg["voice"]
+                for key in session_keys:
+                    if session.get(key) is not None:
+                        cfg[key] = session[key]
+                voice = str(cfg.get("voice") or "").strip()
+                if voice and _store().get(voice) is None:
+                    await ws.send_text(json.dumps({
+                        "type": "error",
+                        "message": "unknown voice %r; see GET /v1/audio/voices" % voice}))
+                    cfg["voice"] = previous
+                if echo_ready:
+                    await ws.send_text(json.dumps({
+                        "type": "session.ready", "model": MODEL_NAME,
+                        "sample_rate": int(_state.get("sample_rate") or 24000), "format": "pcm"}))
+
             async def speak_one(text):
-                voice = cfg["voice"].strip()
-                instructions = cfg["instructions"].strip()
-                if voice:
+                voice = str(cfg.get("voice") or "").strip()
+                instructions = str(cfg.get("instructions") or "").strip()
+                sampling = {}
+                if cfg.get("language"):
+                    sampling["language"] = str(cfg["language"])
+                flag = cfg.get("x_vector_only_mode")
+                if flag is not None:
+                    sampling["x_vector_only"] = flag if isinstance(flag, bool) else (
+                        str(flag).strip().lower() in ("1", "true", "yes", "on"))
+                ref = cfg.get("ref_audio")
+                if ref:
+                    data, _suffix = _ref_bytes(ref)
+                    ref_text = str(cfg.get("ref_text") or "").strip()
+                    if not ref_text:
+                        sampling["x_vector_only"] = True
                     audio, _sr = await asyncio.to_thread(
-                        _speak_voice, voice, text, instructions or None)
+                        _speak_ref, text, data, ref_text, instructions or None, None, None,
+                        sampling or None)
+                elif voice:
+                    audio, _sr = await asyncio.to_thread(
+                        _speak_voice, voice, text, instructions or None, None, None,
+                        sampling or None)
                 elif instructions:
-                    audio, _sr = await asyncio.to_thread(_speak_design, instructions, text)
+                    audio, _sr = await asyncio.to_thread(
+                        _speak_design, instructions, text, None, None, sampling or None)
                 else:
                     raise HTTPException(status_code=400, detail="voice or instructions is required")
                 await ws.send_bytes(_pcm16(audio))
@@ -2527,12 +2732,8 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                         await ws.send_text(json.dumps({"type": "error", "message": "frame is not JSON"}))
                         continue
                     kind = str(frame.get("type") or "")
-                    session = frame.get("session") if isinstance(frame.get("session"), dict) else frame
-                    if kind == "session.update":
-                        if session.get("voice"):
-                            cfg["voice"] = str(session.get("voice"))
-                        if session.get("instructions"):
-                            cfg["instructions"] = str(session.get("instructions"))
+                    if kind in ("session.update", "session.config"):
+                        await apply_session(session_fields(frame), echo_ready=(kind == "session.config"))
                     elif kind == "input.text":
                         pending += str(frame.get("text") or "")
                         ready, pending = split_sentences(pending)
@@ -2565,29 +2766,49 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
         async def openai_clone(file: UploadFile = File(...),
                                text: str = Form(..., alias="input"),
                                ref_text: str = Form(default=""),
+                               language: str = Form(default=""),
                                instructions: str = Form(default=""),
                                fmt: str = Form(default="wav", alias="response_format"),
+                               x_vector_only: str = Form(default=None, alias="x_vector_only_mode"),
+                               stability: str = Form(default=""),
+                               similarity_boost: str = Form(default=""),
+                               style: str = Form(default=""),
+                               use_speaker_boost: str = Form(default=""),
+                               speed: str = Form(default=""),
                                async_: str = Form(default=None, alias="async")):
             _require_ready()
             data = await file.read()
             if not data:
                 raise HTTPException(status_code=400, detail="file (the reference audio) is empty")
-            transcript = (ref_text or "").strip()
-            if not transcript:
-                raise HTTPException(
-                    status_code=400,
-                    detail="ref_text (the exact transcript of the reference) is required")
             _check_ref_audio(data)
             mime = file.content_type or "audio/wav"
             payload = {
                 "input": text,
                 "response_format": fmt or "wav",
-                "ref_text": transcript,
                 "ref_audio": "data:%s;base64,%s" % (mime, base64.b64encode(data).decode("ascii")),
             }
+            if (ref_text or "").strip():
+                payload["ref_text"] = ref_text.strip()
+            if (language or "").strip():
+                payload["language"] = language.strip()
             if instructions.strip():
                 payload["instructions"] = instructions.strip()
-            return await _synthesize_payload(payload, async_, default_fmt="wav")
+            if x_vector_only is not None:
+                payload["x_vector_only_mode"] = str(x_vector_only).strip().lower() in (
+                    "1", "true", "yes", "on")
+            knobs = {}
+            for key, value in (
+                ("stability", stability),
+                ("similarity_boost", similarity_boost),
+                ("style", style),
+                ("use_speaker_boost", use_speaker_boost),
+                ("speed", speed),
+            ):
+                if value is not None and str(value).strip() != "":
+                    knobs[key] = value
+            if knobs:
+                payload["voice_settings"] = knobs
+            return await _synthesize_payload(payload, async_, default_fmt="wav", openai=True)
 
     return app
 

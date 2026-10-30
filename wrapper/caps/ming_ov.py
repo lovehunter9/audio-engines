@@ -5,6 +5,21 @@ import os
 log = logging.getLogger("audio-ming")
 
 VAE_FRAME_BUCKETS = (64, 128, 256, 384, 512, 768, 1024, 1536, 2048)
+# campplus.onnx needs 200 fbank frames on the Intel GPU; any other length fails an Add broadcast.
+CAMPPLUS_FRAMES = 200
+# linear_proj_audio's frame axis stays dynamic. The export example is a single frame.
+AGGREGATOR_DYNAMIC = (0,)
+
+
+def campplus_span(n, frames=CAMPPLUS_FRAMES):
+    """(start, end, pad) so a fbank time axis becomes exactly `frames`."""
+    n = int(n)
+    if n <= 0:
+        raise ValueError("campplus features are empty")
+    if n >= frames:
+        start = (n - frames) // 2
+        return start, start + frames, 0
+    return 0, n, frames - n
 
 
 def bucket_for(n, buckets):
@@ -124,8 +139,27 @@ def _refuse_dynamic_spectral(model, xml):
                     % (os.path.basename(xml), op.get_type_name(), shape))
 
 
-def _export(mod, example, xml):
-    """Pin every input to the example. A dynamic IRDFT is what SIGSEGV'd the GPU compiler."""
+def _export_shapes(example, dynamic=()):
+    """Example shapes, with `dynamic` axes left at -1. Other axes stay pinned."""
+    if not isinstance(example, (tuple, list)):
+        example = (example,)
+    shapes = []
+    for tensor in example:
+        shape = [int(x) for x in tensor.shape]
+        for axis in dynamic:
+            index = int(axis)
+            if index < 0:
+                index += len(shape)
+            if index < 0 or index >= len(shape):
+                raise ValueError(
+                    "dynamic axis %s is outside rank %s" % (axis, len(shape)))
+            shape[index] = -1
+        shapes.append(tuple(shape))
+    return shapes
+
+
+def _export(mod, example, xml, dynamic=()):
+    """Pin every input to the example, except axes named in `dynamic`. A dynamic IRDFT SIGSEGV'd the GPU compiler, so those ops stay static."""
     import openvino as ov
     import torch
 
@@ -134,7 +168,7 @@ def _export(mod, example, xml):
     os.makedirs(os.path.dirname(xml), exist_ok=True)
     if not isinstance(example, (tuple, list)):
         example = (example,)
-    want = [tuple(int(x) for x in t.shape) for t in example]
+    want = _export_shapes(example, dynamic)
     if os.path.isfile(xml) and _saved_input_shapes(xml) == want:
         return
     if hasattr(mod, "eval"):
@@ -371,8 +405,8 @@ def _install_dit(bailing, src, device, props):
     log.info("DiT step on %s", device)
 
 
-def _install_small(module, example, xml, device, props, label):
-    _export(module, example, xml)
+def _install_small(module, example, xml, device, props, label, dynamic=()):
+    _export(module, example, xml, dynamic=dynamic)
     graph = _Graph(xml, device, props)
     graph.ensure()
     _patch_forward(module, graph, 1)
@@ -479,6 +513,11 @@ def _install_campplus(ming, device, props):
 
         feat = kaldi.fbank(speech, num_mel_bins=80, dither=0, sample_frequency=16000)
         feat = feat - feat.mean(dim=0, keepdim=True)
+        start, end, pad = campplus_span(feat.shape[0])
+        feat = feat[start:end]
+        if pad:
+            import torch
+            feat = torch.nn.functional.pad(feat, (0, 0, 0, pad))
         arr = np.ascontiguousarray(feat.unsqueeze(0).float().numpy(), dtype="float32")
         out = compiled({input_name: arr})[0]
         return torch.tensor(np.asarray(out).reshape(1, -1))
@@ -519,7 +558,8 @@ def install(ming, device):
     ov_dir = os.path.join(src, "openvino")
     _install_small(
         bailing.linear_proj_audio, torch.zeros(1, 1, int(bailing.latent_dim)),
-        os.path.join(ov_dir, "aggregator.xml"), device, props, "aggregator")
+        os.path.join(ov_dir, "aggregator.xml"), device, props, "aggregator",
+        dynamic=AGGREGATOR_DYNAMIC)
     _install_small(
         bailing.stop_head, torch.zeros(1, 1, hidden),
         os.path.join(ov_dir, "stop_head.xml"), device, props, "stop head")
