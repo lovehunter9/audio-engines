@@ -11,6 +11,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class BucketTests(unittest.TestCase):
+    def test_aggregator_prompt_batch_is_dynamic(self):
+        class _T:
+            def __init__(self, shape):
+                self.shape = shape
+
+        self.assertEqual(ming_ov.AGGREGATOR_DYNAMIC, (0,))
+        self.assertEqual(
+            ming_ov._export_shapes(_T((1, 1, 64)), dynamic=(0,)), [(-1, 1, 64)])
+        self.assertEqual(ming_ov._export_shapes(_T((1, 1, 64))), [(1, 1, 64)])
+        with self.assertRaises(ValueError):
+            ming_ov._export_shapes(_T((1, 1, 64)), dynamic=(3,))
+        text = (ROOT / "wrapper/caps/ming_ov.py").read_text()
+        self.assertIn("dynamic=AGGREGATOR_DYNAMIC", text)
+
+    def test_campplus_span_is_two_hundred_frames(self):
+        self.assertEqual(ming_ov.campplus_span(288), (44, 244, 0))
+        self.assertEqual(ming_ov.campplus_span(200), (0, 200, 0))
+        self.assertEqual(ming_ov.campplus_span(80), (0, 80, 120))
+        with self.assertRaises(ValueError):
+            ming_ov.campplus_span(0)
+
     def test_smallest_bucket(self):
         self.assertEqual(ming_ov.bucket_for(1, ming_ov.VAE_FRAME_BUCKETS), 64)
         self.assertEqual(ming_ov.bucket_for(64, ming_ov.VAE_FRAME_BUCKETS), 64)

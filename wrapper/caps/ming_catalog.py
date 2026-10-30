@@ -16,7 +16,6 @@ def load_ip_catalog(path=None):
         if not vid:
             continue
         labels = {
-            "origin": "model",
             "language": row.get("language") or "",
             "gender": row.get("gender") or "",
             "group": row.get("group") or "",
@@ -27,8 +26,6 @@ def load_ip_catalog(path=None):
             "voice_id": vid,
             "name": row.get("name") or vid,
             "category": "premade",
-            "source": "ip",
-            "origin": "model",
             "ip": vid,
             "description": row.get("description") or "",
             "labels": labels,

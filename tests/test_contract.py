@@ -106,7 +106,7 @@ _EL_DESIGN_ROUTES = (
 _EL_CLONE_ROUTES = (
     ("POST", "/v1/voices/add", True),
 )
-for _el_mod in ("firered", "breeze", "qwen3_voice"):
+for _el_mod in ("firered", "breeze", "qwen3_voice", "ming"):
     for _method, _path, _async in _EL_TTS_ROUTES:
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts", _method, _path)] = {
             "async_supported": _async,
@@ -121,6 +121,7 @@ for _el_mod in ("firered", "breeze", "qwen3_voice"):
         }
 for _method, _path, _async in (
     ("POST", "/v1/audio/speech", True),
+    ("POST", "/v1/audio/speech/batch", True),
     ("GET", "/v1/audio/voices", False),
     ("POST", "/v1/audio/voices", False),
     ("DELETE", "/v1/audio/voices/{voice_id}", False),
@@ -132,17 +133,20 @@ for _method, _path, _async in (
 EXPECTED_CAPABILITY_ENDPOINTS[("qwen3_voice", "tts_clone", "POST", "/v1/audio/speech/clone")] = {
     "async_supported": True,
 }
-for _ming_method, _ming_path, _ming_async, _ming_cap in (
-    ("POST", "/v1/audio/speech", True, "tts"),
-    ("GET", "/v1/audio/voices", False, "tts"),
-    ("POST", "/v1/audio/voices", False, "tts"),
-    ("DELETE", "/v1/audio/voices/{voice_id}", False, "tts"),
-    ("POST", "/v1/audio/speech/clone", True, "tts_clone"),
-    ("POST", "/v1/audio/speech", True, "tts_design"),
+for _method, _path, _async in (
+    ("POST", "/v1/audio/speech", True),
+    ("POST", "/v1/audio/speech/batch", True),
+    ("GET", "/v1/audio/voices", False),
+    ("POST", "/v1/audio/voices", False),
+    ("DELETE", "/v1/audio/voices/{voice_id}", False),
+    ("WS", "/v1/audio/speech/stream", False),
 ):
-    EXPECTED_CAPABILITY_ENDPOINTS[("ming", _ming_cap, _ming_method, _ming_path)] = {
-        "async_supported": _ming_async,
+    EXPECTED_CAPABILITY_ENDPOINTS[("ming", "tts", _method, _path)] = {
+        "async_supported": _async,
     }
+EXPECTED_CAPABILITY_ENDPOINTS[("ming", "tts_clone", "POST", "/v1/audio/speech/clone")] = {
+    "async_supported": True,
+}
 for _tts_key, _tts_meta in list(EXPECTED_CAPABILITY_ENDPOINTS.items()):
     _tts_mod, _tts_cap, _tts_method, _tts_path = _tts_key
     if _tts_mod == "tts":
@@ -276,7 +280,7 @@ class CatalogContractTest(unittest.TestCase):
         self.assertEqual(actual_metadata, EXPECTED_CAPABILITY_ENDPOINTS)
 
     def test_el_instance_does_not_advertise_the_same_route_twice(self):
-        for module in ("firered", "breeze"):
+        for module in ("firered", "breeze", "ming"):
             rows = catalog.endpoints(module, ["tts", "tts_clone", "tts_design"])
             keys = [(row["method"], row["path"]) for row in rows]
             self.assertEqual(keys, list(dict.fromkeys(keys)), module)
