@@ -2043,6 +2043,119 @@ def _remember_tts(meta, text, settings, spec, body, content_type):
     return None
 
 
+def _wav_live_header(sr, channels=1, bits=16):
+    """RIFF with unknown length. The sizes exist only after generation, same as discrete Qwen."""
+    import struct
+
+    sr = int(sr)
+    byte_rate = sr * channels * bits // 8
+    return (b"RIFF" + struct.pack("<I", 0xFFFFFFFF) + b"WAVEfmt "
+            + struct.pack("<IHHIIHH", 16, 1, channels, sr, byte_rate, channels * bits // 8, bits)
+            + b"data" + struct.pack("<I", 0xFFFFFFFF - 36))
+
+
+def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, sampling, chunk_size):
+    """Yield (wave, sr) as the backend decodes. Caller does not hold the generation lock."""
+    backend = _backend()
+    extra = _sampling_kw(sampling)
+    chunk_kw = {}
+    if chunk_size not in (None, ""):
+        chunk_kw["chunk_size"] = chunk_size
+    instruction = (instructions or "").strip()
+    if ref_data is not None:
+        import soundfile as sf
+        import numpy as np
+
+        audio, sr = sf.read(io.BytesIO(ref_data), always_2d=False)
+        audio = np.asarray(audio, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        with _gen_lock:
+            yield from backend.iter_clone(
+                text, audio, int(sr), ref_text or "", instruction=instruction,
+                settings=settings, **extra, **chunk_kw)
+        return
+    if not voice and not instruction:
+        voices = _store().list()
+        if not voices:
+            raise HTTPException(status_code=400,
+                                detail="voice_id is required (this instance has no voices yet)")
+        voice = voices[0]["voice_id"]
+        settings = _merged_settings(voices[0], {})
+    if voice:
+        native = _native_premade(voice)
+        if native:
+            meta, fn = native
+            with _gen_lock:
+                yielded = fn(meta, text, instruction=instruction or None, settings=settings, **extra)
+            yield yielded
+            return
+        _meta, wav_path, transcript = _ensure_frozen(voice)
+        meta = _meta
+        if getattr(backend, "prefer_design_speak", False) and _design_identity(meta):
+            speak_as = (instruction or _design_instruction(meta) or "").strip()
+            if speak_as:
+                with _gen_lock:
+                    yield from backend.iter_design(
+                        speak_as, text, settings=settings, **extra, **chunk_kw)
+                return
+        speak_as = instruction
+        if not speak_as and getattr(backend, "card_instruction_is_direction", True):
+            speak_as = ((meta or {}).get("instruction") or "").strip()
+        prompt, sr = _load_prompt_wav(wav_path)
+        with _gen_lock:
+            yield from backend.iter_clone(
+                text, prompt, sr, transcript or text, instruction=speak_as,
+                settings=settings, **extra, **chunk_kw)
+        return
+    _check_design_text(instruction)
+    with _gen_lock:
+        yield from backend.iter_design(
+            instruction, text, settings=settings, **extra, **chunk_kw)
+
+
+async def _openai_live_response(text, voice, instructions, ref_data, ref_text, settings, sampling,
+                                fmt, chunk_size):
+    """First byte leaves while decoding. Ming never takes this path."""
+    spec = _as_spec(fmt)
+    kind = spec.kind
+    q = queue.Queue()
+
+    def produce():
+        try:
+            if kind == "wav":
+                q.put(_wav_live_header(int(_state.get("sample_rate") or spec.sr or 24000)))
+            for wave, _sr in _iter_openai_live(
+                    text, voice, instructions, ref_data, ref_text, settings, sampling, chunk_size):
+                q.put(_pcm16(wave))
+        except Exception as exc:
+            q.put(exc)
+        finally:
+            q.put(_STREAM_DONE)
+
+    threading.Thread(target=produce, daemon=True, name="openai-live").start()
+    first = await asyncio.to_thread(q.get)
+    if isinstance(first, Exception):
+        _raise_speak(first)
+    if first is _STREAM_DONE:
+        _raise_speak(RuntimeError("engine produced no audio"))
+
+    async def rest():
+        yield first
+        while True:
+            item = await asyncio.to_thread(q.get)
+            if item is _STREAM_DONE:
+                return
+            if isinstance(item, Exception):
+                log.exception("openai live stream failed")
+                return
+            yield item
+
+    return StreamingResponse(
+        rest(), media_type=_FORMATS[kind][2],
+        headers=_headers(kind, spec.sr or _state.get("sample_rate") or 24000))
+
+
 def _audio_response(audio, sr, fmt, stream=False, *, meta=None, text="", settings=None):
     spec = _as_spec(fmt)
     body, fmt = _encode_edge(audio, sr, spec)
@@ -2103,6 +2216,11 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                     detail="stream supports response_format pcm or wav; "
                            "%s only exists as a whole file" % asked)
             stream = True
+        # OpenAI puts stream in the body and async in the query, so the flag is only known here.
+        if stream and tasks.truthy(async_flag):
+            raise HTTPException(status_code=400,
+                                detail="stream does not support async=1; "
+                                       "use POST /v1/text-to-speech/{voice_id}?async=1")
         fmt = _output_format(payload.get("output_format") or payload.get("response_format"),
                              default_fmt, openai=openai)
         voice = _voice_of(payload)
@@ -2118,6 +2236,23 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
         if openai and ref and (not ref_text or (sampling or {}).get("x_vector_only")):
             sampling = dict(sampling or {})
             sampling["x_vector_only"] = True
+        if stream and getattr(_backend(), "streams_while_generating", False):
+            # Decode while the client is reading. The shared whole-file cut stays for Ming.
+            ref_data = None
+            if ref:
+                ref_data, _suffix = _ref_bytes(ref)
+                if not ref_text and not has_clone:
+                    raise HTTPException(status_code=400, detail="this instance does not clone")
+                if not ref_text and not (sampling or {}).get("x_vector_only"):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="ref_text (the exact transcript of the reference) is required")
+                _check_ref_audio(ref_data)
+            if not ref and not voice and instructions:
+                _check_design_text(instructions)
+            return await _openai_live_response(
+                text, voice, instructions, ref_data, ref_text, settings, sampling, fmt,
+                payload.get("chunk_size"))
 
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="synthesize")
@@ -2669,7 +2804,7 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                         merged[key] = frame[key]
                 return merged
 
-            async def apply_session(session, echo_ready):
+            async def apply_session(session, echo_ready, frame=None):
                 previous = cfg["voice"]
                 for key in session_keys:
                     if session.get(key) is not None:
@@ -2680,6 +2815,17 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                         "type": "error",
                         "message": "unknown voice %r; see GET /v1/audio/voices" % voice}))
                     cfg["voice"] = previous
+                if getattr(_backend(), "socket_pcm_only", False):
+                    fmt = None if frame is None else frame.get("response_format")
+                    nested = (frame or {}).get("session") if isinstance(
+                        (frame or {}).get("session"), dict) else {}
+                    if fmt is None:
+                        fmt = nested.get("response_format")
+                    if fmt is not None and str(fmt).strip().lower() != "pcm":
+                        await ws.send_text(json.dumps({
+                            "type": "error",
+                            "message": "the socket carries raw pcm frames; "
+                                       "use POST /v1/audio/speech for a container format"}))
                 if echo_ready:
                     await ws.send_text(json.dumps({
                         "type": "session.ready", "model": MODEL_NAME,
@@ -2695,6 +2841,37 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                 if flag is not None:
                     sampling["x_vector_only"] = flag if isinstance(flag, bool) else (
                         str(flag).strip().lower() in ("1", "true", "yes", "on"))
+                if getattr(_backend(), "streams_while_generating", False):
+                    ref = cfg.get("ref_audio")
+                    ref_data = None
+                    ref_text = str(cfg.get("ref_text") or "").strip()
+                    if ref:
+                        ref_data, _suffix = _ref_bytes(ref)
+                        if not ref_text:
+                            sampling["x_vector_only"] = True
+                        _check_ref_audio(ref_data)
+                    live_q = queue.Queue()
+
+                    def pump():
+                        try:
+                            for wave, _sr in _iter_openai_live(
+                                    text, voice, instructions, ref_data, ref_text, None,
+                                    sampling or None, cfg.get("chunk_size")):
+                                live_q.put(_pcm16(wave))
+                        except Exception as exc:
+                            live_q.put(exc)
+                        finally:
+                            live_q.put(_STREAM_DONE)
+
+                    threading.Thread(target=pump, daemon=True, name="ws-live").start()
+                    while True:
+                        item = await asyncio.to_thread(live_q.get)
+                        if item is _STREAM_DONE:
+                            return
+                        if isinstance(item, Exception):
+                            raise item
+                        await ws.send_bytes(item)
+                    return
                 ref = cfg.get("ref_audio")
                 if ref:
                     data, _suffix = _ref_bytes(ref)
@@ -2733,7 +2910,8 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                         continue
                     kind = str(frame.get("type") or "")
                     if kind in ("session.update", "session.config"):
-                        await apply_session(session_fields(frame), echo_ready=(kind == "session.config"))
+                        await apply_session(session_fields(frame), echo_ready=(kind == "session.config"),
+                                            frame=frame)
                     elif kind == "input.text":
                         pending += str(frame.get("text") or "")
                         ready, pending = split_sentences(pending)
