@@ -68,5 +68,49 @@ class PatchMaxInputTest(unittest.TestCase):
         self.assertTrue(any(x.startswith("patched") and "utils" in x for x in said), said)
 
 
+class StreamStartLanguageTest(unittest.TestCase):
+    """The language in start has to reach the state the audio is decoded with.
+
+    🔴 The state is built when the socket opens, before start is read. Keeping that state means
+    every utterance shorter than a roll auto-detects, so English came back as Spanish or Chinese
+    while the caller had asked for English.
+    """
+
+    def _stream(self, *frames):
+        import json
+        from fastapi.testclient import TestClient
+        m = _stt()
+        built = []
+
+        def init(_asr, language=None):
+            built.append(language)
+            return types.SimpleNamespace(language=language or "", text="")
+
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": "qwen"}), \
+                mock.patch.object(m, "_stream_init", init), \
+                mock.patch.object(m, "_stream_step", lambda _asr, _pcm, st: None), \
+                mock.patch.object(m, "_stream_finish", lambda _asr, st: None), \
+                mock.patch.dict(m._state, {"ready": True, "asr": object(), "error": None}):
+            with TestClient(m.build_app(["stt", "stt_stream"])) as c:
+                with c.websocket_connect("/v1/audio/stream") as ws:
+                    self.assertEqual(json.loads(ws.receive_text())["type"], "ready")
+                    for frame in frames:
+                        (ws.send_text if isinstance(frame, str) else ws.send_bytes)(frame)
+                    ws.send_text(json.dumps({"type": "stop"}))
+                    while json.loads(ws.receive_text())["type"] not in ("closed", "error"):
+                        pass
+        return built
+
+    def test_start_language_reaches_the_first_state(self):
+        import json
+        built = self._stream(json.dumps({"type": "start", "language": "en"}), b"\x00\x00" * 8000)
+        self.assertEqual(built[-1], "en", built)
+
+    def test_start_after_audio_keeps_the_state_being_decoded(self):
+        import json
+        built = self._stream(b"\x00\x00" * 8000, json.dumps({"type": "start", "language": "en"}))
+        self.assertEqual(built, [None], built)
+
+
 if __name__ == "__main__":
     unittest.main()
