@@ -41,7 +41,7 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
         "async_supported": True,
     },
     ("enhance", "enhance", "POST", "/v1/audio/enhance"): {"async_supported": True},
-    ("separate", "separate", "POST", "/v1/audio/separate"): {"async_supported": True},
+    ("stem_separation", "stem_separation", "POST", "/v1/audio/stem-separation"): {"async_supported": True},
     ("sound_fx", "sound_fx", "POST", "/v1/audio/speech"): {"async_supported": True},
     ("sound_fx", "sound_fx", "POST", "/v1/audio/speech/batch"): {
         "async_supported": True,

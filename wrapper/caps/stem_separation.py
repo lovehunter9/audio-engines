@@ -14,7 +14,7 @@ from ..gpu import mount_metrics
 from ..limits import Bounds
 from ..runtime import Runtime
 
-log = logging.getLogger("audio-separate")
+log = logging.getLogger("audio-stem-separation")
 
 _runtime = Runtime(model=None, compiled=None, device="cpu")
 MODEL_NAME = _runtime.model_name
@@ -172,7 +172,7 @@ def _load():
         log.info("ready on %s", _state["device"])
     except Exception as e:
         _state["error"] = hfgate.explain(MODEL_REPO, e)
-        log.exception("separate model failed to load: %s", e)
+        log.exception("stem separation model failed to load: %s", e)
 
 
 def _decode(path):
@@ -327,13 +327,13 @@ def _package(stems, want):
 
 
 def build_app(supports):
-    app = FastAPI(title="audio-separate (mel-band roformer)")
+    app = FastAPI(title="audio-stem-separation (mel-band roformer)")
     mount_metrics(app)
-    register(app, model_name=MODEL_NAME, module="separate", served=supports, repo=MODEL_REPO,
+    register(app, model_name=MODEL_NAME, module="stem_separation", served=supports, repo=MODEL_REPO,
              is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True)
 
-    @app.post("/v1/audio/separate")
-    async def separate(file: UploadFile = File(...),
+    @app.post("/v1/audio/stem-separation")
+    async def stem_separation(file: UploadFile = File(...),
                        stem: str = Form(default="vocals"),
                        fmt: str = Form(default="wav", alias="format"),
                        async_: str = Form(default=None, alias="async")):
@@ -369,8 +369,8 @@ def build_app(supports):
                 headers={"X-Audio-Model": MODEL_NAME, "X-Audio-Stem": label})
 
         return await tasks.dispatch(
-            async_, "separate", MODEL_NAME, _work,
-            cleanup=lambda: unlink(path), fail="separate failed")
+            async_, "stem_separation", MODEL_NAME, _work,
+            cleanup=lambda: unlink(path), fail="stem separation failed")
 
     return app
 

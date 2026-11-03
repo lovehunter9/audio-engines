@@ -5890,25 +5890,27 @@ def t_every_engine_args_user_reports_leftovers():
               "warn_unclaimed" in src or ".passthrough()" in src)
 
 
-def t_separate():
+def t_stem_separation():
     from fastapi.testclient import TestClient
 
-    from wrapper.caps import separate
+    from wrapper.caps import stem_separation
 
-    separate._decode = lambda path: np.zeros((2, separate.SR), dtype="float32")
-    separate._vocals = lambda mix, ctx: np.zeros_like(mix)
-    separate._state.update(ready=False, error=None, model=object(), device="cpu")
-    with TestClient(separate.build_app(["separate"])) as c:
-        advertises_tasks(c, "separate")
-        cold = c.post("/v1/audio/separate", files=WAV, data={"stem": "vocals"})
-        check("separate refuses while the model is loading", cold.status_code == 503, cold.status_code)
-        separate._state["ready"] = True
-        bad = c.post("/v1/audio/separate", files=WAV, data={"stem": "drums"})
-        check("separate rejects an unknown stem", bad.status_code == 400, bad.status_code)
-        both_ways(c, "/v1/audio/separate", WAV, {"stem": "vocals", "format": "wav"},
-                  "separate", json_result=False, meters=("input", "output"))
-        both = c.post("/v1/audio/separate", files=WAV, data={"stem": "both", "format": "wav"})
-        check("separate both stems is a zip",
+    stem_separation._decode = lambda path: np.zeros((2, stem_separation.SR), dtype="float32")
+    stem_separation._vocals = lambda mix, ctx: np.zeros_like(mix)
+    stem_separation._state.update(ready=False, error=None, model=object(), device="cpu")
+    with TestClient(stem_separation.build_app(["stem_separation"])) as c:
+        advertises_tasks(c, "stem_separation")
+        cold = c.post("/v1/audio/stem-separation", files=WAV, data={"stem": "vocals"})
+        check("stem separation refuses while the model is loading",
+              cold.status_code == 503, cold.status_code)
+        stem_separation._state["ready"] = True
+        bad = c.post("/v1/audio/stem-separation", files=WAV, data={"stem": "drums"})
+        check("stem separation rejects an unknown stem", bad.status_code == 400, bad.status_code)
+        both_ways(c, "/v1/audio/stem-separation", WAV, {"stem": "vocals", "format": "wav"},
+                  "stem separation", json_result=False, meters=("input", "output"))
+        both = c.post("/v1/audio/stem-separation", files=WAV,
+                      data={"stem": "both", "format": "wav"})
+        check("stem separation both stems is a zip",
               both.status_code == 200 and both.headers["content-type"].startswith("application/zip"),
               (both.status_code, both.headers.get("content-type")))
 
@@ -5920,7 +5922,7 @@ def main():
     # AUDIO_BASE is baked into each image, so the spec of a base is only right under its own base.
     for name, fn, base in (("vad", t_vad, "pyannote"), ("diar", t_diar, "pyannote"),
                            ("embed", t_embed, "pyannote"), ("enhance", t_enhance, "pyannote"),
-                           ("separate", t_separate, "melband"),
+                           ("stem_separation", t_stem_separation, "melband"),
                            ("align", t_align, "qwen"),
                            ("whisper (fasterwhisper)", t_whisper, "fasterwhisper"),
                            ("whisper_ov", t_whisper_ov, "whisperov"),
