@@ -193,7 +193,7 @@ _MOUNTS = {
          "Speech enhancement / denoise (16k mono, format=wav|flac|ogg, default wav)", True),
     ],
     ("stem_separation", "stem_separation"): [
-        ("POST", "/v1/audio/stem-separation",
+        ("POST", "/v1/music/stem-separation",
          "Vocal and accompaniment separation (stem=vocals|instrumental|both, format=wav|flac)",
          True),
     ],
@@ -460,7 +460,7 @@ _OPERATION_IDS = {
     ("WS", "/v1/audio/diarize/stream"): "audio.diarize.stream",
     ("POST", "/v1/audio/embeddings"): "audio.speaker_embed",
     ("POST", "/v1/audio/enhance"): "audio.enhance",
-    ("POST", "/v1/audio/stem-separation"): "audio.stem_separation",
+    ("POST", "/v1/music/stem-separation"): "audio.stem_separation",
     ("POST", "/v1/audio/speech"): "speech.synthesize",
     ("POST", "/v1/audio/speech/batch"): "speech.synthesize.batch",
     ("WS", "/v1/audio/speech/stream"): "speech.synthesize.stream",
@@ -497,6 +497,8 @@ _OPERATION_IDS = {
 
 
 def _protocol(path):
+    if path.startswith("/v1/music/"):
+        return "elevenlabs.music.v1"
     if path.startswith(("/v1/voices", "/v1/text-to-speech", "/v1/text-to-voice")):
         return "elevenlabs.voice.v1"
     if path in ("/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech"):

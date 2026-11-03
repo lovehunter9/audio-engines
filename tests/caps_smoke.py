@@ -5900,15 +5900,15 @@ def t_stem_separation():
     stem_separation._state.update(ready=False, error=None, model=object(), device="cpu")
     with TestClient(stem_separation.build_app(["stem_separation"])) as c:
         advertises_tasks(c, "stem_separation")
-        cold = c.post("/v1/audio/stem-separation", files=WAV, data={"stem": "vocals"})
+        cold = c.post("/v1/music/stem-separation", files=WAV, data={"stem": "vocals"})
         check("stem separation refuses while the model is loading",
               cold.status_code == 503, cold.status_code)
         stem_separation._state["ready"] = True
-        bad = c.post("/v1/audio/stem-separation", files=WAV, data={"stem": "drums"})
+        bad = c.post("/v1/music/stem-separation", files=WAV, data={"stem": "drums"})
         check("stem separation rejects an unknown stem", bad.status_code == 400, bad.status_code)
-        both_ways(c, "/v1/audio/stem-separation", WAV, {"stem": "vocals", "format": "wav"},
+        both_ways(c, "/v1/music/stem-separation", WAV, {"stem": "vocals", "format": "wav"},
                   "stem separation", json_result=False, meters=("input", "output"))
-        both = c.post("/v1/audio/stem-separation", files=WAV,
+        both = c.post("/v1/music/stem-separation", files=WAV,
                       data={"stem": "both", "format": "wav"})
         check("stem separation both stems is a zip",
               both.status_code == 200 and both.headers["content-type"].startswith("application/zip"),

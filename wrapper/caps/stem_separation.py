@@ -332,7 +332,7 @@ def build_app(supports):
     register(app, model_name=MODEL_NAME, module="stem_separation", served=supports, repo=MODEL_REPO,
              is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True)
 
-    @app.post("/v1/audio/stem-separation")
+    @app.post("/v1/music/stem-separation")
     async def stem_separation(file: UploadFile = File(...),
                        stem: str = Form(default="vocals"),
                        fmt: str = Form(default="wav", alias="format"),
