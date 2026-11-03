@@ -116,6 +116,7 @@ class WhoMeasuresWhat(unittest.TestCase):
         "diar_speakrs": (("Bounds",), "shared upload guard"),
         "embed": (("Bounds",), "shared upload guard"),
         "enhance": (("Bounds",), "shared upload guard"),
+        "separate": (("Bounds",), "shared upload guard"),
         "vad": (("Bounds",), "shared upload guard"),
         "tts_el": (("audioio.wav_seconds", "audioio.probe_seconds"),
                    "refuses with 400. The WAV header first, the general probe after it -- "
