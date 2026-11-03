@@ -254,13 +254,12 @@ class _EncodeVAE(object):
     def __init__(self, encoder):
         import torch.nn as nn
 
-        class _M(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.encoder = encoder
+        saved = encoder.forward
 
+        class _M(nn.Module):
             def forward(self, waveform):
-                h, _ = self.encoder(waveform)
+                # Saved at install, so a later bucket does not trace the patch.
+                h, _ = saved(waveform)
                 return h
 
         self.mod = _M()
