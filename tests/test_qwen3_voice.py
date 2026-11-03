@@ -279,7 +279,7 @@ class QwenRouteTest(unittest.TestCase):
         self.assertEqual(len(designed), 2)
         from wrapper.caps.ming_backend import MingBackend
         self.assertFalse(getattr(MingBackend, "streams_while_generating", False))
-        self.assertFalse(getattr(MingBackend, "socket_pcm_only", False))
+        self.assertTrue(MingBackend.socket_pcm_only)
 
     def test_openvino_stream_yields_each_child_chunk(self):
         backend = qwen3_voice.QwenVoiceBackend(object(), "/tmp/qwen-native-test")

@@ -84,27 +84,30 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(seen[2]["controls"], {"style": "calm"})
         self.assertNotIn("instruction", seen[2])
         self.assertEqual(seen[2]["cfg"], 2.72)
+        self.assertEqual(seen[2]["max_decode_steps"], ming_backend._steps_for("Hi"))
+        backend.design("calm", "Hi", sampling={"max_new_tokens": 40})
+        self.assertEqual(seen[3]["max_decode_steps"], 40)
         self.assertEqual(extra, {})
         self.assertEqual(audio.shape, (16,))
         backend.clone("Hi", np.zeros(16, dtype="float32"), 24000, "")
-        self.assertIsNone(seen[3]["prompt_text"])
-        self.assertTrue(seen[3]["use_spk_emb"])
-        self.assertNotIn("instruction", seen[3])
+        self.assertIsNone(seen[4]["prompt_text"])
+        self.assertTrue(seen[4]["use_spk_emb"])
+        self.assertNotIn("instruction", seen[4])
         backend.clone(
             "Hi", np.zeros(16, dtype="float32"), 24000, "ref",
             sampling={"x_vector_only": True, "temperature": 0.4, "max_new_tokens": 30,
                       "top_k": 10, "language": "Auto"})
-        self.assertIsNone(seen[4]["prompt_text"])
-        self.assertEqual(seen[4]["temperature"], 0.4)
-        self.assertEqual(seen[4]["max_decode_steps"], 30)
-        self.assertNotIn("top_k", seen[4])
-        self.assertNotIn("language_id", seen[4])
+        self.assertIsNone(seen[5]["prompt_text"])
+        self.assertEqual(seen[5]["temperature"], 0.4)
+        self.assertEqual(seen[5]["max_decode_steps"], 30)
+        self.assertNotIn("top_k", seen[5])
+        self.assertNotIn("language_id", seen[5])
         backend.speak_native(
             {"voice_id": "US_James", "ip": "US_James", "labels": {"language": "en"}},
             "Hi", sampling={"language": "ja", "temperature": 0.2})
-        self.assertEqual(seen[5]["language_id"], "ja")
-        self.assertEqual(seen[5]["temperature"], 0.2)
-        self.assertNotIn("instruction", seen[5])
+        self.assertEqual(seen[6]["language_id"], "ja")
+        self.assertEqual(seen[6]["temperature"], 0.2)
+        self.assertNotIn("instruction", seen[6])
 
     def test_quiet_minute_in_a_clone_is_replaced(self):
         calls = []
@@ -371,6 +374,64 @@ class _FakeBackend:
     def design(self, instruction, text, **kw):
         self.designs.append((instruction, text))
         return np.zeros(240, dtype="float32"), 24000, {}
+
+
+class EncoderExportOrderTest(unittest.TestCase):
+    def test_buckets_export_before_the_forward_patch(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+        from unittest import mock
+
+        from wrapper.caps import ming_ov
+
+        class Enc(torch.nn.Module):
+            hop_size = 1
+            input_dim = 1
+
+            def forward(self, waveform):
+                return torch.zeros(1, 2, 4), None
+
+        enc = Enc()
+
+        class Audio:
+            encoder = enc
+
+        class Bailing:
+            audio = Audio()
+
+        class Ming:
+            def _pad_align(self):
+                return 1
+
+        def still_original():
+            return getattr(enc.forward, "__func__", None) is Enc.forward
+
+        seen = []
+        depth = {"n": 0}
+
+        def export(mod, example, xml, dynamic=()):
+            depth["n"] += 1
+            self.assertEqual(depth["n"], 1)
+            seen.append(("export", still_original()))
+            mod(example)
+            depth["n"] -= 1
+
+        def compile_xml(xml, device, props):
+            return object()
+
+        def call(compiled, *arrays):
+            return np.zeros((1, 2, 4), dtype="float32")
+
+        with mock.patch.object(ming_ov, "_export", export), \
+                mock.patch.object(ming_ov, "_compile_xml", compile_xml), \
+                mock.patch.object(ming_ov, "_call", call):
+            ming_ov._install_encoder(Ming(), Bailing(), "/tmp/ming-ov-test", "GPU", {})
+            self.assertEqual(seen, [("export", True)])
+            self.assertFalse(still_original())
+            enc.forward(torch.zeros(1, ming_ov.VAE_FRAME_BUCKETS[1]))
+        self.assertEqual(seen, [("export", True), ("export", False)])
 
 
 if __name__ == "__main__":

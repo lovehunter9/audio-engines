@@ -126,6 +126,8 @@ class MingBackend:
     # A saved design is the baked sample. Do not redesign it on every reading.
     prefer_design_speak = False
     card_instruction_is_direction = False
+    # The socket is raw pcm. A container format belongs on POST.
+    socket_pcm_only = True
 
     def __init__(self, model):
         _use_soundfile()
@@ -261,9 +263,17 @@ class MingBackend:
         kn = self._knobs(kw.get("settings"), text, "")
         self._seed(kn)
         style = (instruction or "").strip()
+        sampling = dict(kw.get("sampling") or {})
+        # Uncapped design fills the 1000-step minute, and the wav no longer fits the hop.
+        if sampling.get("max_new_tokens") is None:
+            sampling["max_new_tokens"] = _steps_for(text)
         turn = Turn(task="design", text=text, style=style)
-        self._arm(turn, kn, kw.get("sampling"))
+        self._arm(turn, kn, sampling)
         audio, sr = self.synthesize(turn)
+        if _runaway(audio, sr, text):
+            log.warning("design ran long and quiet (%d chars, %.1fs)",
+                        len(text or ""), len(audio) / float(sr or 1))
+            audio = _keep_voiced(audio, sr)
         paced, sr = self._paced(audio, sr, kn.speed)
         return paced, sr, {}
 
