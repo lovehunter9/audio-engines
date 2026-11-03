@@ -2,12 +2,21 @@
 name: ming-ov-ci
 
 on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/mingov/**'
+      - '.github/workflows/ming-ov-ci.yml'
+      - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
       namespace:
-        description: 'Docker Hub namespace (empty = repository owner; the fork is lovehunter9)'
+        description: 'Docker Hub namespace'
         required: false
-        default: ''
+        default: beclab
       image_tag:
         description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
         required: false

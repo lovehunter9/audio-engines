@@ -1,13 +1,22 @@
-# ming CI: dev builds go out by workflow_dispatch. No v* tag until this is a listing engine.
 name: ming-ci
 
 on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/ming/**'
+      - 'bases/runtime/**'
+      - '.github/workflows/ming-ci.yml'
+      - '.github/workflows/build-image.yml'
   workflow_dispatch:
     inputs:
       namespace:
-        description: 'Docker Hub namespace (empty = repository owner; the fork is lovehunter9)'
+        description: 'Docker Hub namespace'
         required: false
-        default: ''
+        default: beclab
       image_tag:
         description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
         required: false
