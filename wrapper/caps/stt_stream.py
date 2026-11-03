@@ -2100,6 +2100,10 @@ def build_app(supports):
                             language = obj.get("language") or None
                             sample_rate = int(obj.get("sample_rate") or 16000)
                             step_ms = int(obj.get("step_ms") or DEFAULT_STEP_MS)
+                            # The state was built before start arrived, so its prompt still
+                            # auto-detects; left alone, the language only lands at the next roll.
+                            if not S["total"] and not pending.size:
+                                S["st"] = _new_state()
                             continue
                         if t in ("stop", "done", "finish"):
                             break
