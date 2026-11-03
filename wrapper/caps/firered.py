@@ -13,8 +13,9 @@ _SPEED_MAX = 4.0
 _CTX_SECONDS = 10.0
 # generate_tts often stops early; do not claim more text than this audio could hold.
 _CHARS_PER_SEC = 6.0
-# Only re-queue leftover text when even a fast reading could not have finished it.
+# Re-queue only when a fast reading could not finish. English uses 18 characters a second, Chinese 10.
 _FAST_CHARS_PER_SEC = 10.0
+_FAST_LATIN_CHARS_PER_SEC = 18.0
 _MIN_OVERLAP = 8
 # Official 80 can glue the next paragraph; unstick on 。 / newline only, not commas.
 _SENT_END = "。．！？!?"
@@ -68,6 +69,13 @@ def _spoken_text(text, wave, sr):
     return text[:n]
 
 
+def _fast_rate(text):
+    letters = [ch for ch in text if ch.isalpha()]
+    if letters and sum(ch.isascii() for ch in letters) * 2 >= len(letters):
+        return _FAST_LATIN_CHARS_PER_SEC
+    return _FAST_CHARS_PER_SEC
+
+
 def _unsaid(text, wave, sr):
     """Suffix generate_tts never reached. Snap to the last comma or stop in the covered prefix."""
     import numpy as np
@@ -76,7 +84,7 @@ def _unsaid(text, wave, sr):
     w = np.asarray(wave, dtype="float32").reshape(-1)
     if not text or not len(w):
         return ""
-    covered = int(len(w) / float(sr or 1) * _FAST_CHARS_PER_SEC)
+    covered = int(len(w) / float(sr or 1) * _fast_rate(text))
     if covered >= max(0, len(text) - 2):
         return ""
     prefix = text[:max(1, covered)]
@@ -162,6 +170,12 @@ class FireRedBackend:
     prefer_design_speak = False
     # A design blurb describes the speaker, not how to read this sentence.
     card_instruction_is_direction = False
+    # OpenAI stream yields each finished sentence. This model does not emit codec frames.
+    streams_while_generating = True
+    # Empty prompt text does not keep the speaker. generate_tts then says something else.
+    requires_ref_transcript = True
+    # The socket is raw pcm. A container format belongs on POST.
+    socket_pcm_only = True
 
     def __init__(self, model):
         self.model = model
@@ -266,7 +280,8 @@ class FireRedBackend:
             log.warning("voice direction ignored on a cloned voice: %r", direction[:60])
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
                                      direction, text=text,
-                                     include_speed_direction=False)
+                                     include_speed_direction=False,
+                                     include_style_direction=False)
         already = hasattr(self.model, "_apply_frontend")
         sents = self._sentences(text)
         origin = len(sents)
@@ -333,7 +348,8 @@ class FireRedBackend:
         kw = dict(kw)
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.INFERENCE_CFG,
                                      str(kw.get("instruction") or ""), text=text,
-                                     include_speed_direction=False)
+                                     include_speed_direction=False,
+                                     include_style_direction=False)
         kw["pace_each"] = False
         slice_out = []
         kw["slice_out"] = slice_out
@@ -348,6 +364,7 @@ class FireRedBackend:
         extra_out = kw.get("extra_out")
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
                                      instruction, text=text, include_speed_direction=False,
+                                     include_style_direction=False,
                                      seed_jitter=int(kw.get("seed_jitter") or 0))
         speak_as = kn.instruction or instruction
         plan_out = None
@@ -436,6 +453,7 @@ class FireRedBackend:
         kw = dict(kw)
         kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
                                      instruction, text=text, include_speed_direction=False,
+                                     include_style_direction=False,
                                      seed_jitter=int(kw.get("seed_jitter") or 0))
         kw["pace_each"] = False
         kw["extra_out"] = extra_box
@@ -875,9 +893,9 @@ def _install_firered_backbone(core, path, device):
 
 
 def build_app(supports):
-    return tts_el.build_app(supports, module="firered")
+    return tts_el.build_app(supports, module="firered", openai_alias=True, task_legacy=True)
 
 
 def run(supports):
     tts_el.run(supports, module="firered", watchdog="FireRedTTS3-Instruct",
-               load=_load, sample_rate=24000)
+               load=_load, sample_rate=24000, openai_alias=True, task_legacy=True)

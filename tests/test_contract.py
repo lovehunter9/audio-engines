@@ -119,34 +119,21 @@ for _el_mod in ("firered", "breeze", "qwen3_voice", "ming"):
         EXPECTED_CAPABILITY_ENDPOINTS[(_el_mod, "tts_clone", _method, _path)] = {
             "async_supported": _async,
         }
-for _method, _path, _async in (
-    ("POST", "/v1/audio/speech", True),
-    ("POST", "/v1/audio/speech/batch", True),
-    ("GET", "/v1/audio/voices", False),
-    ("POST", "/v1/audio/voices", False),
-    ("DELETE", "/v1/audio/voices/{voice_id}", False),
-    ("WS", "/v1/audio/speech/stream", False),
-):
-    EXPECTED_CAPABILITY_ENDPOINTS[("qwen3_voice", "tts", _method, _path)] = {
-        "async_supported": _async,
+for _oa_mod in ("qwen3_voice", "ming", "firered", "breeze"):
+    for _method, _path, _async in (
+        ("POST", "/v1/audio/speech", True),
+        ("POST", "/v1/audio/speech/batch", True),
+        ("GET", "/v1/audio/voices", False),
+        ("POST", "/v1/audio/voices", False),
+        ("DELETE", "/v1/audio/voices/{voice_id}", False),
+        ("WS", "/v1/audio/speech/stream", False),
+    ):
+        EXPECTED_CAPABILITY_ENDPOINTS[(_oa_mod, "tts", _method, _path)] = {
+            "async_supported": _async,
+        }
+    EXPECTED_CAPABILITY_ENDPOINTS[(_oa_mod, "tts_clone", "POST", "/v1/audio/speech/clone")] = {
+        "async_supported": True,
     }
-EXPECTED_CAPABILITY_ENDPOINTS[("qwen3_voice", "tts_clone", "POST", "/v1/audio/speech/clone")] = {
-    "async_supported": True,
-}
-for _method, _path, _async in (
-    ("POST", "/v1/audio/speech", True),
-    ("POST", "/v1/audio/speech/batch", True),
-    ("GET", "/v1/audio/voices", False),
-    ("POST", "/v1/audio/voices", False),
-    ("DELETE", "/v1/audio/voices/{voice_id}", False),
-    ("WS", "/v1/audio/speech/stream", False),
-):
-    EXPECTED_CAPABILITY_ENDPOINTS[("ming", "tts", _method, _path)] = {
-        "async_supported": _async,
-    }
-EXPECTED_CAPABILITY_ENDPOINTS[("ming", "tts_clone", "POST", "/v1/audio/speech/clone")] = {
-    "async_supported": True,
-}
 for _tts_key, _tts_meta in list(EXPECTED_CAPABILITY_ENDPOINTS.items()):
     _tts_mod, _tts_cap, _tts_method, _tts_path = _tts_key
     if _tts_mod == "tts":

@@ -39,7 +39,7 @@ INPUT_SECONDS_HEADER = "X-Audio-Input-Duration-Seconds"
 OUTPUT_SECONDS_HEADER = "X-Audio-Output-Duration-Seconds"
 
 def advertised(legacy=True):
-    """Task routes this process will mount. FireRed / Breeze omit the /v1/audio/tasks alias."""
+    """Task routes this process will mount. legacy=False omits the /v1/audio/tasks alias."""
     rows = [
         {"method": method, "path": TASKS_PATH + tail, "description": desc}
         for method, tail, desc in _ROUTES

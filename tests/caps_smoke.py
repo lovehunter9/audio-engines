@@ -4594,7 +4594,31 @@ def t_breeze_clone_slices():
     be._generate = gen
     audio, sr = be.clone("第一句。第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
     check("short clone stays one generate", seen == ["第一句。第二句。"], seen)
+    seen.clear()
+    long = "今天下午的风很轻，我们沿着河边慢慢走。把刚才说的那件事再讲一遍，不要漏掉后半句。门口那棵树还在，我们到了就坐下。"
+    be.clone(long, np.zeros(2400, dtype="float32"), 24000, "ref")
+    check("cuda long paragraph speaks each sentence",
+          seen == ["今天下午的风很轻，我们沿着河边慢慢走。",
+                   "把刚才说的那件事再讲一遍，不要漏掉后半句。",
+                   "门口那棵树还在，我们到了就坐下。"], seen)
+    seen.clear()
+    saved_base = os.environ.get("AUDIO_BASE")
+    os.environ["AUDIO_BASE"] = "breezeov"
+    try:
+        be.clone(long, np.zeros(2400, dtype="float32"), 24000, "ref")
+    finally:
+        if saved_base is None:
+            os.environ.pop("AUDIO_BASE", None)
+        else:
+            os.environ["AUDIO_BASE"] = saved_base
+    check("openvino long paragraph stays one generate", seen == [long], seen)
     check("bare clone uses cfg scale 1", cfgs[-1] == tts_el.CFG_SCALE, cfgs)
+    seen.clear()
+    cfgs.clear()
+    waves = list(be.iter_clone(
+        "第一句。第二句。", np.zeros(2400, dtype="float32"), 24000, "ref", sentence_each=True))
+    check("openai stream speaks each sentence", seen == ["第一句。", "第二句。"], seen)
+    check("openai stream yields each sentence", len(waves) == 2, len(waves))
     seen.clear()
     cfgs.clear()
     audio, sr = be.clone("第一句。\n第二句。", np.zeros(2400, dtype="float32"), 24000, "ref")
@@ -4629,6 +4653,10 @@ def t_breeze_clone_slices():
     seen.clear()
     be.design("A warm voice.", "第一句。第二句。第三句。")
     check("design stays one shot", seen == ["第一句。第二句。第三句。"], seen)
+    seen.clear()
+    list(be.iter_design("A warm voice.", "第一句。第二句。第三句。", sentence_each=True))
+    check("openai design stream speaks each sentence",
+          seen == ["第一句。", "第二句。", "第三句。"], seen)
     seen.clear()
     blob = "啊" * (speak_limit() + 40)
     be.clone(blob, np.zeros(2400, dtype="float32"), 24000, "ref")
@@ -5120,8 +5148,9 @@ def t_firered_settings_apply():
         check("firered design uses mapped CFG",
               seen and seen[-1].get("inference_cfg") > tts_el.DESIGN_CFG,
               seen[-1] if seen else None)
-        check("firered design instruction carries style wrap",
-              seen and "夸张" in str(seen[-1].get("instruction") or ""),
+        check("firered design instruction leaves the style sentence out",
+              seen and "夸张" not in str(seen[-1].get("instruction") or "")
+              and "沉稳男声" in str(seen[-1].get("instruction") or ""),
               seen[-1] if seen else None)
     finally:
         firered._as_torch = orig
@@ -5241,6 +5270,12 @@ def t_firered_unsaid_requeues():
     long = np.ones(96000, dtype="float32")
     check("a finished sentence is not requeued",
           firered._unsaid(text, long, 24000) == "")
+    en = "She said she would be here by noon, and the road ahead is clear."
+    finished_en = np.ones(int(4.2 * 24000), dtype="float32")
+    check("a finished English sentence is not spoken again",
+          firered._unsaid(en, finished_en, 24000) == "")
+    check("a one-second English clip still requeues the rest",
+          firered._unsaid(en, short, 24000) != "")
 
     seen = []
 
@@ -5276,10 +5311,9 @@ def t_speed_is_applied_once():
         waived = src.count("include_speed_direction=False")
         check("%s never asks the model to hurry as well" % name, calls == waived,
               "%d resolve_settings, %d waived" % (calls, waived))
-        if name == "breeze":
-            check("breeze does not write the style sentence into the prompt",
-                  src.count("include_style_direction=False") == calls,
-                  src.count("include_style_direction=False"))
+        check("%s does not write the style sentence into the prompt" % name,
+              src.count("include_style_direction=False") == calls,
+              src.count("include_style_direction=False"))
 
 
 def t_design_alternates_are_opt_in():
@@ -5489,7 +5523,7 @@ def t_tts_el(module_name="firered"):
     wav = wav_of(0.4)
 
     with TestClient(build(["tts", "tts_clone", "tts_design"])) as c:
-        advertises_tasks(c, module_name, legacy=False)
+        advertises_tasks(c, module_name)
         spec_paths = mounted(c)
         check("%s advertises ElevenLabs list/design/speak" % module_name,
               ("GET", "/v1/voices") in spec_paths
@@ -5500,17 +5534,25 @@ def t_tts_el(module_name="firered"):
               and ("POST", "/v1/text-to-speech/{voice_id}/stream") in spec_paths
               and ("POST", "/v1/voices/add") in spec_paths,
               sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
-        check("%s does not advertise OpenAI speech aliases" % module_name,
-              ("GET", "/v1/audio/voices") not in spec_paths
-              and ("POST", "/v1/audio/speech") not in spec_paths
-              and ("POST", "/v1/audio/speech/clone") not in spec_paths,
+        check("%s advertises OpenAI speech aliases" % module_name,
+              ("GET", "/v1/audio/voices") in spec_paths
+              and ("POST", "/v1/audio/speech") in spec_paths
+              and ("POST", "/v1/audio/speech/batch") in spec_paths
+              and ("POST", "/v1/audio/speech/clone") in spec_paths
+              and ("WS", "/v1/audio/speech/stream") in spec_paths,
               sorted(p[1] for p in spec_paths if p[1].startswith("/v1/")))
         listed = c.get("/v1/voices").json()["voices"]
         check("%s lists premade voices before they are frozen" % module_name,
               listed and listed[0]["voice_id"] == "p1" and listed[0]["category"] == "premade",
               listed)
-        check("%s OpenAI voices alias is gone" % module_name,
-              c.get("/v1/audio/voices").status_code == 404)
+        oa_listed = c.get("/v1/audio/voices")
+        oa_first = (oa_listed.json().get("voices") or [{}])[0] if oa_listed.status_code == 200 else {}
+        check("%s OpenAI voices alias lists the same table" % module_name,
+              oa_listed.status_code == 200
+              and oa_first.get("voice_id") == "p1"
+              and oa_first.get("id") == "p1"
+              and oa_first.get("voice") == "p1",
+              oa_listed.text[:160])
         r = c.post("/v1/text-to-speech/p1", json={"text": "hello from eleven"})
         check("%s speaks a premade voice_id" % module_name, r.status_code == 200,
               (r.status_code, r.text[:120]))
@@ -5523,8 +5565,9 @@ def t_tts_el(module_name="firered"):
                   any(call[0] == "clone" and (len(call) < 4 or not call[3])
                       for call in backend.calls), backend.calls)
         r2 = c.post("/v1/audio/speech", json={"input": "hello again", "voice": "p1"})
-        check("%s OpenAI speech alias is gone" % module_name, r2.status_code == 404,
-              r2.status_code)
+        check("%s OpenAI speech alias speaks" % module_name,
+              r2.status_code == 200 and len(r2.content) > 100,
+              (r2.status_code, r2.headers.get("content-type"), len(r2.content)))
         preview = c.post("/v1/text-to-voice/design",
                          json={"voice_description": "A raspy pirate", "text": "Ahoy there"})
         check("%s design returns a generated_voice_id" % module_name, preview.status_code == 200,
@@ -5629,7 +5672,7 @@ def t_tts_el(module_name="firered"):
             doc = poll(c, async_r.json()["task"]["id"])
             check("%s async task succeeded" % module_name, doc["status"] == "succeeded",
                   doc.get("status"))
-            contract(c, doc, module_name, legacy=False)
+            contract(c, doc, module_name)
         design_async = c.post("/v1/text-to-voice/design?async=1",
                               json={"voice_description": "A raspy pirate", "text": "Ahoy again"})
         check("%s design async 202" % module_name, design_async.status_code == 202,

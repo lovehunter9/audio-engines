@@ -240,8 +240,8 @@ passes. For the same reason the build's final import check must go **through**
 | `dasheng` | `beclab/audio-dasheng` | `sound_fx` | Dasheng-AudioGen diffusion (in-process transformers) | in progress |
 | `soulx` | `beclab/audio-soulx` | `tts_dialogue` | SoulX-Podcast (in-process, cloned at build) | in progress |
 | `crispasr` | `beclab/audio-crispasr` | `tts` | Voxtral-4B-TTS on CrispASR ggml (in-process, amd64 only) | in progress |
-| `firered` | `beclab/audio-firered` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct in-process (ElevenLabs voice_id) | in progress |
-| `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (ElevenLabs voice_id) | in progress |
+| `firered` | `beclab/audio-firered` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct in-process (OpenAI and ElevenLabs) | in progress |
+| `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (OpenAI and ElevenLabs) | in progress |
 | `breezeov` | `beclab/audio-breeze-ov` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 → OpenVINO GPU (amd64) | in progress |
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |

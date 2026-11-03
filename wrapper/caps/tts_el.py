@@ -1621,8 +1621,21 @@ def _speak_voice(vid, text, instruction=None, ctx=None, settings=None, sampling=
                              instruction=speak_as, ctx=ctx, settings=settings, **extra)
 
 
+def _require_ref_transcript(transcript):
+    """Breeze and FireRed cannot clone from audio alone."""
+    if (transcript or "").strip():
+        return
+    if not getattr(_backend(), "requires_ref_transcript", False):
+        return
+    raise HTTPException(
+        status_code=400,
+        detail="ref_text is required with reference audio; "
+               "this model has no speaker-embedding-only clone")
+
+
 def _speak_ref(text, wav_bytes, transcript, instruction=None, ctx=None, settings=None,
                sampling=None):
+    _require_ref_transcript(transcript)
     import soundfile as sf
 
     backend = _backend()
@@ -2063,6 +2076,7 @@ def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, s
         chunk_kw["chunk_size"] = chunk_size
     instruction = (instructions or "").strip()
     if ref_data is not None:
+        _require_ref_transcript(ref_text)
         import soundfile as sf
         import numpy as np
 
@@ -2073,7 +2087,7 @@ def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, s
         with _gen_lock:
             yield from backend.iter_clone(
                 text, audio, int(sr), ref_text or "", instruction=instruction,
-                settings=settings, **extra, **chunk_kw)
+                settings=settings, sentence_each=True, **extra, **chunk_kw)
         return
     if not voice and not instruction:
         voices = _store().list()
@@ -2097,7 +2111,7 @@ def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, s
             if speak_as:
                 with _gen_lock:
                     yield from backend.iter_design(
-                        speak_as, text, settings=settings, **extra, **chunk_kw)
+                        speak_as, text, settings=settings, sentence_each=True, **extra, **chunk_kw)
                 return
         speak_as = instruction
         if not speak_as and getattr(backend, "card_instruction_is_direction", True):
@@ -2106,12 +2120,12 @@ def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, s
         with _gen_lock:
             yield from backend.iter_clone(
                 text, prompt, sr, transcript or text, instruction=speak_as,
-                settings=settings, **extra, **chunk_kw)
+                settings=settings, sentence_each=True, **extra, **chunk_kw)
         return
     _check_design_text(instruction)
     with _gen_lock:
         yield from backend.iter_design(
-            instruction, text, settings=settings, **extra, **chunk_kw)
+            instruction, text, settings=settings, sentence_each=True, **extra, **chunk_kw)
 
 
 async def _openai_live_response(text, voice, instructions, ref_data, ref_text, settings, sampling,
