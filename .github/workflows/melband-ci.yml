@@ -1,0 +1,40 @@
+name: melband-ci
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/melband/**'
+      - 'bases/runtime/**'
+      - '.github/workflows/melband-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Image tag to publish. Empty publishes only when the ref is main or a v* tag.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: melband-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: melband
+      repo: audio-melband
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit

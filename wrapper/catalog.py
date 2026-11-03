@@ -110,6 +110,14 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
+    # Mel-Band RoFormer: vocals and accompaniment from one stereo mix.
+    "melband": [
+        (("separate",), "separate"),
+    ],
+    # Intel: the same HTTP. The band split and the transformers run on OpenVINO GPU.
+    "melbandov": [
+        (("separate",), "separate"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
@@ -135,6 +143,7 @@ FAMILIES = {
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
+    "separate": "mel-band-roformer",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -182,6 +191,11 @@ _MOUNTS = {
     ("enhance", "enhance"): [
         ("POST", "/v1/audio/enhance",
          "Speech enhancement / denoise (16k mono, format=wav|flac|ogg, default wav)", True),
+    ],
+    ("separate", "separate"): [
+        ("POST", "/v1/audio/separate",
+         "Vocal and accompaniment separation (stem=vocals|instrumental|both, format=wav|flac)",
+         True),
     ],
     ("diar_stream", "diar_stream"): [
         ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
@@ -446,6 +460,7 @@ _OPERATION_IDS = {
     ("WS", "/v1/audio/diarize/stream"): "audio.diarize.stream",
     ("POST", "/v1/audio/embeddings"): "audio.speaker_embed",
     ("POST", "/v1/audio/enhance"): "audio.enhance",
+    ("POST", "/v1/audio/separate"): "audio.separate",
     ("POST", "/v1/audio/speech"): "speech.synthesize",
     ("POST", "/v1/audio/speech/batch"): "speech.synthesize.batch",
     ("WS", "/v1/audio/speech/stream"): "speech.synthesize.stream",
@@ -511,7 +526,7 @@ def _modalities(operation_id):
     if operation_id == "voice.design.preview":
         return ["text"], ["voice", "audio"]
     if operation_id.startswith("audio."):
-        return ["audio"], ["audio"] if operation_id == "audio.enhance" else ["text"]
+        return ["audio"], ["audio"] if operation_id in ("audio.enhance", "audio.separate") else ["text"]
     return [], []
 
 
