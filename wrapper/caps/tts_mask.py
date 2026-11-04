@@ -11,8 +11,8 @@
 # whole stream behind real time (RTF 0.9). Two slice writes build the same mask: first audio
 # 0.52 s, RTF 1.41 under the same load.
 #
-# The library is pinned and its source is rewritten at load, not forked: a release that changes
-# the loop leaves it untouched and says so, and the engine runs as before.
+# The library is pinned and its source is rewritten at load. A release that changes the loop
+# leaves it untouched and says so, and the engine runs as before.
 import inspect
 import logging
 import re
