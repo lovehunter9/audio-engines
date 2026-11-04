@@ -229,7 +229,6 @@ _MOUNTS = {
          "Batch TTS (JSON items[] 1–32, base64 audio out)", True),
         ("GET", "/v1/audio/voices", "List preset voices", False),
     ],
-    # ElevenLabs voice_id + /v1/tasks only. No OpenAI /v1/audio/* aliases.
     ("firered", "tts"): [
         ("GET", "/v1/voices", "List voices (ElevenLabs shape: premade + cloned + designed)", False),
         ("GET", "/v1/voices/settings/default", "Default voice_settings (ElevenLabs)", False),
@@ -395,6 +394,29 @@ _MOUNTS = {
     ],
 }
 
+# OpenAI aliases sit on the same voice table. ElevenLabs output_format stays on its own routes.
+_OPENAI_ON_EL = (
+    ("POST", "/v1/audio/speech",
+     "OpenAI speech: JSON input + voice, or instructions with no voice to design once", True),
+    ("POST", "/v1/audio/speech/batch",
+     "Batch TTS (JSON items[] 1–32, base64 audio out; items run one after another)", True),
+    ("GET", "/v1/audio/voices", "OpenAI list of the same voice table", False),
+    ("POST", "/v1/audio/voices",
+     "Save a user voice. Clone: name + ref_audio (or file) + ref_text. "
+     "Design: name + instructions + input (the line baked into the sample). "
+     "Exactly one of ref_audio or instructions.", False),
+    ("DELETE", "/v1/audio/voices/{voice_id}",
+     "Delete a user voice. Premade voices return 400.", False),
+    ("WS", "/v1/audio/speech/stream",
+     "OpenAI streaming speech (session.config or session.update, then JSON text frames, pcm out)", False),
+)
+for _el_mod in ("firered", "breeze"):
+    _MOUNTS[(_el_mod, "tts")].extend(_OPENAI_ON_EL)
+    _MOUNTS[(_el_mod, "tts_clone")].append(
+        ("POST", "/v1/audio/speech/clone",
+         "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
+    )
+
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
 _MOUNTS[("tts_ov", "tts_clone")] = list(_MOUNTS[("tts", "tts_clone")])
@@ -493,7 +515,7 @@ def _modalities(operation_id):
     return [], []
 
 
-def _parameters(module, operation_id):
+def _parameters(module, operation_id, path=""):
     params = []
     # `segments` is the protocol-level batching signal consumed by clients.
     # Keep it tied to the implementations that actually accept the multipart
@@ -502,12 +524,15 @@ def _parameters(module, operation_id):
     if operation_id == "audio.transcribe" and module in ("stt_stream", "whisper"):
         params.append({"name": "segments", "type": "array"})
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
-        if module in ("firered", "breeze"):
+        if module in ("firered", "breeze") and not path.startswith("/v1/audio/"):
             params.append({"name": "output_format", "type": "string", "default": "mp3_44100_128",
                            "enum": ["pcm_24000", "wav_24000", "mp3_44100_128"]})
         else:
+            names = ["wav", "pcm", "mp3", "flac", "ogg"]
+            if module in ("firered", "breeze"):
+                names.append("opus")
             params.append({"name": "response_format", "type": "string", "default": "wav",
-                           "enum": ["wav", "pcm", "mp3", "flac", "ogg"]})
+                           "enum": names})
     if module in ("firered", "breeze", "qwen3_voice") and operation_id.startswith(("speech.", "voice.settings")):
         params.extend([
             {"name": "speed", "type": "number", "default": 1.0, "minimum": 0.25, "maximum": 4.0},
@@ -519,11 +544,15 @@ def _parameters(module, operation_id):
     return params
 
 
-def _constraints(module, operation_id):
+def _constraints(module, operation_id, path=""):
     formats, rates, limits = [], [], {}
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
-        formats = (["pcm_24000", "wav_24000", "mp3_44100_128"]
-                   if module in ("firered", "breeze") else ["wav", "pcm", "mp3", "flac", "ogg"])
+        if module in ("firered", "breeze") and not path.startswith("/v1/audio/"):
+            formats = ["pcm_24000", "wav_24000", "mp3_44100_128"]
+        else:
+            formats = ["wav", "pcm", "mp3", "flac", "ogg"]
+            if module in ("firered", "breeze"):
+                formats.append("opus")
     if module in ("firered", "breeze"):
         rates = [24000]
     if operation_id == "speech.synthesize.batch":
@@ -536,7 +565,7 @@ def _constraints(module, operation_id):
 def describe_endpoint(module, cap, method, path, is_async):
     operation_id = _operation_id(module, cap, method, path)
     inputs, outputs = _modalities(operation_id)
-    formats, rates, limits = _constraints(module, operation_id)
+    formats, rates, limits = _constraints(module, operation_id, path)
     scope = "model"
     if operation_id.startswith("voice."):
         scope = "voice"
@@ -556,7 +585,7 @@ def describe_endpoint(module, cap, method, path, is_async):
         "output_modalities": outputs,
         "output_formats": formats,
         "sample_rates": rates,
-        "parameters": _parameters(module, operation_id),
+        "parameters": _parameters(module, operation_id, path),
         "limits": limits,
         "resource_scope": scope,
     }

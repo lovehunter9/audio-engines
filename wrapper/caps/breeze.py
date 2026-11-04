@@ -15,6 +15,8 @@ _HEADROOM = 0.9
 _SPECIALS = 8
 _LIMIT_CEILING = 375  # the longest read seen to come back whole
 _LIMIT_FLOOR = 80
+# CUDA splits a reading past 40 characters into sentences. OpenVINO and a shorter line stay one generate.
+_CUDA_ONE_SHOT_CHARS = 40
 # Speaker boost re-reads the tail of the slice before: its frames plus its text.
 _CTX_SECONDS = 10.0
 # infer.py's --seed default, and set_deterministic's own signature default.
@@ -125,6 +127,20 @@ def split_speak(text, limit=None):
     return tts_long.split_speak(text, speak_limit() if limit is None else int(limit))
 
 
+def speak_parts(text, limit, sentence_each=False):
+    """Pieces for one reading. OpenVINO keeps a short paragraph in one generate."""
+    raw = text or ""
+    by_sentence = bool(sentence_each) or (
+        not _is_ov() and len(raw.strip()) > _CUDA_ONE_SHOT_CHARS)
+    if by_sentence:
+        parts = []
+        for sent in tts_long.sentences(raw) or [raw]:
+            parts.extend(split_speak(sent, limit))
+    else:
+        parts = split_speak(raw, limit)
+    return parts or [raw]
+
+
 _CTX_TEMPLATE = None
 
 
@@ -180,6 +196,12 @@ class BreezeBackend:
     uses_shared_pack = True
     # Card instruction is display / pace copy. Only a request-level instruction is Voice Direction.
     card_instruction_is_direction = False
+    # OpenAI stream yields each finished sentence. This model does not emit codec frames.
+    streams_while_generating = True
+    # Official infer takes reference audio only with its transcript. There is no embedding-only template.
+    requires_ref_transcript = True
+    # The socket is raw pcm. A container format belongs on POST.
+    socket_pcm_only = True
 
     def __init__(self, runtime, tokenizer, audio_tokenizer, model):
         self.runtime = runtime
@@ -309,9 +331,8 @@ class BreezeBackend:
                  fixed, reserve, limit, int(tts_el.MAX_SEQ_LEN))
         if limit < _LIMIT_FLOOR:
             _no_room(limit)
-        parts = split_speak(text, limit)
-        if not parts:
-            parts = [text]
+        # OpenAI stream asks for each sentence. A longer CUDA paragraph is cut there; OpenVINO keeps it.
+        parts = speak_parts(text, limit, sentence_each=bool(kw.get("sentence_each")))
         for part in parts:
             if len(part) > limit:
                 _too_long(len(part))
@@ -404,6 +425,26 @@ class BreezeBackend:
         audio, sr = tts_long.pace(audio, sr, kn.speed)
         tts_el.job_tick(ctx, 1, 1, stage="design")
         return audio, sr, {}
+
+    def iter_design(self, instruction, text, **kw):
+        if not kw.get("sentence_each"):
+            audio, sr, _extra = self.design(instruction, text, **kw)
+            yield audio, sr
+            return
+        ctx = kw.get("ctx")
+        kn = tts_el.resolve_settings(kw.get("settings"), tts_el.DESIGN_CFG,
+                                     instruction, text=text,
+                                     include_speed_direction=False,
+                                     include_style_direction=False,
+                                     seed_jitter=int(kw.get("seed_jitter") or 0))
+        parts = tts_long.sentences(text) or [text]
+        total = len(parts)
+        for i, part in enumerate(parts):
+            tts_el.job_tick(ctx, i, total, stage="design")
+            audio, sr = self._generate(part, kn.instruction or instruction,
+                                       cfg=kn.cfg, ctx=ctx, seed=kn.seed)
+            yield tts_long.pace(audio, sr, kn.speed)
+            tts_el.job_tick(ctx, i + 1, total, stage="design")
 
 
 def _is_ov():
@@ -1387,9 +1428,9 @@ def _install_breeze_codec_ov(audio_tokenizer, path, device):
 
 
 def build_app(supports):
-    return tts_el.build_app(supports, module="breeze")
+    return tts_el.build_app(supports, module="breeze", openai_alias=True, task_legacy=True)
 
 
 def run(supports):
     tts_el.run(supports, module="breeze", watchdog="Breeze TTS 2",
-               load=_load, sample_rate=24000)
+               load=_load, sample_rate=24000, openai_alias=True, task_legacy=True)

@@ -243,6 +243,23 @@ def _hard_cut(piece, limit):
     return [p for p in out if p]
 
 
+def sentences(text):
+    """Cut on sentence ends even when the whole text fits in one generate."""
+    raw = text or ""
+    if not raw.strip():
+        return [raw] if raw else []
+    protected, held = _hold_events(raw)
+    out = []
+    for line in re.split(r"\n+", protected):
+        if not line.strip():
+            continue
+        for sent in _cut(line, _SENT_END, skip=_skip_en_abbr) or [line]:
+            piece = _unhold(sent, held).strip()
+            if piece:
+                out.append(piece)
+    return out or [raw.strip()]
+
+
 def split_speak(text, limit):
     """Newlines always split. Sentence then clause only when a piece is over budget."""
     limit = int(limit)
