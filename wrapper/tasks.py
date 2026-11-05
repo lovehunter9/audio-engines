@@ -351,28 +351,29 @@ class _Runner:
                 log.warning("task %s (%s) failed: %s", task.id, task.cap, e, exc_info=code >= 500)
                 self._settle(task, "failed", exc=e)
             else:
-                if task.keep:
-                    self._store(task, payload)
                 self._settle(task, "succeeded", payload=payload)
             finally:
                 self.running_id = None
 
     def _settle(self, task, status, payload=None, exc=None):
-        task.finished = time.time()
-        task.run_cleanup()
-        # Flipped last: a client that sees a terminal status must see a complete document.
-        task.status = status
-        if not task.future.done():
-            if exc is not None:
-                task.future.set_exception(exc)
-            else:
-                task.future.set_result(payload)
-        if not task.keep:
-            # The sync caller has it off the future; keeping a second copy would only leak.
-            self._tasks.pop(task.id, None)
-        elif status == "succeeded":
-            log.info("task %s (%s) done in %.1fs", task.id, task.cap,
-                     task.finished - (task.started or task.finished))
+        with self._lock:
+            task.finished = time.time()
+            task.run_cleanup()
+            if status == "succeeded" and task.keep and payload is not None:
+                self._store(task, payload)
+            # Flipped last: a client that sees a terminal status must see a complete document.
+            task.status = status
+            if not task.future.done():
+                if exc is not None:
+                    task.future.set_exception(exc)
+                else:
+                    task.future.set_result(payload)
+            if not task.keep:
+                # The sync caller has it off the future; keeping a second copy would only leak.
+                self._tasks.pop(task.id, None)
+            elif status == "succeeded":
+                log.info("task %s (%s) done in %.1fs", task.id, task.cap,
+                         task.finished - (task.started or task.finished))
 
     def _store(self, task, payload):
         if isinstance(payload, (dict, list)):
@@ -545,18 +546,20 @@ def mount(app, legacy=True):
         return _doc(_need(tid))
 
     async def get_result(tid: str):
-        t = _need(tid)
-        if t.status != "succeeded":
-            raise HTTPException(status_code=409, detail="task is %s%s" % (
-                t.status, ": " + str((t.error or {}).get("message")) if t.error else ""))
-        if t.result_kind == "json":
-            return JSONResponse(content=t.result, headers=t.meter_headers() or None)
-        if not (t.result_path and os.path.isfile(t.result_path)):
-            raise HTTPException(status_code=410, detail="the result was already dropped")
-        # gin strips Content-Length; close so a client that cannot see the size does not hang.
-        headers = dict(t.headers or {})
+        with _runner._lock:
+            t = _runner._tasks.get(tid)
+            if t is None or not t.keep:
+                raise HTTPException(status_code=404, detail="no such task: %s" % tid)
+            if t.status != "succeeded":
+                raise HTTPException(status_code=409, detail="task is %s%s" % (
+                    t.status, ": " + str((t.error or {}).get("message")) if t.error else ""))
+            if t.result_kind == "json":
+                return JSONResponse(content=t.result, headers=t.meter_headers() or None)
+            if not (t.result_path and os.path.isfile(t.result_path)):
+                raise HTTPException(status_code=410, detail="the result was already dropped")
+            path, media, headers = t.result_path, t.content_type, dict(t.headers or {})
         headers.setdefault("Connection", "close")
-        return FileResponse(t.result_path, media_type=t.content_type, headers=headers)
+        return FileResponse(path, media_type=media, headers=headers)
 
     def _dropped(t):
         _runner.forget(t)

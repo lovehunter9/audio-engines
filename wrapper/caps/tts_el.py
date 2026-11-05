@@ -2270,6 +2270,7 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
 
         def _work(ctx):
             ctx.progress(ratio=0.0, stage="synthesize")
+            ctx.checkpoint()
             if ref:
                 data, _suffix = _ref_bytes(ref)
                 if not ref_text and not has_clone:
