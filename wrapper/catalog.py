@@ -533,7 +533,7 @@ def _parameters(module, operation_id, path=""):
                 names.append("opus")
             params.append({"name": "response_format", "type": "string", "default": "wav",
                            "enum": names})
-    if module in ("firered", "breeze", "qwen3_voice") and operation_id.startswith(("speech.", "voice.settings")):
+    if module in ("firered", "breeze", "qwen3_voice", "ming") and operation_id.startswith(("speech.", "voice.settings")):
         params.extend([
             {"name": "speed", "type": "number", "default": 1.0, "minimum": 0.25, "maximum": 4.0},
             {"name": "stability", "type": "number", "default": 0.5, "minimum": 0.0, "maximum": 1.0},
