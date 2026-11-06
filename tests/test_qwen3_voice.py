@@ -189,14 +189,47 @@ class QwenRouteTest(unittest.TestCase):
         fake = _FakeModel()
         backend = _backend(fake)
         spoken = "第一句。第二句还很长，不要切开。"
-        backend.clone(spoken, np.zeros(8, dtype="float32"), 16000, qwen3_voice.SPEAKERS[0][2],
-                      instruction="慢一点", sampling={"language": "Chinese"})
+        backend.speak_native({"voice_id": "Vivian", "category": "premade"}, spoken,
+                             instruction="慢一点", sampling={"language": "Chinese"})
         self.assertEqual([kind for kind, _kw in fake.calls], ["custom"])
         kw = fake.calls[0][1]
         self.assertEqual(kw["speaker"], "Vivian")
         self.assertEqual(kw["text"], spoken)
         self.assertEqual(kw["language"], "Chinese")
         self.assertEqual(kw["instruct"], "慢一点")
+
+    def test_matching_official_transcript_still_uses_the_reference(self):
+        from unittest.mock import patch
+
+        reference = qwen3_voice.SPEAKERS[0][2]
+        for base in ("qwen3voice", "qwen3voiceov"):
+            with self.subTest(base=base), patch.dict(os.environ, {"AUDIO_BASE": base}):
+                fake = _FakeModel()
+                backend = _backend(fake)
+                seen = []
+
+                def generate(repo, method, kwargs):
+                    seen.append((repo, method, kwargs))
+                    return np.zeros(16, dtype="float32"), 24000
+
+                def stream(repo, method, kwargs):
+                    seen.append((repo, method, kwargs))
+                    yield np.zeros(16, dtype="float32"), 24000
+
+                with patch.object(qwen3_voice, "_OV_GENERATE_HOOK", generate), \
+                        patch.object(qwen3_voice, "_OV_STREAM_HOOK", stream):
+                    backend.clone("这是新的文本。", np.zeros(8, dtype="float32"), 16000, reference)
+                    list(backend.iter_clone(
+                        "这是新的文本。", np.zeros(8, dtype="float32"), 16000, reference))
+                if base == "qwen3voiceov":
+                    self.assertEqual([row[:2] for row in seen], [
+                        (qwen3_voice.BASE_REPO, "generate_voice_clone"),
+                        (qwen3_voice.BASE_REPO, "generate_voice_clone_streaming"),
+                    ])
+                    self.assertTrue(all(row[2]["ref_text"] == reference for row in seen))
+                else:
+                    self.assertEqual([kind for kind, _kw in fake.calls], ["clone", "clone_stream"])
+                    self.assertTrue(all(kw["ref_text"] == reference for _kind, kw in fake.calls))
 
     def test_empty_transcript_is_xvec_and_a_user_clone_is_not(self):
         fake = _FakeModel()
@@ -229,8 +262,8 @@ class QwenRouteTest(unittest.TestCase):
 
         qwen3_voice._OV_GENERATE_HOOK = hook
         try:
-            backend.clone("第一句。第二句。", np.zeros(8, dtype="float32"), 16000,
-                          qwen3_voice.SPEAKERS[0][2], sampling={"language": "Chinese"})
+            backend.speak_native({"voice_id": "Vivian", "category": "premade"},
+                                 "第一句。第二句。", sampling={"language": "Chinese"})
             backend.clone("你好", np.zeros(8, dtype="float32"), 16000, "")
             backend.design("一个沉稳的男声", "今天下午见。")
         finally:
@@ -263,14 +296,13 @@ class QwenRouteTest(unittest.TestCase):
     def test_live_iter_uses_streaming_and_one_shot_does_not(self):
         fake = _FakeModel()
         backend = _backend(fake)
-        text = qwen3_voice.SPEAKERS[0][2]
-        pieces = list(backend.iter_clone(
-            "门口见。", np.zeros(8, dtype="float32"), 16000, text, chunk_size=3))
+        card = {"voice_id": "Vivian", "category": "premade"}
+        pieces = list(backend.iter_speak_native(card, "门口见。", chunk_size=3))
         self.assertEqual([kind for kind, _kw in fake.calls], ["custom_stream"])
         self.assertEqual(fake.calls[0][1]["chunk_size"], 3)
         self.assertEqual(len(pieces), 2)
         self.assertEqual(len(pieces[0][0]) + len(pieces[1][0]), 1200)
-        backend.clone("门口见。", np.zeros(8, dtype="float32"), 16000, text)
+        backend.speak_native(card, "门口见。")
         self.assertEqual(fake.calls[-1][0], "custom")
         fake.calls.clear()
         designed = list(backend.iter_design("一个沉稳的男声", "今天下午见。"))
@@ -297,9 +329,8 @@ class QwenRouteTest(unittest.TestCase):
 
         qwen3_voice._OV_STREAM_HOOK = hook
         try:
-            pieces = list(backend.iter_clone(
-                "门口见。", np.zeros(8, dtype="float32"), 16000, qwen3_voice.SPEAKERS[0][2],
-                chunk_size=5))
+            pieces = list(backend.iter_speak_native(
+                {"voice_id": "Vivian", "category": "premade"}, "门口见。", chunk_size=5))
         finally:
             qwen3_voice._OV_STREAM_HOOK = None
             if previous is None:

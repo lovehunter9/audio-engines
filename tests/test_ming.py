@@ -47,6 +47,25 @@ class CatalogTests(unittest.TestCase):
 
 
 class BackendTests(unittest.TestCase):
+    def test_design_candidate_seed_reaches_both_backends(self):
+        from unittest.mock import patch
+
+        class Model:
+            sample_rate = 24000
+
+            def synthesize(self, **kwargs):
+                return np.zeros((1, 16), dtype="float32")
+
+        for base in ("ming", "mingov"):
+            with self.subTest(base=base), patch.dict(os.environ, {"AUDIO_BASE": base}), \
+                    patch.object(tts_el, "SEED", 100):
+                backend = ming_backend.MingBackend(Model())
+                seeds = []
+                backend._seed = lambda knobs: seeds.append(knobs.seed)
+                for candidate in range(3):
+                    backend.design("calm", "Hello.", seed_jitter=candidate)
+                self.assertEqual(seeds, [100, 8019, 15938])
+
     def test_tasks_stay_separate_and_knobs_are_applied(self):
         seen = []
 

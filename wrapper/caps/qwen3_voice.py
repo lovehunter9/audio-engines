@@ -190,17 +190,6 @@ _OV_GENERATE_HOOK = None
 _OV_STREAM_HOOK = None
 
 
-def _official_speaker(prompt_text):
-    """The nine baked sentences are the official speakers. Anything else is a real clone."""
-    norm = " ".join(str(prompt_text or "").split())
-    if not norm:
-        return None
-    for speaker, _language, text, _description, _labels in SPEAKERS:
-        if " ".join(text.split()) == norm:
-            return speaker
-    return None
-
-
 def _cfg_sampling(cfg, base):
     """Higher CFG than this task's base is tighter sampling. The base itself is a no-op."""
     base = float(base) or 1.0
@@ -486,37 +475,65 @@ class QwenVoiceBackend:
             except OSError:
                 pass
 
+    def _speaker(self, meta):
+        meta = meta or {}
+        speaker = str(meta.get("voice_id") or "")
+        if meta.get("category") != "premade" or speaker not in {row[0] for row in SPEAKERS}:
+            raise tts_el.HTTPException(status_code=400, detail="unknown native voice %r" % speaker)
+        return speaker
+
+    def speak_native(self, meta, text, instruction=None, ctx=None, settings=None, sampling=None):
+        speaker = self._speaker(meta)
+        gen, speed, seed, language = _sampling(settings, text, instruction or "", sampling=sampling)
+        if self._openvino():
+            audio, sr = _ov_generate(CUSTOM_REPO, "generate_custom_voice", {
+                "text": text, "speaker": speaker, "language": language, "seed": seed, **gen})
+        else:
+            audio, sr = self._generate_custom(speaker, text, gen, seed, language)
+        tts_el.job_tick(ctx, 1, 1)
+        return tts_long.pace(audio, sr, speed)
+
+    def iter_speak_native(self, meta, text, **kw):
+        speaker = self._speaker(meta)
+        gen, speed, seed, language = _sampling(
+            kw.get("settings"), text, kw.get("instruction") or "", sampling=kw.get("sampling"))
+        size = _chunk_size(kw)
+        if self._openvino():
+            chunks = _ov_stream(CUSTOM_REPO, "generate_custom_voice_streaming", {
+                "text": text, "speaker": speaker, "language": language,
+                "seed": seed, "chunk_size": size, **gen})
+            yield from self._pace_chunks(chunks, speed)
+        else:
+            try:
+                model = self._custom_model()
+                chunks = self._iter_loaded(model, "generate_custom_voice", {
+                    "text": text, "speaker": speaker, "language": language, **gen}, seed, size)
+                yield from self._pace_chunks(chunks, speed)
+            finally:
+                self._drop_custom()
+                self._ensure_base()
+        tts_el.job_tick(kw.get("ctx"), 1, 1)
+
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         # One call for the whole text. Do not feed the previous sentence back in.
         instruction = str(kw.get("instruction") or "").strip()
         sampling = kw.get("sampling") or {}
         gen, speed, seed, language = _sampling(
             kw.get("settings"), text, instruction, sampling=sampling)
+        xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
         if self._openvino():
-            speaker = _official_speaker(prompt_text)
-            if speaker:
-                audio, sr = _ov_generate(CUSTOM_REPO, "generate_custom_voice", {
-                    "text": text, "speaker": speaker, "language": language,
-                    "seed": seed, **gen})
-            else:
-                xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
-                path = self._prompt_path(prompt_audio, prompt_sr)
+            path = self._prompt_path(prompt_audio, prompt_sr)
+            try:
+                audio, sr = _ov_generate(BASE_REPO, "generate_voice_clone", {
+                    "text": text, "language": language, "ref_audio": path,
+                    "ref_text": "" if xvec else (prompt_text or ""),
+                    "xvec_only": bool(xvec), "seed": seed, **gen})
+            finally:
                 try:
-                    audio, sr = _ov_generate(BASE_REPO, "generate_voice_clone", {
-                        "text": text, "language": language, "ref_audio": path,
-                        "ref_text": "" if xvec else (prompt_text or ""),
-                        "xvec_only": bool(xvec), "seed": seed, **gen})
-                finally:
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
-            return tts_long.pace(audio, sr, speed)
-        speaker = _official_speaker(prompt_text)
-        if speaker:
-            audio, sr = self._generate_custom(speaker, text, gen, seed, language)
+                    os.unlink(path)
+                except OSError:
+                    pass
         else:
-            xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
             audio, sr = self._generate_clone(
                 text, prompt_audio, prompt_sr, prompt_text, gen, seed, language, xvec)
         return tts_long.pace(audio, sr, speed)
@@ -558,12 +575,6 @@ class QwenVoiceBackend:
                            language, sampling, chunk_size):
         # One generation for the whole text. Chunks are codec steps, not earlier sentences.
         if self._openvino():
-            speaker = _official_speaker(prompt_text)
-            if speaker:
-                yield from _ov_stream(CUSTOM_REPO, "generate_custom_voice_streaming", {
-                    "text": text, "speaker": speaker, "language": language,
-                    "seed": seed, "chunk_size": chunk_size, **gen})
-                return
             xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
             path = self._prompt_path(prompt_audio, prompt_sr)
             try:
@@ -576,17 +587,6 @@ class QwenVoiceBackend:
                     os.unlink(path)
                 except OSError:
                     pass
-            return
-        speaker = _official_speaker(prompt_text)
-        if speaker:
-            try:
-                model = self._custom_model()
-                yield from self._iter_loaded(model, "generate_custom_voice", {
-                    "text": text, "speaker": speaker, "language": language, **gen,
-                }, seed, chunk_size)
-            finally:
-                self._drop_custom()
-                self._ensure_base()
             return
         xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
         self._drop_design()

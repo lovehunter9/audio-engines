@@ -29,6 +29,7 @@ from ..audioio import decode, probe_seconds, seconds, wav_seconds
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
 from ..runtime import Runtime
+from . import voice_storage
 
 log = logging.getLogger("audio-tts-el")
 
@@ -39,6 +40,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 _args = EngineArgs()
 VOICE_DIR = Path(str(_args.text("--voice-dir", "/data/voices") or "/data/voices"))
+SHARED_VOICE_DIR = str(_args.text("--shared-voice-dir", "") or "").strip()
 N_TIMESTEPS = int(_args.number("--n-timesteps", 10))
 INFERENCE_CFG = _args.number("--inference-cfg", 2.0)
 DESIGN_CFG = _args.number("--design-cfg", 1.2)
@@ -709,7 +711,7 @@ def _pack_for(vid, pack, native_pack):
     return pack
 
 
-def seed_builtins(module, dest, backend=None, cards=None, pack=None):
+def _seed_builtins(module, dest, backend=None, cards=None, pack=None):
     """Reconcile premade cards with the current union. User clones / designs stay.
 
     Two premade kinds, compared differently:
@@ -723,7 +725,6 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    (dest / "pending").mkdir(parents=True, exist_ok=True)
     if cards is None:
         cards = premade_cards(backend, module)
     want = {}
@@ -760,18 +761,36 @@ def seed_builtins(module, dest, backend=None, cards=None, pack=None):
     return [planted[vid] for vid in want if vid in planted]
 
 
+def seed_builtins(module, dest, backend=None, cards=None, pack=None):
+    with voice_storage.locked(dest):
+        return _seed_builtins(module, dest, backend=backend, cards=cards, pack=pack)
+
+
 class VoiceStore:
     """PVC-backed voice library. Premade slots come from the backend; clones/designs are files."""
 
-    def __init__(self, root, presets):
+    def __init__(self, root, presets, shared_root=None, shared_presets=None):
         self.root = Path(root)
+        self.shared_root = Path(shared_root) if shared_root else None
+        if self.shared_root is not None and self.shared_root.resolve() == self.root.resolve():
+            raise ValueError("shared and private voice directories must be different")
         self.root.mkdir(parents=True, exist_ok=True)
         (self.root / "pending").mkdir(exist_ok=True)
+        if self.shared_root is not None:
+            self.shared_root.mkdir(parents=True, exist_ok=True)
         self.presets = {p["voice_id"]: dict(p) for p in presets}
+        shared = builtin_presets(None) if shared_presets is None else shared_presets
+        self.shared_ids = {card["voice_id"] for card in shared}
+        self.native_ids = set(self.presets) - self.shared_ids
+
+    def is_native(self, vid):
+        return vid in self.native_ids
 
     def _dir(self, vid):
-        return self.root / vid
+        base = self.root if self.shared_root is None or self.is_native(vid) else self.shared_root
+        return base / vid
 
+    @voice_storage.serialized
     def _read_meta(self, vid):
         path = self._dir(vid) / "meta.json"
         if not path.is_file():
@@ -779,14 +798,9 @@ class VoiceStore:
         return json.loads(path.read_text())
 
     def _write(self, vid, meta, wav_bytes=None, transcript=None):
-        d = self._dir(vid)
-        d.mkdir(parents=True, exist_ok=True)
-        (d / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2))
-        if wav_bytes is not None:
-            (d / "prompt.wav").write_bytes(wav_bytes)
-        if transcript is not None:
-            (d / "prompt.txt").write_text(transcript)
+        voice_storage.write_voice(self._dir(vid), meta, wav_bytes, transcript)
 
+    @voice_storage.serialized
     def prompt(self, vid):
         wav = self._dir(vid) / "prompt.wav"
         txt = self._dir(vid) / "prompt.txt"
@@ -795,6 +809,7 @@ class VoiceStore:
         transcript = txt.read_text() if txt.is_file() else ""
         return wav, transcript, self._read_meta(vid)
 
+    @voice_storage.serialized
     def freeze(self, vid, audio, sr, transcript, extra=None):
         meta = self._read_meta(vid) or dict(self.presets.get(vid) or {}, voice_id=vid)
         meta["frozen"] = True
@@ -805,6 +820,7 @@ class VoiceStore:
         self._write(vid, meta, wav_bytes=_wav_bytes(audio, sr), transcript=transcript)
         return meta
 
+    @voice_storage.serialized
     def remember_plan(self, vid, plan):
         """Keep the official 12-item voice plan without replacing the frozen wav."""
         if not plan:
@@ -828,13 +844,10 @@ class VoiceStore:
     def put_preview(self, instruction, audio, sr, text, extra=None):
         gid = _new_id("gen")
         pending = self.root / "pending" / gid
-        pending.mkdir(parents=True, exist_ok=True)
         wav = _wav_bytes(audio, sr)
-        (pending / "prompt.wav").write_bytes(wav)
-        (pending / "prompt.txt").write_text(text or "")
         doc = {"generated_voice_id": gid, "instruction": instruction,
                "text": text or "", "extra": extra or {}, "sample_rate": sr}
-        (pending / "meta.json").write_text(json.dumps(doc, ensure_ascii=False, indent=2))
+        voice_storage.write_voice(pending, doc, wav, text or "")
         return gid, wav, sr
 
     def promote_preview(self, generated_voice_id, name, description=""):
@@ -842,10 +855,11 @@ class VoiceStore:
         if not pending.is_dir():
             raise HTTPException(status_code=404,
                                 detail="unknown generated_voice_id %r" % generated_voice_id)
-        doc = json.loads((pending / "meta.json").read_text())
+        with voice_storage.locked(pending.parent):
+            doc = json.loads((pending / "meta.json").read_text())
+            wav = (pending / "prompt.wav").read_bytes()
+            transcript = (pending / "prompt.txt").read_text() if (pending / "prompt.txt").is_file() else ""
         vid = _new_id("des")
-        wav = (pending / "prompt.wav").read_bytes()
-        transcript = (pending / "prompt.txt").read_text() if (pending / "prompt.txt").is_file() else ""
         extra = doc.get("extra") or {}
         plan = extra.get("plan")
         meta = {"voice_id": vid, "name": name or vid, "category": "generated",
@@ -860,6 +874,7 @@ class VoiceStore:
         self._write(vid, meta, wav_bytes=wav, transcript=transcript)
         return meta
 
+    @voice_storage.serialized
     def get(self, vid):
         if vid in self.presets:
             stored = self._read_meta(vid) or {}
@@ -870,25 +885,31 @@ class VoiceStore:
             return out
         meta = self._read_meta(vid)
         if meta:
+            if self.shared_root is not None and meta.get("category") == "premade":
+                return None
             return meta
         return None
 
     def list(self):
         seen, rows = set(), []
-        for vid, preset in self.presets.items():
+        for vid in self.presets:
             rows.append(self.get(vid))
             seen.add(vid)
-        for child in sorted(self.root.iterdir()):
-            if not child.is_dir() or child.name == "pending" or child.name in seen:
-                continue
-            meta = self._read_meta(child.name)
-            if meta:
-                rows.append(meta)
+        base = self.shared_root if self.shared_root is not None else self.root
+        with voice_storage.locked(base):
+            for child in sorted(base.iterdir()):
+                if (not child.is_dir() or child.name.startswith(".")
+                        or child.name == "pending" or child.name in seen):
+                    continue
+                meta = self.get(child.name)
+                if meta:
+                    rows.append(meta)
         return rows
 
     def _premade(self, vid, meta):
         return vid in self.presets or (meta or {}).get("category") == "premade"
 
+    @voice_storage.serialized
     def delete(self, vid):
         meta = self.get(vid)
         if meta is None:
@@ -901,6 +922,7 @@ class VoiceStore:
             shutil.rmtree(d)
         return {"status": "ok"}
 
+    @voice_storage.serialized
     def edit(self, vid, *, name, description=None, labels=None, wav_bytes=None,
              transcript=None):
         meta = self.get(vid)
@@ -933,6 +955,7 @@ class VoiceStore:
             raise HTTPException(status_code=404, detail="unknown voice_id %r" % vid)
         return _settings_of(meta)
 
+    @voice_storage.serialized
     def edit_settings(self, vid, patch):
         """Premade cards can change settings; name/edit still refuses them."""
         meta = self.get(vid)
@@ -1402,12 +1425,16 @@ def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_
 def _public_voice(meta):
     if not meta:
         return None
+    labels = dict(meta.get("labels") or {})
+    store = _state.get("store")
+    if getattr(store, "shared_root", None) is not None:
+        labels["voice_scope"] = "model" if store.is_native(meta["voice_id"]) else "shared"
     return {
         "voice_id": meta["voice_id"],
         "name": meta.get("name") or meta["voice_id"],
         "category": meta.get("category") or "premade",
         "description": meta.get("description") or meta.get("instruction") or "",
-        "labels": meta.get("labels") or {},
+        "labels": labels,
         "preview_url": None,
         "available_for_tiers": [],
         "high_quality_base_model_ids": [],
@@ -1506,7 +1533,13 @@ def _ensure_frozen(vid, ctx=None):
         raise HTTPException(status_code=404, detail="unknown voice_id %r" % vid)
     wav_path, transcript, _stored = store.prompt(vid)
     if wav_path is not None:
+        if store.shared_root is not None and not (transcript or "").strip():
+            raise HTTPException(status_code=400,
+                                detail="saved voice %r is missing its reference transcript" % vid)
         return meta, wav_path, transcript
+    if store.shared_root is not None and meta.get("category") in ("cloned", "generated"):
+        raise HTTPException(status_code=400,
+                            detail="saved voice %r is missing its reference audio" % vid)
     if (meta.get("source") or "").strip().lower() == "clone":
         raise HTTPException(status_code=400,
                             detail="premade clone voice %r is missing prompt.wav / prompt.txt"
@@ -1588,6 +1621,8 @@ def _native_premade(vid):
     meta = _store().get(vid)
     if not meta or str(meta.get("category") or "") != "premade":
         return None
+    if _store().is_native(vid):
+        return meta, fn
     wav_path, _transcript, _stored = _store().prompt(vid)
     if wav_path is not None or (meta.get("instruction") or "").strip():
         return None
@@ -1666,7 +1701,11 @@ def _iter_speak_voice(vid, text, instruction=None, ctx=None, settings=None):
     if native:
         meta, fn = native
         with _gen_lock:
-            yield fn(meta, text, instruction=instruction, ctx=ctx, settings=settings)
+            stream = getattr(backend, "iter_speak_native", None)
+            if callable(stream):
+                yield from stream(meta, text, instruction=instruction, ctx=ctx, settings=settings)
+            else:
+                yield fn(meta, text, instruction=instruction, ctx=ctx, settings=settings)
         return
     meta, wav_path, transcript = _ensure_frozen(vid, ctx=ctx)
     if getattr(backend, "prefer_design_speak", False) and _design_identity(meta):
@@ -2101,8 +2140,12 @@ def _iter_openai_live(text, voice, instructions, ref_data, ref_text, settings, s
         if native:
             meta, fn = native
             with _gen_lock:
-                yielded = fn(meta, text, instruction=instruction or None, settings=settings, **extra)
-            yield yielded
+                stream = getattr(backend, "iter_speak_native", None)
+                if callable(stream):
+                    yield from stream(meta, text, instruction=instruction or None,
+                                      settings=settings, **extra, **chunk_kw)
+                else:
+                    yield fn(meta, text, instruction=instruction or None, settings=settings, **extra)
             return
         _meta, wav_path, transcript = _ensure_frozen(voice)
         meta = _meta
@@ -3031,8 +3074,18 @@ def install(backend, store=None, sample_rate=24000):
     """Tests and a completed load both land here so the HTTP surface never imports the model."""
     _state["backend"] = backend
     if store is None:
-        cards = seed_builtins(_MODULE["name"], VOICE_DIR, backend=backend)
-        store = VoiceStore(VOICE_DIR, cards or list(backend.presets() or []))
+        if SHARED_VOICE_DIR:
+            if Path(SHARED_VOICE_DIR).resolve() == Path(VOICE_DIR).resolve():
+                raise ValueError("shared and private voice directories must be different")
+            shared = builtin_presets(_MODULE["name"]) if getattr(backend, "uses_shared_pack", True) else []
+            shared = seed_builtins(_MODULE["name"], SHARED_VOICE_DIR, cards=shared)
+            native = getattr(backend, "native_presets", lambda: [])()
+            native = seed_builtins(_MODULE["name"], VOICE_DIR, backend=backend, cards=native)
+            store = VoiceStore(VOICE_DIR, native + shared,
+                               shared_root=SHARED_VOICE_DIR, shared_presets=shared)
+        else:
+            cards = seed_builtins(_MODULE["name"], VOICE_DIR, backend=backend)
+            store = VoiceStore(VOICE_DIR, cards or list(backend.presets() or []))
     _state["store"] = store
     _state["history"] = HistoryStore(_history_dir(store))
     _state["sample_rate"] = int(getattr(backend, "sample_rate", None) or sample_rate)

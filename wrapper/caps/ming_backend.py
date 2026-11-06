@@ -141,10 +141,10 @@ class MingBackend:
     def presets(self):
         return tts_el.premade_cards(self, "ming")
 
-    def _knobs(self, settings, text, instruction):
+    def _knobs(self, settings, text, instruction, seed_jitter=0):
         # 2.0 is MingTTS.synthesize's own default. Style text is not appended.
         return tts_el.resolve_settings(
-            settings, 2.0, instruction or "", text=text or "",
+            settings, 2.0, instruction or "", text=text or "", seed_jitter=seed_jitter,
             include_speed_direction=False, include_style_direction=False)
 
     def _arm(self, turn, kn, sampling, instruction=None, xvec=False):
@@ -260,7 +260,8 @@ class MingBackend:
         return self._paced(audio, sr, kn.speed)
 
     def design(self, instruction, text, **kw):
-        kn = self._knobs(kw.get("settings"), text, "")
+        kn = self._knobs(kw.get("settings"), text, "",
+                         seed_jitter=int(kw.get("seed_jitter") or 0))
         self._seed(kn)
         style = (instruction or "").strip()
         sampling = dict(kw.get("sampling") or {})
