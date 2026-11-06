@@ -834,10 +834,12 @@ class VoiceStore:
         meta["extra"] = extra
         self._write(vid, meta)
 
-    def add_clone(self, name, wav_bytes, transcript, description=""):
+    def add_clone(self, name, wav_bytes, transcript, description="", labels=None):
         vid = _new_id("clone")
         meta = {"voice_id": vid, "name": name or vid, "category": "cloned",
                 "source": "clone", "description": description or "", "frozen": True}
+        if labels is not None:
+            meta["labels"] = dict(labels)
         self._write(vid, meta, wav_bytes=wav_bytes, transcript=transcript)
         return meta
 
@@ -850,7 +852,7 @@ class VoiceStore:
         voice_storage.write_voice(pending, doc, wav, text or "")
         return gid, wav, sr
 
-    def promote_preview(self, generated_voice_id, name, description=""):
+    def promote_preview(self, generated_voice_id, name, description="", labels=None):
         pending = self.root / "pending" / generated_voice_id
         if not pending.is_dir():
             raise HTTPException(status_code=404,
@@ -867,6 +869,8 @@ class VoiceStore:
                 "description": description or doc.get("instruction") or "",
                 "instruction": doc.get("instruction") or "", "frozen": True,
                 "generated_voice_id": generated_voice_id}
+        if labels is not None:
+            meta["labels"] = dict(labels)
         if extra:
             meta["extra"] = extra
         if plan:
@@ -1420,6 +1424,19 @@ def resolve_settings(settings, base_cfg, instruction="", text="", include_speed_
                  _settings_direction(s, instruction, text,
                                      include_speed=include_speed_direction,
                                      include_style=include_style_direction), boost)
+
+
+def _parse_voice_labels(value):
+    if value is None or isinstance(value, str) and not value.strip():
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=400, detail="labels must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail="labels must be a JSON object")
+    return {str(key): str(item) for key, item in value.items()}
 
 
 def _public_voice(meta):
@@ -2474,15 +2491,7 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
                              files: list[UploadFile] | None = File(default=None),
                              file: UploadFile | None = File(default=None)):
             _require_ready()
-            parsed_labels = None
-            if labels and labels.strip():
-                try:
-                    doc = json.loads(labels)
-                except json.JSONDecodeError as e:
-                    raise HTTPException(status_code=400, detail="labels must be a JSON object") from e
-                if not isinstance(doc, dict):
-                    raise HTTPException(status_code=400, detail="labels must be a JSON object")
-                parsed_labels = {str(k): str(v) for k, v in doc.items()}
+            parsed_labels = _parse_voice_labels(labels)
             uploads = [u for u in (files or []) if u is not None]
             if file is not None:
                 uploads.append(file)
@@ -2554,12 +2563,13 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
             if not name:
                 raise HTTPException(status_code=400, detail="voice_name is required")
             desc = str(payload.get("voice_description") or "").strip()
+            parsed_labels = _parse_voice_labels(payload.get("labels"))
             async_ = request.query_params.get("async")
 
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="save")
                 job_tick(ctx, 0, 1, stage="save")
-                meta = _store().promote_preview(gid, name, desc)
+                meta = _store().promote_preview(gid, name, desc, labels=parsed_labels)
                 job_tick(ctx, 1, 1, stage="save")
                 ctx.progress(ratio=1.0, stage="done")
                 return _public_voice(meta)
@@ -2632,13 +2642,11 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
             if not data:
                 raise HTTPException(status_code=400, detail="reference audio is empty")
             _check_ref_audio(data)
+            parsed_labels = _parse_voice_labels(labels)
             transcript = (ref_text or description or "").strip()
-            if labels.strip().startswith("{"):
-                try:
-                    doc = json.loads(labels)
-                    transcript = transcript or str(doc.get("transcript") or doc.get("ref_text") or "")
-                except json.JSONDecodeError:
-                    pass
+            if parsed_labels:
+                fields = json.loads(labels)
+                transcript = transcript or str(fields.get("transcript") or fields.get("ref_text") or "")
             if not transcript:
                 raise HTTPException(status_code=400,
                                     detail="description or ref_text must be the exact transcript of the reference")
@@ -2647,7 +2655,8 @@ def build_app(supports, module=None, openai_alias=False, task_legacy=False):
             def _work(ctx):
                 ctx.progress(ratio=0.0, stage="clone")
                 job_tick(ctx, 0, 1, stage="clone")
-                meta = _store().add_clone(name, wav, transcript, description=description)
+                meta = _store().add_clone(name, wav, transcript, description=description,
+                                          labels=parsed_labels)
                 job_tick(ctx, 1, 1, stage="clone")
                 ctx.progress(ratio=1.0, stage="done")
                 return {"voice_id": meta["voice_id"]}
