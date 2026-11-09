@@ -224,7 +224,7 @@ class ReferenceTests(unittest.TestCase):
 
         model = Model()
         backend = ming_backend.MingBackend(model)
-        for output in (np.array([], dtype="float32"), np.zeros(2400),
+        for output in (np.array([], dtype="float32"), np.zeros(2400), np.full(2400, 1e-8),
                        np.array([float("nan")]), np.array([float("inf")])):
             model.output = output
             with self.subTest(output=output), patch.object(ming_backend, "widen_decode_cache"), \

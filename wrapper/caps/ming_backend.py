@@ -126,7 +126,7 @@ def _audio(wave):
     if audio.ndim > 1:
         audio = audio.reshape(-1) if audio.shape[0] == 1 else audio.mean(axis=0)
     audio = audio.reshape(-1)
-    if not len(audio) or not np.isfinite(audio).all() or not np.any(audio):
+    if not len(audio) or not np.isfinite(audio).all() or not np.any(np.abs(audio) >= 1.0 / 32767):
         raise RuntimeError("Ming produced empty, non-finite or silent audio")
     return np.clip(audio, -1.0, 1.0)
 
