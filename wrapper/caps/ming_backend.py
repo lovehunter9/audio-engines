@@ -58,6 +58,27 @@ def _keep_voiced(wave, sr):
     return w[start:end]
 
 
+def _reference_audio(audio, sr):
+    """Remove a long near-silent tail without changing the stored reference."""
+    wave = np.asarray(audio, dtype="float32").reshape(-1)
+    if not sr or not len(wave) or not np.isfinite(wave).all():
+        return wave
+    frame = max(1, int(sr * 0.01))
+    full = len(wave) // frame
+    if not full:
+        return wave
+    rms = np.sqrt(np.mean(wave[:full * frame].reshape(full, frame) ** 2, axis=1))
+    voiced = np.flatnonzero(rms >= 0.001)
+    if not len(voiced):
+        return wave
+    end = int(voiced[-1] + 1) * frame
+    if np.any(np.abs(wave[full * frame:]) >= 0.001):
+        return wave
+    if len(wave) - end < int(sr * 0.5):
+        return wave
+    return wave[:min(len(wave), end + int(sr * 0.02))]
+
+
 def _use_soundfile():
     """Route torchaudio.load through soundfile. TorchAudio 2.9 calls TorchCodec, which this image does not install."""
     try:
@@ -104,7 +125,10 @@ def _audio(wave):
     audio = np.asarray(wave, dtype="float32")
     if audio.ndim > 1:
         audio = audio.reshape(-1) if audio.shape[0] == 1 else audio.mean(axis=0)
-    return np.clip(audio.reshape(-1), -1.0, 1.0)
+    audio = audio.reshape(-1)
+    if not len(audio) or not np.isfinite(audio).all() or not np.any(audio):
+        raise RuntimeError("Ming produced empty, non-finite or silent audio")
+    return np.clip(audio, -1.0, 1.0)
 
 
 # Upstream stops at 512 positions, so a half-minute reference decodes nothing and torch.cat crashes. The position table is 32768.
@@ -172,7 +196,8 @@ class MingBackend:
         return self.model.synthesize(**kwargs)
 
     def _paced(self, audio, sr, speed):
-        return tts_long.pace(audio, sr, speed)
+        audio, sr = tts_long.pace(audio, sr, speed)
+        return _audio(audio), sr
 
     def _seed(self, kn):
         if kn.seed is None:
@@ -238,7 +263,7 @@ class MingBackend:
         sampling = dict(kw.get("sampling") or {})
         transcript = (prompt_text or "").strip()
         xvec = bool(sampling.get("x_vector_only")) or not transcript
-        path = self._prompt_path(prompt_audio, prompt_sr)
+        path = self._prompt_path(_reference_audio(prompt_audio, prompt_sr), prompt_sr)
         try:
             pieces = tts_long.split_speak(text, _CLONE_CHARS) or [(text or "").strip()]
             waves = []
@@ -253,6 +278,9 @@ class MingBackend:
                 # Same reference on every piece. The previous piece is not the next prompt.
                 audio, sr = tts_long.join(waves, sr, gap_ms=80)
         finally:
+            cache = getattr(self.model, "_prompt_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(path, None)
             try:
                 os.unlink(path)
             except OSError:

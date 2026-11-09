@@ -54,7 +54,7 @@ class BackendTests(unittest.TestCase):
             sample_rate = 24000
 
             def synthesize(self, **kwargs):
-                return np.zeros((1, 16), dtype="float32")
+                return np.full((1, 16), 0.2, dtype="float32")
 
         for base in ("ming", "mingov"):
             with self.subTest(base=base), patch.dict(os.environ, {"AUDIO_BASE": base}), \
@@ -74,7 +74,7 @@ class BackendTests(unittest.TestCase):
 
             def synthesize(self, **kwargs):
                 seen.append(kwargs)
-                return np.zeros((1, 16), dtype="float32")
+                return np.full((1, 16), 0.2, dtype="float32")
 
         backend = ming_backend.MingBackend(Model())
         audio, sr = backend.speak_native(
@@ -197,6 +197,70 @@ class BackendTests(unittest.TestCase):
         self.assertGreater(len(slower), len(normal) * 1.6)
 
 
+class ReferenceTests(unittest.TestCase):
+    def test_only_long_quiet_tail_is_removed(self):
+        voiced = np.full(2000, 0.1, dtype="float32")
+        gap = np.zeros(1000, dtype="float32")
+        wave = np.concatenate([voiced, gap, voiced, np.zeros(1100, dtype="float32")])
+        original = wave.copy()
+        out = ming_backend._reference_audio(wave, 1000)
+        np.testing.assert_array_equal(out, wave[:5020])
+        np.testing.assert_array_equal(wave, original)
+        quiet = np.full(2000, 0.0005, dtype="float32")
+        np.testing.assert_array_equal(ming_backend._reference_audio(quiet, 1000), quiet)
+        normal = np.concatenate([voiced, np.zeros(200, dtype="float32")])
+        np.testing.assert_array_equal(ming_backend._reference_audio(normal, 1000), normal)
+        remainder = np.concatenate([voiced, gap, np.array([0.1], dtype="float32")])
+        np.testing.assert_array_equal(ming_backend._reference_audio(remainder, 1000), remainder)
+
+    def test_invalid_synthesis_is_an_error(self):
+        from unittest.mock import patch
+
+        class Model:
+            sample_rate = 24000
+
+            def synthesize(self, **kwargs):
+                return self.output
+
+        model = Model()
+        backend = ming_backend.MingBackend(model)
+        for output in (np.array([], dtype="float32"), np.zeros(2400),
+                       np.array([float("nan")]), np.array([float("inf")])):
+            model.output = output
+            with self.subTest(output=output), patch.object(ming_backend, "widen_decode_cache"), \
+                    self.assertRaisesRegex(RuntimeError, "Ming produced"):
+                backend.speak_native({"ip": "US_James"}, "Hello.")
+
+    def test_temporary_prompt_cache_is_removed_on_success_and_error(self):
+        from unittest.mock import patch
+
+        class Model:
+            sample_rate = 24000
+
+            def __init__(self):
+                self._prompt_cache = {"unrelated": "keep"}
+                self.paths = []
+                self.fail = False
+
+            def synthesize(self, **kwargs):
+                path = kwargs["prompt_wav_path"]
+                self.paths.append(path)
+                self._prompt_cache[path] = "latent"
+                if self.fail:
+                    raise RuntimeError("test failure")
+                return np.full(2400, 0.2, dtype="float32")
+
+        model = Model()
+        backend = ming_backend.MingBackend(model)
+        with patch.object(ming_backend, "widen_decode_cache"):
+            backend.clone("Hello.", np.full(1600, 0.1), 16000, "reference")
+            model.fail = True
+            with self.assertRaisesRegex(RuntimeError, "test failure"):
+                backend.clone("Hello.", np.full(1600, 0.1), 16000, "reference")
+        self.assertEqual(model._prompt_cache, {"unrelated": "keep"})
+        self.assertTrue(all(not Path(p).exists() for p in model.paths))
+
+
 class HttpTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -219,6 +283,23 @@ class HttpTests(unittest.TestCase):
         tts_el._state["backend"] = None
         tts_el._state["store"] = None
         self.tmp.cleanup()
+
+    def test_silent_model_output_fails_both_el_routes_without_success_history(self):
+        class Model:
+            sample_rate = 24000
+
+            def synthesize(self, **kwargs):
+                return np.zeros(2400, dtype="float32")
+
+        tts_el.install(ming_backend.MingBackend(Model()), store=tts_el._store(),
+                       sample_rate=24000)
+        for suffix in ("", "/stream"):
+            with self.subTest(suffix=suffix):
+                response = self.client.post("/v1/text-to-speech/灵小柔" + suffix,
+                                            json={"text": "你好。", "output_format": "pcm_24000"})
+                self.assertEqual(response.status_code, 500, response.text)
+                self.assertIn("silent audio", response.json()["detail"])
+        self.assertEqual(list(tts_el._history().root.glob("*/item.json")), [])
 
     def test_speak_list_save_and_protect(self):
         listed = self.client.get("/v1/audio/voices").json()["voices"]
@@ -421,6 +502,8 @@ class EncoderExportOrderTest(unittest.TestCase):
             audio = Audio()
 
         class Ming:
+            sample_rate = 4
+
             def _pad_align(self):
                 return 1
 
@@ -447,10 +530,10 @@ class EncoderExportOrderTest(unittest.TestCase):
                 mock.patch.object(ming_ov, "_compile_xml", compile_xml), \
                 mock.patch.object(ming_ov, "_call", call):
             ming_ov._install_encoder(Ming(), Bailing(), "/tmp/ming-ov-test", "GPU", {})
-            self.assertEqual(seen, [("export", True)])
+            self.assertEqual(seen, [("export", True), ("export", True)])
             self.assertFalse(still_original())
             enc.forward(torch.zeros(1, ming_ov.VAE_FRAME_BUCKETS[1]))
-        self.assertEqual(seen, [("export", True), ("export", False)])
+        self.assertEqual(seen, [("export", True), ("export", True)])
 
 
 if __name__ == "__main__":
