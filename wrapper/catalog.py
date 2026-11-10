@@ -110,9 +110,9 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
-    # SimulS2ST-Omni thinker: simultaneous speech to text. English and Chinese only.
+    # SimulS2ST-Omni: simultaneous speech to speech. English and Chinese only.
     "simuls2st": [
-        (("s2tt",), "simuls2st"),
+        (("audio_s2s",), "simuls2st"),
     ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
@@ -422,11 +422,11 @@ for _el_mod in ("firered", "breeze"):
          "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
     )
 
-_MOUNTS[("simuls2st", "s2tt")] = [
+_MOUNTS[("simuls2st", "audio_s2s")] = [
     ("POST", "/v1/audio/translations",
-     "Simultaneous speech-to-text translation (English <-> Chinese)", True),
+     "Simultaneous speech-to-speech translation (English <-> Chinese, 24 kHz audio plus text)", True),
     ("WS", "/v1/audio/translations/stream",
-     "Streaming speech-to-text translation (pcm int16le, English <-> Chinese)", False),
+     "Streaming speech-to-speech translation (16 kHz pcm in, 24 kHz pcm and text out)", False),
 ]
 
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
