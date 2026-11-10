@@ -98,7 +98,9 @@ def _unsaid(text, wave, sr):
     return rest
 
 
-def _queue_rest(sents, i, origin, speak, wave, sr):
+def _queue_rest(sents, i, origin, speak, wave, sr, generation=None):
+    if generation and generation.get("stop_reason") == "threshold":
+        return len(sents)
     rest = _unsaid(speak, wave, sr)
     if rest and rest != speak and len(sents) < origin * 2 + 6:
         sents.insert(i + 1, rest)
@@ -233,7 +235,11 @@ class FireRedBackend:
 
     def _carry(self, text, wave, sr):
         """Keep the tail of what this wave actually covered, not the whole slice text."""
-        spoken = _spoken_text(text, wave, sr)
+        generation = getattr(self.model, "_ov_last_generation", None)
+        if generation and generation.get("stop_reason") == "threshold":
+            spoken = (text or "").strip()
+        else:
+            spoken = _spoken_text(text, wave, sr)
         if not spoken:
             return None
         tail_text, tail = tts_long.tail_pair(spoken, wave, sr, _CTX_SECONDS)
@@ -318,7 +324,8 @@ class FireRedBackend:
                 ))
                 wave, sr_out = _as_wave(audio, sr)
                 spans.append(len(wave) / float(sr_out or 1))
-                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out,
+                                    getattr(self.model, "_ov_last_generation", None))
                 if kn.context and i + 1 < total:
                     carry = self._carry(speak, wave, sr_out)
                 if slice_out is not None:
@@ -420,7 +427,8 @@ class FireRedBackend:
                     if extra_out is not None:
                         extra_out.append({"plan": plan_out})
                 wave, sr_out = _as_wave(audio, sr)
-                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out,
+                                    getattr(self.model, "_ov_last_generation", None))
                 if anchor is None:
                     anchor = (speak, wave, sr_out)
                 elif kn.context and i + 1 < total:
@@ -547,6 +555,104 @@ def _load():
     return FireRedBackend(instruct)
 
 
+def _firered_generation_summary(result, options, patch_size, stop_score):
+    latents = result[0] if isinstance(result, tuple) else result
+    prompt = options.get("latents_out")
+    prompt_frames = int(prompt.shape[1]) if prompt is not None else 0
+    frames = int(latents.shape[1])
+    generated_steps = max(0, frames - prompt_frames) // int(patch_size)
+    maximum = options.get("max_gen_steps")
+    maximum = 400 if maximum is None else int(maximum)
+    threshold = float(options.get("stop_threshold", 0.5))
+    reason = "unknown"
+    if stop_score is not None:
+        if stop_score >= threshold and generated_steps < maximum:
+            reason = "threshold"
+        elif generated_steps >= maximum:
+            reason = "max_steps"
+    return {
+        "stop_reason": reason, "stop_score": stop_score,
+        "generated_steps": generated_steps, "max_steps": maximum,
+        "prompt_frames": prompt_frames, "total_frames": frames,
+    }
+
+
+def _install_firered_generation_trace(instruct):
+    import functools
+    import time
+    import torch
+
+    core = instruct.tts_core
+    original = core.generate
+    last_stop = {"logits": None}
+
+    def stop_hook(_module, _inputs, output):
+        last_stop["logits"] = output.detach()
+
+    core._ov_stop_hook = core.stop_head.register_forward_hook(stop_hook)
+
+    @functools.wraps(original)
+    def generate(*args, **kwargs):
+        last_stop["logits"] = None
+        instruct._ov_last_generation = None
+        started = time.perf_counter()
+        result = original(*args, **kwargs)
+        logits = last_stop["logits"]
+        score = float(torch.sigmoid(logits.float()).item()) if logits is not None else None
+        summary = _firered_generation_summary(result, kwargs, core.patch_size, score)
+        summary["elapsed_seconds"] = time.perf_counter() - started
+        instruct._ov_last_generation = summary
+        log.info("firered ov generation stop=%s steps=%d/%d score=%s prompt_frames=%d",
+                 summary["stop_reason"], summary["generated_steps"], summary["max_steps"],
+                 score, summary["prompt_frames"])
+        return result
+
+    core.generate = generate
+
+    def traced_request(original_request, kind):
+        @functools.wraps(original_request)
+        def wrapped(*args, **kwargs):
+            instruct._ov_request = {
+                "kind": kind,
+                **{key: kwargs.get(key) for key in (
+                    "text", "prompt_text", "instruction", "seed", "n_timesteps", "inference_cfg")},
+            }
+            return original_request(*args, **kwargs)
+        return wrapped
+
+    for name in ("generate_tts", "generate_voice_design"):
+        method = getattr(instruct, name, None)
+        if method is not None:
+            setattr(instruct, name, traced_request(method, name))
+
+
+def _write_firered_ov_snapshot(instruct, latents, output):
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    import json
+    import tempfile
+    from pathlib import Path
+    import numpy as np
+
+    try:
+        counter = int(getattr(instruct, "_ov_snapshot_counter", 0))
+        instruct._ov_snapshot_counter = counter + 1
+        directory = Path(tempfile.gettempdir()) / "firered-ov-diagnostics"
+        directory.mkdir(parents=True, exist_ok=True)
+        prefix = directory / ("slice-%02d" % (counter % 8))
+        wave, sr = output
+        np.save(str(prefix) + "-latents.npy", latents.detach().float().cpu().numpy())
+        np.save(str(prefix) + "-wave.npy", wave.detach().float().cpu().numpy())
+        summary = dict(getattr(instruct, "_ov_last_generation", None) or {})
+        summary.update(request=getattr(instruct, "_ov_request", None), sample_rate=int(sr),
+                       prompt_samples=int(summary.get("prompt_frames", 0)) * int(instruct.redae.downsample_rate),
+                       sequence=counter)
+        Path(str(prefix) + "-meta.json").write_text(json.dumps(summary, ensure_ascii=False))
+        log.debug("firered ov diagnostic snapshot %s", prefix)
+    except Exception:
+        log.exception("firered ov diagnostic snapshot failed")
+
+
 def _install_firered_ov(instruct, path, device):
     """Official generate() loop stays. DiT + patch + AR prefill/decode on GPU."""
     import torch
@@ -617,6 +723,7 @@ def _install_firered_ov(instruct, path, device):
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
     _install_firered_backbone(core, path, device)
+    _install_firered_generation_trace(instruct)
     _install_firered_redae_cache(instruct, times)
     _install_firered_decoder_ov(instruct, path, device)
     _install_firered_decode_log(instruct, times)
@@ -743,6 +850,7 @@ def _install_firered_decode_log(instruct, times):
             times.get("prefill", 0.0), times.get("ar", 0.0), times.get("dit", 0.0),
             times["dec"], times.get("redae", 0.0), times.get("redae_hits", 0),
         )
+        _write_firered_ov_snapshot(instruct, latents, out)
         return out
 
     redae.decode = decode
