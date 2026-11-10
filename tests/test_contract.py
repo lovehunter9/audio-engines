@@ -81,6 +81,12 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("whisper_ov", "stt", "POST", "/v1/audio/translations"): {
         "async_supported": True,
     },
+    ("simuls2st", "s2tt", "POST", "/v1/audio/translations"): {
+        "async_supported": True,
+    },
+    ("simuls2st", "s2tt", "WS", "/v1/audio/translations/stream"): {
+        "async_supported": False,
+    },
 }
 
 _EL_TTS_ROUTES = (

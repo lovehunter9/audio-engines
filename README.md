@@ -246,6 +246,7 @@ passes. For the same reason the build's final import check must go **through**
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
+| `simuls2st` | `beclab/audio-simuls2st` | `s2tt` | SimulS2ST-Omni thinker, simultaneous speech to text (CUDA, amd64, English and Chinese) | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
@@ -668,6 +669,13 @@ Model IP voices (`origin=model`) and the shared pack (`origin=pack`) are both
 premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
+
+**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), thinker only, CUDA amd64. Weights stay
+out of the image: `offline/` is the Qwen2.5-Omni base and `simuls2st_adapter/` is the
+LoRA. `POST /v1/audio/translations` runs the official streaming agent over the whole
+utterance. `WS /v1/audio/translations/stream` takes little-endian int16 PCM and
+returns `{"text","finished"}`. One side of the pair is Chinese, the other English.
+VoiceBox is not in this image.
 
 **`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
 the open models that do are, as of 2026-08, either research-licensed or too heavy

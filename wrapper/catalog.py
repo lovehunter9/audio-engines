@@ -110,6 +110,10 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
+    # SimulS2ST-Omni thinker: simultaneous speech to text. English and Chinese only.
+    "simuls2st": [
+        (("s2tt",), "simuls2st"),
+    ],
     # audio_llm and audio_s2s stay reserved names: no base implements them yet.
 }
 
@@ -135,6 +139,7 @@ FAMILIES = {
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
+    "simuls2st": "simuls2st-omni",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -417,6 +422,13 @@ for _el_mod in ("firered", "breeze"):
          "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
     )
 
+_MOUNTS[("simuls2st", "s2tt")] = [
+    ("POST", "/v1/audio/translations",
+     "Simultaneous speech-to-text translation (English <-> Chinese)", True),
+    ("WS", "/v1/audio/translations/stream",
+     "Streaming speech-to-text translation (pcm int16le, English <-> Chinese)", False),
+]
+
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
 _MOUNTS[("tts_ov", "tts_clone")] = list(_MOUNTS[("tts", "tts_clone")])
@@ -439,6 +451,7 @@ _OPERATION_IDS = {
     ("GET", "/v1/models"): "model.list",
     ("POST", "/v1/audio/transcriptions"): "audio.transcribe",
     ("POST", "/v1/audio/translations"): "audio.translate",
+    ("WS", "/v1/audio/translations/stream"): "audio.translate.stream",
     ("WS", "/v1/audio/stream"): "audio.transcribe.stream",
     ("POST", "/v1/audio/align"): "audio.align",
     ("POST", "/v1/audio/vad"): "audio.vad",
