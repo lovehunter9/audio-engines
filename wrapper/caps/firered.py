@@ -595,8 +595,14 @@ def _install_firered_generation_trace(instruct):
     def generate(*args, **kwargs):
         last_stop["logits"] = None
         instruct._ov_last_generation = None
+        from .firered_noise import PatchNoise
+        # Text sampling has its own native RNG consumption; only reference speech uses this stream.
+        core._ov_patch_noise = None if kwargs.get("infer_text") else PatchNoise(torch.initial_seed())
         started = time.perf_counter()
-        result = original(*args, **kwargs)
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            core._ov_patch_noise = None
         logits = last_stop["logits"]
         score = float(torch.sigmoid(logits.float()).item()) if logits is not None else None
         summary = _firered_generation_summary(result, kwargs, core.patch_size, score)
@@ -723,10 +729,42 @@ def _install_firered_ov(instruct, path, device):
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
     _install_firered_backbone(core, path, device)
+    _install_firered_flow_noise(core)
     _install_firered_generation_trace(instruct)
     _install_firered_redae_cache(instruct, times)
     _install_firered_decoder_ov(instruct, path, device)
     _install_firered_decode_log(instruct, times)
+
+
+def _install_firered_flow_noise(core):
+    import torch
+
+    original = core._flow_one_step
+    core._ov_patch_noise = None
+
+    def flow(hist_latents, backbone_cond, t_span, inference_cfg):
+        noise = core._ov_patch_noise
+        if noise is None:
+            return original(hist_latents, backbone_cond, t_span, inference_cfg)
+        x0 = torch.from_numpy(noise.normal(core.patch_size, core.redae_dim)).to(hist_latents)
+        xt = torch.cat([hist_latents, x0], dim=1)
+        cond = backbone_cond.repeat_interleave(core.patch_size, dim=1)
+        for index, time in enumerate(t_span[:-1]):
+            dt = t_span[index + 1] - time
+            t_in = time.view(-1, 1, 1)
+            x_in = torch.cat([xt, cond], dim=2)
+            if inference_cfg > 0:
+                unconditional = torch.cat([xt, cond * 0], dim=2)
+                x_in = torch.cat([x_in, unconditional], dim=0)
+                t_in = t_in.expand(2, -1, -1)
+            velocity = core.dit(x=x_in, t=t_in)
+            if inference_cfg > 0:
+                conditional, unconditional = velocity.chunk(2, dim=0)
+                velocity = (1.0 + inference_cfg) * conditional - inference_cfg * unconditional
+            xt[:, -core.patch_size:] += dt.view(-1, 1, 1) * velocity[:, -core.patch_size:]
+        return xt[:, -core.patch_size:]
+
+    core._flow_one_step = flow
 
 
 def _firered_sliding_mask(hidden, window):
