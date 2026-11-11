@@ -114,7 +114,7 @@ BASES = {
     "simuls2st": [
         (("audio_s2s",), "simuls2st"),
     ],
-    # Intel iGPU and Arc. Same HTTP. VoiceBox's diffusion step and Vocos compile for the GPU.
+    # Intel iGPU and Arc. Same HTTP. Thinker, talker, VoiceBox and Vocos compile for the GPU.
     "simuls2stov": [
         (("audio_s2s",), "simuls2st"),
     ],
@@ -144,7 +144,6 @@ FAMILIES = {
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
     "simuls2st": "simuls2st-omni",
-    "simuls2stov": "simuls2st-omni",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
