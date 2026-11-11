@@ -72,9 +72,9 @@ import torch, torchvision, torchaudio, transformers, peft, openvino; \
 assert torch.__version__.startswith('2.8.'), torch.__version__; \
 assert not torch.cuda.is_available(), 'simuls2stov must not ship CUDA torch'; \
 assert torch.version.cuda is None, torch.version.cuda; \
-print('torch', torch.__version__, 'openvino', openvino.__version__, \
-      'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, \
-      'peft', peft.__version__)"
+print('torch', torch.__version__, 'torchvision', torchvision.__version__, \
+      'openvino', openvino.__version__, 'torchaudio', torchaudio.__version__, \
+      'transformers', transformers.__version__, 'peft', peft.__version__)"
 
 ENV SIMULS2ST_ROOT=/opt/simuls2st \
     PYTHONPATH=/opt/simuls2st
