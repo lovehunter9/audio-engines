@@ -67,8 +67,10 @@ RUN git clone https://github.com/hasaki321/SimulS2ST-Omni.git /opt/simuls2st \
         "numpy==1.26.4" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall \
         torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore "numpy==1.26.4" \
     && python3 -c "\
-import torch, torchvision, torchaudio, transformers, peft, openvino; \
+import numpy, torch, torchvision, torchaudio, transformers, peft, openvino; \
+assert numpy.__version__.startswith('1.26.'), numpy.__version__; \
 assert torch.__version__.startswith('2.8.'), torch.__version__; \
 assert not torch.cuda.is_available(), 'simuls2stov must not ship CUDA torch'; \
 assert torch.version.cuda is None, torch.version.cuda; \
