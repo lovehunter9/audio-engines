@@ -35,7 +35,7 @@ jobs:
     with:
       base: simuls2st
       repo: audio-simuls2st
-      # Official stack is Linux x86_64 + cu124. An arm64 image would install and then be the wrong torch.
+      # CUDA 12.8 so Blackwell (sm_120) has a kernel. An arm64 image would install and then be the wrong torch.
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}

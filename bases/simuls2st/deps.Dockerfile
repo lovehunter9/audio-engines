@@ -1,14 +1,16 @@
 # audio-simuls2st deps: SimulS2ST-Omni speech-to-speech, in-process, CUDA only.
 #
-# Official pin is torch 2.6.0+cu124 and transformers 4.52.3. The streaming agent lives in
-# the upstream repo, which has no PyPI package, so the source is cloned at a pinned commit and
+# Upstream pins torch 2.6.0+cu124 and transformers 4.52.3. That wheel stops at sm_90, so a
+# Blackwell GPU (sm_120) loads the weights and then fails with "no kernel image". This image
+# uses the same PyTorch 2.8 CUDA 12.8 base as the other CUDA engines. The streaming agent lives
+# in the upstream repo, which has no PyPI package, so the source is cloned at a pinned commit and
 # put on PYTHONPATH. Weights stay out of the image: llm-init snapshots HA-SA-ki/SimulS2ST-Omni.
 #
 # One process loads the thinker, the talker, VoiceBox and DualCodec. Text is the transcript of
 # that same pass, not a separate model. pyworld needs a compiler; the runtime image has none.
 #
 # amd64 only. The workflow does not build arm64.
-FROM docker.io/pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+FROM docker.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
 
 RUN set -eux; \
     apt-get update; \
@@ -17,7 +19,7 @@ RUN set -eux; \
 
 # Match the base torch. A bare `pip install torchaudio` would replace it.
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+        torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
 ARG SIMUL_SHA=c7e0b260aa21473d30ffeaa1768c624d4f9bfa3c
 RUN set -eux; \
@@ -34,10 +36,12 @@ RUN set -eux; \
         "easydict==1.13" "pyworld==0.3.5" "json5>=0.9.0" \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets \
         "numpy==1.26.4"; \
+    python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128; \
     python3 -c "\
 import torch, torchaudio, transformers, peft; \
-assert torch.__version__.startswith('2.6.'), torch.__version__; \
-assert torch.version.cuda.startswith('12.4'), torch.version.cuda; \
+assert torch.__version__.startswith('2.8.'), torch.__version__; \
+assert torch.version.cuda.startswith('12.8'), torch.version.cuda; \
 print('torch', torch.__version__, 'cuda', torch.version.cuda, \
       'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, \
       'peft', peft.__version__)"; \
