@@ -48,7 +48,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         openvino
 
@@ -66,9 +66,9 @@ RUN git clone https://github.com/hasaki321/SimulS2ST-Omni.git /opt/simuls2st \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets \
         "numpy==1.26.4" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall \
-        torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
+        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
     && python3 -c "\
-import torch, torchaudio, transformers, peft, openvino; \
+import torch, torchvision, torchaudio, transformers, peft, openvino; \
 assert torch.__version__.startswith('2.8.'), torch.__version__; \
 assert not torch.cuda.is_available(), 'simuls2stov must not ship CUDA torch'; \
 assert torch.version.cuda is None, torch.version.cuda; \
