@@ -292,10 +292,7 @@ def _seen_cache(n):
 
 
 def _slot_step(inner, sections):
-    import torch
     import torch.nn as nn
-
-    from .. import tts_ov
 
     n_layers = len(inner.layers)
 
