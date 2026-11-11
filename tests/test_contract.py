@@ -3202,7 +3202,7 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")
-        for name in ("breezeov", "fireredov", "mingov"):
+        for name in ("breezeov", "fireredov", "mingov", "simuls2stov"):
             path = os.path.join(root, name, "deps.Dockerfile")
             with open(path) as fh:
                 text = fh.read()

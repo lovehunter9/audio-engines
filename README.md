@@ -247,6 +247,7 @@ passes. For the same reason the build's final import check must go **through**
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
 | `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64, English and Chinese) | in progress |
+| `simuls2stov` | `beclab/audio-simuls2st-ov` | `audio_s2s` | SimulS2ST-Omni on OpenVINO GPU (amd64, iGPU and Arc); same HTTP as `simuls2st` | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
@@ -669,6 +670,8 @@ Model IP voices (`origin=model`) and the shared pack (`origin=pack`) are both
 premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
+
+**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. `intel` and `intel-gpu` both compile for device `GPU`. VoiceBox's `diff_estimator` and Vocos are FP32 on that GPU. Thinker and talker prefill, decode, `lm_head`, `codec_head` and `thinker_to_talker_proj` are FP16 on that GPU: a second FP32 copy of the 7B stack does not fit the 32Gi engine limit. The official sampling loop stays in Python and still reads FP32 host tensors. The audio encoder stays on CPU, because its packed-chunk mask loops over the input lengths.
 
 **`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64. One load runs the thinker,
 the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the

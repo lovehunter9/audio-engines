@@ -107,71 +107,90 @@ def _load():
         sys.path.insert(0, root)
     from src.agents.simuleval_omni_talker_s2st_agent import OmniTalkerStreamingS2STAgent
 
-    if not torch.cuda.is_available():
+    from .simuls2st_ov import is_ov
+
+    ov = is_ov()
+    restore = None
+    ov_device = None
+    if ov:
+        from .. import tts_ov
+
+        ov_device = tts_ov.require_gpu()
+        restore = tts_ov.force_cpu_torch_device()
+    elif not torch.cuda.is_available():
         raise RuntimeError("SimulS2ST CUDA engine requires a CUDA device")
-    snap = _model_path()
-    needed = (
-        os.path.join(snap, "offline"),
-        os.path.join(snap, "simuls2st_adapter"),
-        os.path.join(snap, "voicebox", "voicebox.safetensors"),
-        os.path.join(snap, "voicebox", "vocos.safetensors"),
-        os.path.join(snap, "voicebox", "voicebox_config.json"),
-        os.path.join(snap, "dualcodec", "dualcodec.safetensors"),
-        os.path.join(snap, "dualcodec", "w2v_bert_stats.pt"),
-        os.path.join(snap, "w2v"),
-    )
-    missing = [p for p in needed if not os.path.exists(p)]
-    if missing:
-        raise RuntimeError("snapshot %s is missing %s" % (snap, ", ".join(missing)))
-    os.environ["SIMULS2ST_MODEL_ROOT"] = snap
-    os.environ["SIMULS2ST_W2V_BERT_PATH"] = os.path.join(snap, "w2v")
-    dtype = "bf16" if torch.cuda.is_bf16_supported() else "fp16"
-    side = tempfile.mkdtemp(prefix="simuls2st-")
-    agent = OmniTalkerStreamingS2STAgent(Namespace(
-        model_name_or_path=os.path.join(snap, "offline"),
-        checkpoint_path=os.path.join(snap, "simuls2st_adapter"),
-        adapter_name_or_path=os.path.join(snap, "simuls2st_adapter"),
-        device="cuda:0",
-        dtype=dtype,
-        source_lang=SOURCE_LANG,
-        target_lang=TARGET_LANG,
-        latency_multiplier=LATENCY,
-        min_start_sec=float(MIN_START),
-        min_final_chunk_sec=0.32,
-        thinker_max_new_tokens=50,
-        thinker_do_sample=False,
-        thinker_temperature=1.0,
-        thinker_top_p=0.8,
-        thinker_top_k=20,
-        thinker_num_beams=BEAMS,
-        thinker_repetition_penalty=1.1,
-        thinker_no_repeat_ngram_size=0,
-        no_thinker_kv_cache=False,
-        talker_max_new_tokens=125,
-        talker_do_sample=False,
-        talker_temperature=1.0,
-        talker_top_p=0.8,
-        talker_top_k=20,
-        talker_repetition_penalty=1.4,
-        talker_no_repeat_ngram_size=0,
-        no_talker_kv_cache=False,
-        enable_wait_silence_decode=False,
-        use_prompt_mel=True,
-        prompt_source_chunks=2,
-        prompt_generated_chunks=1,
-        prompt_source_sec=4.0,
-        prompt_generated_sec=2.0,
-        enable_history_window=True,
-        history_window_turns=30,
-        history_overlap_turns=8,
-        voicebox_path=None,
-        vocos_path=None,
-        voicebox_config_path=None,
-        codec_model_path=None,
-        codec_stats_path=None,
-        output=side,
-        source="",
-    ))
+    try:
+        snap = _model_path()
+        needed = (
+            os.path.join(snap, "offline"),
+            os.path.join(snap, "simuls2st_adapter"),
+            os.path.join(snap, "voicebox", "voicebox.safetensors"),
+            os.path.join(snap, "voicebox", "vocos.safetensors"),
+            os.path.join(snap, "voicebox", "voicebox_config.json"),
+            os.path.join(snap, "dualcodec", "dualcodec.safetensors"),
+            os.path.join(snap, "dualcodec", "w2v_bert_stats.pt"),
+            os.path.join(snap, "w2v"),
+        )
+        missing = [p for p in needed if not os.path.exists(p)]
+        if missing:
+            raise RuntimeError("snapshot %s is missing %s" % (snap, ", ".join(missing)))
+        os.environ["SIMULS2ST_MODEL_ROOT"] = snap
+        os.environ["SIMULS2ST_W2V_BERT_PATH"] = os.path.join(snap, "w2v")
+        # The upstream agent only accepts bf16 or fp16. Intel casts to FP32 after load.
+        dtype = "fp32" if ov else ("bf16" if torch.cuda.is_bf16_supported() else "fp16")
+        side = tempfile.mkdtemp(prefix="simuls2st-")
+        agent = OmniTalkerStreamingS2STAgent(Namespace(
+            model_name_or_path=os.path.join(snap, "offline"),
+            checkpoint_path=os.path.join(snap, "simuls2st_adapter"),
+            adapter_name_or_path=os.path.join(snap, "simuls2st_adapter"),
+            device="cpu" if ov else "cuda:0",
+            dtype="bf16" if ov else dtype,
+            source_lang=SOURCE_LANG,
+            target_lang=TARGET_LANG,
+            latency_multiplier=LATENCY,
+            min_start_sec=float(MIN_START),
+            min_final_chunk_sec=0.32,
+            thinker_max_new_tokens=50,
+            thinker_do_sample=False,
+            thinker_temperature=1.0,
+            thinker_top_p=0.8,
+            thinker_top_k=20,
+            thinker_num_beams=BEAMS,
+            thinker_repetition_penalty=1.1,
+            thinker_no_repeat_ngram_size=0,
+            no_thinker_kv_cache=False,
+            talker_max_new_tokens=125,
+            talker_do_sample=False,
+            talker_temperature=1.0,
+            talker_top_p=0.8,
+            talker_top_k=20,
+            talker_repetition_penalty=1.4,
+            talker_no_repeat_ngram_size=0,
+            no_talker_kv_cache=False,
+            enable_wait_silence_decode=False,
+            use_prompt_mel=True,
+            prompt_source_chunks=2,
+            prompt_generated_chunks=1,
+            prompt_source_sec=4.0,
+            prompt_generated_sec=2.0,
+            enable_history_window=True,
+            history_window_turns=30,
+            history_overlap_turns=8,
+            voicebox_path=None,
+            vocos_path=None,
+            voicebox_config_path=None,
+            codec_model_path=None,
+            codec_stats_path=None,
+            output=side,
+            source="",
+        ))
+    finally:
+        if restore is not None:
+            restore()
+    if ov:
+        from .simuls2st_ov import install
+
+        install(agent, snap, ov_device)
     _state.update(agent=agent, dtype=dtype)
 
 
