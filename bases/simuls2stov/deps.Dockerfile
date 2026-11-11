@@ -62,7 +62,7 @@ RUN git clone https://github.com/hasaki321/SimulS2ST-Omni.git /opt/simuls2st \
         "soundfile==0.13.1" "sentencepiece==0.2.1" "einops==0.8.1" \
         "scipy==1.15.3" "librosa==0.11.0" \
         "descript-audiotools==0.7.2" "descript-audio-codec==1.0.0" \
-        "easydict==1.13" "pyworld==0.3.5" "json5>=0.9.0" "ruamel.yaml==0.18.16" \
+        "easydict==1.13" "pyworld==0.3.5" "json5>=0.9.0" "ruamel.yaml==0.18.16" "six==1.17.0" \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets \
         "numpy==1.26.4" \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --force-reinstall \
