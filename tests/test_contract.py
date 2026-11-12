@@ -3209,6 +3209,21 @@ class Simuls2stOvRecipeTest(unittest.TestCase):
         self.assertIn("Vocos on torch CPU", src)
         self.assertNotIn("compile_module", src)
 
+    def test_ov_trims_prompt_mel_prefix(self):
+        import inspect
+
+        from wrapper.caps import simuls2st
+        from wrapper.caps import simuls2st_ov_trim
+
+        self.assertIn(
+            "patch_prompt_mel_trim",
+            inspect.getsource(simuls2st._load),
+        )
+        self.assertIn(
+            "_trim_prompt_prefix_audio",
+            inspect.getsource(simuls2st_ov_trim.patch_prompt_mel_trim),
+        )
+
     def test_voicebox_defaults_to_torch_cpu(self):
         import inspect
 
