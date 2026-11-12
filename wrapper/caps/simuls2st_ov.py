@@ -1,7 +1,8 @@
 """SimulS2ST on the Intel GPU. The official sampling loop stays in Python.
 
-VoiceBox diff_estimator is FP32 on the GPU. Vocos runs whole-stack torch on CPU:
-OpenVINO on the conv backbone drifted word onsets even with a dynamic time axis. The thinker and talker stacks are one FP16 graph
+VoiceBox and Vocos default to torch CPU. Set OV_SIMULS2ST_VOICEBOX=gpu to compile diff_estimator
+on the GPU instead (ov6-style). OpenVINO on the conv backbone drifted word onsets even with a dynamic
+time axis. The thinker and talker stacks are one FP16 graph
 each: a second FP32 copy of the 7B weights does not fit the 32Gi engine limit.
 Prefill and decode share that graph, and the KV cache stays on the GPU. Host
 tensors the official loop reads are FP32. The audio encoder stays on CPU. Its
@@ -33,7 +34,7 @@ def install(agent, snap, device):
             mod.float()
     agent.dtype = torch.float32
     agent.model_dtype = torch.float32
-    _estimator(voicebox, snap, device)
+    _voicebox(voicebox, snap, device)
     _vocoder(vocoder, int(voicebox.mel_dim), snap, device)
 
     thinker = inference.base_model.thinker
@@ -45,11 +46,28 @@ def install(agent, snap, device):
     _stack(talker.model, snap, device, "simuls2st_talker")
     _linear(talker.codec_head, snap, device, "simuls2st_talker_head")
     _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj")
+    vb = "OpenVINO GPU" if _voicebox_use_openvino() else "torch CPU"
     log.info(
-        "simuls2st OV on %s: VoiceBox diff on GPU, Vocos torch CPU, thinker/talker fp16; "
+        "simuls2st OV on %s: VoiceBox %s, Vocos torch CPU, thinker/talker fp16; "
         "audio encoder stays on CPU",
         device,
+        vb,
     )
+
+
+def _voicebox_use_openvino():
+    raw = (os.environ.get("OV_SIMULS2ST_VOICEBOX") or "").strip().lower()
+    return raw in ("gpu", "openvino", "1", "true", "yes")
+
+
+def _voicebox(voicebox, snap, device):
+    if _voicebox_use_openvino():
+        _estimator(voicebox, snap, device)
+        return
+    voicebox.cpu().float()
+    if hasattr(voicebox, "eval"):
+        voicebox.eval()
+    log.info("VoiceBox on torch CPU (cond_emb + diff); talker/thinker on OpenVINO %s", device)
 
 
 def _estimator(voicebox, snap, device):
@@ -79,7 +97,10 @@ def _estimator(voicebox, snap, device):
             for item in (x_in, t_in, cond_in, mask_in)
         ]
         out = compiled(*arrays)[0]
-        return torch.from_numpy(np.ascontiguousarray(out))
+        want = x_in if hasattr(x_in, "dtype") else t_in
+        return torch.from_numpy(np.ascontiguousarray(out)).to(
+            device=want.device, dtype=torch.float32,
+        )
 
     step.forward = forward
     tts_ov.release_parameters(step, "simuls2st diff_estimator")
@@ -93,7 +114,7 @@ def _vocoder(vocoder, mel_dim, snap, device):
     vocoder.cpu().float()
     if hasattr(vocoder, "eval"):
         vocoder.eval()
-    log.info("Vocos on torch CPU (backbone and ISTFT); VoiceBox diff on OpenVINO %s", device)
+    log.info("Vocos on torch CPU (backbone and ISTFT)")
 
 
 def _stack(model, snap, device, name):

@@ -3209,6 +3209,15 @@ class Simuls2stOvRecipeTest(unittest.TestCase):
         self.assertIn("Vocos on torch CPU", src)
         self.assertNotIn("compile_module", src)
 
+    def test_voicebox_defaults_to_torch_cpu(self):
+        import inspect
+
+        from wrapper.caps import simuls2st_ov
+
+        src = inspect.getsource(simuls2st_ov._voicebox)
+        self.assertIn("VoiceBox on torch CPU", src)
+        self.assertIn("OV_SIMULS2ST_VOICEBOX", inspect.getsource(simuls2st_ov._voicebox_use_openvino))
+
     def test_voicebox_diff_compiles_with_dynamic_time(self):
         import inspect
 
