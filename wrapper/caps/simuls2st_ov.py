@@ -64,8 +64,10 @@ def _estimator(voicebox, snap, device):
     t = torch.zeros(1, dtype=torch.float32)
     cond = torch.zeros(1, 8, hidden, dtype=torch.float32)
     mask = torch.ones(1, 8, dtype=torch.float32)
-    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_diff", ".ov-simuls2st-v1")
-    compiled = tts_ov.compile_module(step, (x, t, cond, mask), xml, stamp, device)
+    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_diff", ".ov-simuls2st-diff-v2")
+    compiled = tts_ov.compile_module(
+        step, (x, t, cond, mask), xml, stamp, device, dynamic_rank=3, dynamic_axis=1
+    )
     if compiled is None:
         raise RuntimeError("VoiceBox diff_estimator did not compile on %s" % device)
 
@@ -94,9 +96,11 @@ def _vocoder(vocoder, mel_dim, snap, device):
     head = getattr(vocoder, "head", None)
     if backbone is None or head is None:
         raise RuntimeError("Vocos has no backbone/head to split")
-    example = torch.zeros(1, mel_dim, 16, dtype=torch.float32)
-    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_vocos_backbone", ".ov-simuls2st-v2")
-    compiled = tts_ov.compile_module(backbone, example, xml, stamp, device)
+    example = torch.zeros(1, mel_dim, 64, dtype=torch.float32)
+    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_vocos_backbone", ".ov-simuls2st-v3")
+    compiled = tts_ov.compile_module(
+        backbone, example, xml, stamp, device, dynamic_rank=3, dynamic_axis=-1
+    )
     if compiled is None:
         raise RuntimeError("Vocos backbone did not compile on %s" % device)
 
@@ -104,8 +108,9 @@ def _vocoder(vocoder, mel_dim, snap, device):
         import numpy as np
 
         arr = np.ascontiguousarray(mel.detach().float().cpu().numpy())
-        hidden = torch.from_numpy(np.ascontiguousarray(compiled(arr)[0]))
-        audio = head(hidden)
+        hidden = torch.from_numpy(np.ascontiguousarray(compiled(arr)[0])).float()
+        with torch.inference_mode():
+            audio = head(hidden)
         if audio.dim() == 2:
             audio = audio[:, None, :]
         return audio

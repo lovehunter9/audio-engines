@@ -105,8 +105,30 @@ def _freeze_for_export(mod):
         p.requires_grad_(False)
 
 
+def _dynamize_rank_axis(ov_model, rank, axis):
+    """Make one axis dynamic on every input of the given rank (Conv1d mel uses rank 3, axis 2)."""
+    mapping = {}
+    for inp in ov_model.inputs:
+        shape = inp.get_partial_shape()
+        if shape.rank.is_dynamic:
+            continue
+        if shape.rank.get_length() != rank:
+            continue
+        ax = int(axis)
+        if ax < 0:
+            ax = shape.rank.get_length() + ax
+        shape[ax] = -1
+        try:
+            mapping[inp.any_name] = shape
+        except Exception:
+            mapping[inp] = shape
+    if mapping:
+        ov_model.reshape(mapping)
+    return ov_model
+
+
 def compile_module(mod, example, xml, stamp, device, config=None, precision="f32",
-                    compile_graph=True):
+                    compile_graph=True, dynamic_rank=None, dynamic_axis=1):
     """Export a module once and compile it. The callable's .compiled keeps one InferRequest."""
     import numpy as np
     import openvino as ov
@@ -128,6 +150,8 @@ def compile_module(mod, example, xml, stamp, device, config=None, precision="f32
             traced = torch.jit.trace(mod, example, strict=False, check_trace=False)
             with torch.inference_mode():
                 ov_model = ov.convert_model(traced)
+        if dynamic_rank is not None:
+            ov_model = _dynamize_rank_axis(ov_model, int(dynamic_rank), int(dynamic_axis))
         ov.save_model(ov_model, xml)
         open(stamp, "w").close()
     if not compile_graph:
