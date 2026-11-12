@@ -58,6 +58,27 @@ def _keep_voiced(wave, sr):
     return w[start:end]
 
 
+def _reference_audio(audio, sr):
+    """Remove a long near-silent tail without changing the stored reference."""
+    wave = np.asarray(audio, dtype="float32").reshape(-1)
+    if not sr or not len(wave) or not np.isfinite(wave).all():
+        return wave
+    frame = max(1, int(sr * 0.01))
+    full = len(wave) // frame
+    if not full:
+        return wave
+    rms = np.sqrt(np.mean(wave[:full * frame].reshape(full, frame) ** 2, axis=1))
+    voiced = np.flatnonzero(rms >= 0.001)
+    if not len(voiced):
+        return wave
+    end = int(voiced[-1] + 1) * frame
+    if np.any(np.abs(wave[full * frame:]) >= 0.001):
+        return wave
+    if len(wave) - end < int(sr * 0.5):
+        return wave
+    return wave[:min(len(wave), end + int(sr * 0.02))]
+
+
 def _use_soundfile():
     """Route torchaudio.load through soundfile. TorchAudio 2.9 calls TorchCodec, which this image does not install."""
     try:
@@ -104,7 +125,10 @@ def _audio(wave):
     audio = np.asarray(wave, dtype="float32")
     if audio.ndim > 1:
         audio = audio.reshape(-1) if audio.shape[0] == 1 else audio.mean(axis=0)
-    return np.clip(audio.reshape(-1), -1.0, 1.0)
+    audio = audio.reshape(-1)
+    if not len(audio) or not np.isfinite(audio).all() or not np.any(np.abs(audio) >= 1.0 / 32767):
+        raise RuntimeError("Ming produced empty, non-finite or silent audio")
+    return np.clip(audio, -1.0, 1.0)
 
 
 # Upstream stops at 512 positions, so a half-minute reference decodes nothing and torch.cat crashes. The position table is 32768.
@@ -141,10 +165,10 @@ class MingBackend:
     def presets(self):
         return tts_el.premade_cards(self, "ming")
 
-    def _knobs(self, settings, text, instruction):
+    def _knobs(self, settings, text, instruction, seed_jitter=0):
         # 2.0 is MingTTS.synthesize's own default. Style text is not appended.
         return tts_el.resolve_settings(
-            settings, 2.0, instruction or "", text=text or "",
+            settings, 2.0, instruction or "", text=text or "", seed_jitter=seed_jitter,
             include_speed_direction=False, include_style_direction=False)
 
     def _arm(self, turn, kn, sampling, instruction=None, xvec=False):
@@ -172,7 +196,8 @@ class MingBackend:
         return self.model.synthesize(**kwargs)
 
     def _paced(self, audio, sr, speed):
-        return tts_long.pace(audio, sr, speed)
+        audio, sr = tts_long.pace(audio, sr, speed)
+        return _audio(audio), sr
 
     def _seed(self, kn):
         if kn.seed is None:
@@ -231,6 +256,22 @@ class MingBackend:
             parts.append(bit_audio)
         return tts_long.join(parts, sr, gap_ms=80)
 
+    def _clone_pieces(self, text):
+        pieces = tts_long.split_speak(text, _CLONE_CHARS)
+        if len(pieces) <= 1 or any("\u3400" <= ch <= "\u9fff" for ch in text or ""):
+            return pieces
+        tokenizer = getattr(getattr(self.model, "model", None), "tokenizer", None)
+        if not callable(getattr(tokenizer, "encode", None)):
+            return pieces
+        out = []
+        for sentence in tts_long.sentences(text):
+            tokens = tokenizer.encode(sentence, add_special_tokens=False)
+            if len(tokens) <= _CLONE_CHARS:
+                out.append(sentence)
+            else:
+                out.extend(tts_long.split_speak(sentence, _CLONE_CHARS))
+        return out
+
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         user = (kw.get("instruction") or "").strip()
         kn = self._knobs(kw.get("settings"), text, "")
@@ -238,9 +279,9 @@ class MingBackend:
         sampling = dict(kw.get("sampling") or {})
         transcript = (prompt_text or "").strip()
         xvec = bool(sampling.get("x_vector_only")) or not transcript
-        path = self._prompt_path(prompt_audio, prompt_sr)
+        path = self._prompt_path(_reference_audio(prompt_audio, prompt_sr), prompt_sr)
         try:
-            pieces = tts_long.split_speak(text, _CLONE_CHARS) or [(text or "").strip()]
+            pieces = self._clone_pieces(text) or [(text or "").strip()]
             waves = []
             sr = self.sample_rate
             for piece in pieces:
@@ -253,6 +294,9 @@ class MingBackend:
                 # Same reference on every piece. The previous piece is not the next prompt.
                 audio, sr = tts_long.join(waves, sr, gap_ms=80)
         finally:
+            cache = getattr(self.model, "_prompt_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(path, None)
             try:
                 os.unlink(path)
             except OSError:
@@ -260,7 +304,8 @@ class MingBackend:
         return self._paced(audio, sr, kn.speed)
 
     def design(self, instruction, text, **kw):
-        kn = self._knobs(kw.get("settings"), text, "")
+        kn = self._knobs(kw.get("settings"), text, "",
+                         seed_jitter=int(kw.get("seed_jitter") or 0))
         self._seed(kn)
         style = (instruction or "").strip()
         sampling = dict(kw.get("sampling") or {})

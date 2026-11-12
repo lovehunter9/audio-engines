@@ -53,6 +53,28 @@ def _bucketing_forward(orig):
     return forward
 
 
+def _static_codec_forward(part):
+    compiled = None
+    shape = None
+
+    def forward(codes):
+        nonlocal compiled, shape
+        import torch
+        from optimum.intel.openvino.modeling_base import core
+        from ..ov_compile_lock import gpu_compile
+
+        values = codes.detach().cpu().numpy() if hasattr(codes, "detach") else codes
+        values = np.ascontiguousarray(values, dtype=np.int64)
+        if shape != values.shape:
+            model = part.model.clone()
+            model.reshape({0: list(values.shape)})
+            with gpu_compile(part._device):
+                compiled = core.compile_model(model, part._device, dict(part.ov_config))
+            shape = values.shape
+        return torch.from_numpy(np.array(compiled([values])[0], copy=True))
+    return forward
+
+
 def _install_codec_buckets(ov):
     model = getattr(ov, "model", None)
     tokenizer = getattr(model, "speech_tokenizer", None) if model is not None else None
@@ -63,7 +85,11 @@ def _install_codec_buckets(ov):
         return
     if getattr(decoder.forward, "_codec_buckets", False):
         return
-    decoder.forward = _bucketing_forward(decoder.forward)
+    forward = decoder.forward
+    part = getattr(ov, "codec_decoder", None)
+    if part is not None and (os.environ.get("OLARES_GPU_MODE") or "").strip().lower() == "intel":
+        forward = _static_codec_forward(part)
+    decoder.forward = _bucketing_forward(forward)
     log.info("codec decode buckets %s", ",".join(str(b) for b in _CODEC_BUCKETS))
 
 
