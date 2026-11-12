@@ -25,6 +25,38 @@ class BucketTests(unittest.TestCase):
         text = (ROOT / "wrapper/caps/ming_ov.py").read_text()
         self.assertIn("dynamic=AGGREGATOR_DYNAMIC", text)
 
+    def test_reference_buckets_follow_the_reference_limit(self):
+        from types import SimpleNamespace
+
+        ming = SimpleNamespace(sample_rate=44100)
+        with mock.patch("wrapper.caps.tts_el.REF_MAX_SECONDS", 0):
+            self.assertEqual(ming_ov._encoder_lengths(ming, 3528),
+                             (225792, 451584, 903168, 1354752))
+        with mock.patch("wrapper.caps.tts_el.REF_MAX_SECONDS", 60):
+            self.assertEqual(ming_ov._encoder_lengths(ming, 3528)[-1], 2709504)
+
+    def test_encoder_weights_are_registered_for_tracing(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch is not installed")
+
+        class Encoder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(2, 2)
+
+            def forward(self, wave):
+                return self.linear(wave), wave
+
+        encoder = Encoder().eval()
+        wrapped = ming_ov._EncodeVAE(encoder).mod.eval()
+        wrapped.requires_grad_(False)
+        self.assertFalse(any(p.requires_grad for p in encoder.parameters()))
+        self.assertGreater(sum(p.numel() for p in wrapped.parameters()), 0)
+        traced = torch.jit.trace(wrapped, torch.ones(1, 2))
+        torch.testing.assert_close(traced(torch.ones(1, 2)), encoder(torch.ones(1, 2))[0])
+
     def test_campplus_span_is_two_hundred_frames(self):
         self.assertEqual(ming_ov.campplus_span(288), (44, 244, 0))
         self.assertEqual(ming_ov.campplus_span(200), (0, 200, 0))

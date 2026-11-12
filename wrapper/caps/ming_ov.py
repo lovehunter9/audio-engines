@@ -207,17 +207,14 @@ def _call(compiled, *arrays):
 class _Graph:
     """One static shape. The first bucket is compiled at load; the rest compile on first use."""
 
-    def __init__(self, xml, device, props, prepare=None):
+    def __init__(self, xml, device, props):
         self.xml = xml
         self.device = device
         self.props = props
         self.compiled = None
-        self.prepare = prepare
 
     def ensure(self):
         if self.compiled is None:
-            if self.prepare is not None:
-                self.prepare()
             self.compiled = _compile_xml(self.xml, self.device, self.props)
         return self.compiled
 
@@ -257,6 +254,10 @@ class _EncodeVAE(object):
         saved = encoder.forward
 
         class _M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.encoder = encoder
+
             def forward(self, waveform):
                 # Saved at install, so a later bucket does not trace the patch.
                 h, _ = saved(waveform)
@@ -331,24 +332,36 @@ def _static_frames(encoder, waveform):
     return waveform.index_select(-1, index).reshape(waveform.shape[0], frames, width)
 
 
+def _encoder_lengths(ming, align):
+    import math
+
+    from .. import catalog
+    from . import tts_el
+
+    maximum = tts_el.REF_MAX_SECONDS
+    if maximum <= 0:
+        maximum = catalog._constraints("ming", "voice.clone")[2]["reference_audio_seconds"]["maximum"]
+    samples = math.ceil(float(ming.sample_rate) * maximum / align) * align
+    lengths = tuple(frames * align for frames in VAE_FRAME_BUCKETS)
+    last = bucket_for(samples, lengths)
+    return lengths[:lengths.index(last) + 1]
+
+
 def _install_encoder(ming, bailing, src, device, props):
     import torch
 
     align = int(ming._pad_align())
     if align <= 0:
         raise RuntimeError("Ming prompt align is %s" % align)
-    lengths = tuple(frames * align for frames in VAE_FRAME_BUCKETS)
+    lengths = _encoder_lengths(ming, align)
     encoder = bailing.audio.encoder
     encoder.get_frames = lambda waveform, enc=encoder: _static_frames(enc, waveform)
     wrapped = _EncodeVAE(encoder)
     graphs = {}
     for samples in lengths:
-        xml = os.path.join(src, "openvino", "vae_encode_%s.xml" % samples)
-
-        def prepare(xml=xml, samples=samples):
-            _export(wrapped.mod, torch.zeros(1, samples), xml)
-
-        graphs[samples] = _Graph(xml, device, props, prepare)
+        xml = os.path.join(src, "openvino", "encoder-v2", "vae_encode_%s.xml" % samples)
+        _export(wrapped.mod, torch.zeros(1, samples), xml)
+        graphs[samples] = _Graph(xml, device, props)
     graphs[lengths[0]].ensure()
     with torch.inference_mode():
         probed, _ = encoder(torch.zeros(1, lengths[0]))

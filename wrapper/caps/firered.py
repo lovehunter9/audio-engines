@@ -98,7 +98,9 @@ def _unsaid(text, wave, sr):
     return rest
 
 
-def _queue_rest(sents, i, origin, speak, wave, sr):
+def _queue_rest(sents, i, origin, speak, wave, sr, generation=None):
+    if generation and generation.get("stop_reason") == "threshold":
+        return len(sents)
     rest = _unsaid(speak, wave, sr)
     if rest and rest != speak and len(sents) < origin * 2 + 6:
         sents.insert(i + 1, rest)
@@ -233,7 +235,11 @@ class FireRedBackend:
 
     def _carry(self, text, wave, sr):
         """Keep the tail of what this wave actually covered, not the whole slice text."""
-        spoken = _spoken_text(text, wave, sr)
+        generation = getattr(self.model, "_ov_last_generation", None)
+        if generation and generation.get("stop_reason") == "threshold":
+            spoken = (text or "").strip()
+        else:
+            spoken = _spoken_text(text, wave, sr)
         if not spoken:
             return None
         tail_text, tail = tts_long.tail_pair(spoken, wave, sr, _CTX_SECONDS)
@@ -318,7 +324,8 @@ class FireRedBackend:
                 ))
                 wave, sr_out = _as_wave(audio, sr)
                 spans.append(len(wave) / float(sr_out or 1))
-                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out,
+                                    getattr(self.model, "_ov_last_generation", None))
                 if kn.context and i + 1 < total:
                     carry = self._carry(speak, wave, sr_out)
                 if slice_out is not None:
@@ -420,7 +427,8 @@ class FireRedBackend:
                     if extra_out is not None:
                         extra_out.append({"plan": plan_out})
                 wave, sr_out = _as_wave(audio, sr)
-                total = _queue_rest(sents, i, origin, speak, wave, sr_out)
+                total = _queue_rest(sents, i, origin, speak, wave, sr_out,
+                                    getattr(self.model, "_ov_last_generation", None))
                 if anchor is None:
                     anchor = (speak, wave, sr_out)
                 elif kn.context and i + 1 < total:
@@ -547,6 +555,64 @@ def _load():
     return FireRedBackend(instruct)
 
 
+def _firered_generation_summary(result, options, patch_size, stop_score):
+    latents = result[0] if isinstance(result, tuple) else result
+    prompt = options.get("latents_out")
+    prompt_frames = int(prompt.shape[1]) if prompt is not None else 0
+    frames = int(latents.shape[1])
+    generated_steps = max(0, frames - prompt_frames) // int(patch_size)
+    maximum = options.get("max_gen_steps")
+    maximum = 400 if maximum is None else int(maximum)
+    threshold = float(options.get("stop_threshold", 0.5))
+    reason = "unknown"
+    if stop_score is not None:
+        if stop_score >= threshold and generated_steps < maximum:
+            reason = "threshold"
+        elif generated_steps >= maximum:
+            reason = "max_steps"
+    return {
+        "stop_reason": reason, "stop_score": stop_score,
+        "generated_steps": generated_steps, "max_steps": maximum,
+        "prompt_frames": prompt_frames, "total_frames": frames,
+    }
+
+
+def _install_firered_generation_control(instruct):
+    import functools
+    import torch
+
+    core = instruct.tts_core
+    original = core.generate
+    last_stop = {"logits": None}
+
+    def stop_hook(_module, _inputs, output):
+        last_stop["logits"] = output.detach()
+
+    core._ov_stop_hook = core.stop_head.register_forward_hook(stop_hook)
+
+    @functools.wraps(original)
+    def generate(*args, **kwargs):
+        last_stop["logits"] = None
+        instruct._ov_last_generation = None
+        from .firered_noise import PatchNoise
+        # Text sampling has its own native RNG consumption; only reference speech uses this stream.
+        core._ov_patch_noise = None if kwargs.get("infer_text") else PatchNoise(torch.initial_seed())
+        try:
+            result = original(*args, **kwargs)
+        finally:
+            core._ov_patch_noise = None
+        logits = last_stop["logits"]
+        score = float(torch.sigmoid(logits.float()).item()) if logits is not None else None
+        summary = _firered_generation_summary(result, kwargs, core.patch_size, score)
+        instruct._ov_last_generation = summary
+        log.info("firered ov generation stop=%s steps=%d/%d score=%s prompt_frames=%d",
+                 summary["stop_reason"], summary["generated_steps"], summary["max_steps"],
+                 score, summary["prompt_frames"])
+        return result
+
+    core.generate = generate
+
+
 def _install_firered_ov(instruct, path, device):
     """Official generate() loop stays. DiT + patch + AR prefill/decode on GPU."""
     import torch
@@ -617,9 +683,42 @@ def _install_firered_ov(instruct, path, device):
     patch.forward = pe_forward
     log.info("firered DiT + patch_encoder on OpenVINO %s", device)
     _install_firered_backbone(core, path, device)
+    _install_firered_flow_noise(core)
+    _install_firered_generation_control(instruct)
     _install_firered_redae_cache(instruct, times)
     _install_firered_decoder_ov(instruct, path, device)
     _install_firered_decode_log(instruct, times)
+
+
+def _install_firered_flow_noise(core):
+    import torch
+
+    original = core._flow_one_step
+    core._ov_patch_noise = None
+
+    def flow(hist_latents, backbone_cond, t_span, inference_cfg):
+        noise = core._ov_patch_noise
+        if noise is None:
+            return original(hist_latents, backbone_cond, t_span, inference_cfg)
+        x0 = torch.from_numpy(noise.normal(core.patch_size, core.redae_dim)).to(hist_latents)
+        xt = torch.cat([hist_latents, x0], dim=1)
+        cond = backbone_cond.repeat_interleave(core.patch_size, dim=1)
+        for index, time in enumerate(t_span[:-1]):
+            dt = t_span[index + 1] - time
+            t_in = time.view(-1, 1, 1)
+            x_in = torch.cat([xt, cond], dim=2)
+            if inference_cfg > 0:
+                unconditional = torch.cat([xt, cond * 0], dim=2)
+                x_in = torch.cat([x_in, unconditional], dim=0)
+                t_in = t_in.expand(2, -1, -1)
+            velocity = core.dit(x=x_in, t=t_in)
+            if inference_cfg > 0:
+                conditional, unconditional = velocity.chunk(2, dim=0)
+                velocity = (1.0 + inference_cfg) * conditional - inference_cfg * unconditional
+            xt[:, -core.patch_size:] += dt.view(-1, 1, 1) * velocity[:, -core.patch_size:]
+        return xt[:, -core.patch_size:]
+
+    core._flow_one_step = flow
 
 
 def _firered_sliding_mask(hidden, window):
@@ -754,7 +853,17 @@ def _install_firered_redae_cache(instruct, times):
     import time
 
     import numpy as np
+    import torch
 
+    encoder = instruct.redae.encoder
+    original_encode = encoder.forward
+
+    def encode_reference(audio):
+        # Match the native RedAE encoder's BF16 autocast.
+        with torch.autocast("cpu", dtype=torch.bfloat16):
+            return original_encode(audio)
+
+    encoder.forward = encode_reference
     orig_tok = getattr(instruct, "_tokenize_audio", None)
     if orig_tok is None:
         raise RuntimeError("FireRedTTS3Instruct has no _tokenize_audio to cache")

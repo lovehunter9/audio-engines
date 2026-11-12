@@ -8,6 +8,7 @@ from pathlib import Path
 
 from . import tts_el
 from . import tts_long
+from .qwen_codec import causal_decode
 
 log = logging.getLogger("audio-qwen3-voice")
 
@@ -190,17 +191,6 @@ _OV_GENERATE_HOOK = None
 _OV_STREAM_HOOK = None
 
 
-def _official_speaker(prompt_text):
-    """The nine baked sentences are the official speakers. Anything else is a real clone."""
-    norm = " ".join(str(prompt_text or "").split())
-    if not norm:
-        return None
-    for speaker, _language, text, _description, _labels in SPEAKERS:
-        if " ".join(text.split()) == norm:
-            return speaker
-    return None
-
-
 def _cfg_sampling(cfg, base):
     """Higher CFG than this task's base is tighter sampling. The base itself is a no-op."""
     base = float(base) or 1.0
@@ -236,38 +226,105 @@ def _is_ov():
     return (os.environ.get("AUDIO_BASE") or "").strip() == "qwen3voiceov"
 
 
-def _ov_generate(repo, method, kwargs):
-    """Load one checkpoint in a child and exit. Dropping a compiled model in-process does not return the Arc pool."""
+_OV_JOB_SECONDS = 900.0
+
+
+class _OVChild:
+    def __init__(self, path, ctx=None, idle_seconds=None):
+        import subprocess
+        import sys
+
+        self.ctx = ctx
+        self.idle_seconds = idle_seconds
+        self.deadline = time.monotonic() + _OV_JOB_SECONDS
+        self.progress()
+        self.error = ""
+        self.checkpoint()
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "wrapper.caps.qwen3_ov_job", str(path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.reader = threading.Thread(target=self._drain, daemon=True)
+        self.reader.start()
+
+    def _drain(self):
+        for raw in self.proc.stderr:
+            line = raw.decode("utf-8", "replace")
+            self.error = (self.error + line)[-2000:]
+            if line.startswith("qwen_ov_stage "):
+                log.info("%s", line.strip())
+
+    def progress(self):
+        self.idle_deadline = (time.monotonic() + self.idle_seconds
+                              if self.idle_seconds is not None else None)
+
+    def checkpoint(self):
+        if self.ctx is not None:
+            self.ctx.checkpoint()
+        now = time.monotonic()
+        if now >= self.deadline:
+            raise TimeoutError("Qwen OpenVINO generation exceeded %.0f seconds" % _OV_JOB_SECONDS)
+        if self.idle_deadline is not None and now >= self.idle_deadline:
+            raise TimeoutError("Qwen OpenVINO produced no audio for %.0f seconds"
+                               % self.idle_seconds)
+
+    def wait(self):
+        while self.proc.poll() is None:
+            self.checkpoint()
+            time.sleep(0.02)
+        self.checkpoint()
+        self.reader.join()
+        if self.proc.returncode:
+            raise RuntimeError(self.error.strip() or "openvino child failed")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        import subprocess
+
+        if self.proc.poll() is None:
+            try:
+                self.proc.terminate()
+            except ProcessLookupError:
+                pass
+            try:
+                self.proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
+        self.reader.join()
+        self.proc.stderr.close()
+
+
+def _ov_generate(repo, method, kwargs, ctx=None):
+    if ctx is not None:
+        ctx.checkpoint()
     if _OV_GENERATE_HOOK is not None:
         return _OV_GENERATE_HOOK(repo, method, dict(kwargs))
     import json
-    import subprocess
-    import sys
     import tempfile
 
     import numpy as np
 
-    tmp = Path(tempfile.mkdtemp(prefix="qwen-ov-"))
-    out = tmp / "audio.npy"
-    job = {"repo": repo, "method": method, "kwargs": kwargs, "out": str(out)}
-    path = tmp / "job.json"
-    path.write_text(json.dumps(job), encoding="utf-8")
-    proc = subprocess.run(
-        [sys.executable, "-m", "wrapper.caps.qwen3_ov_job", str(path)],
-        capture_output=True, text=True, timeout=900)
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "openvino child failed").strip()
-        raise RuntimeError(detail[-2000:])
-    audio = np.load(out)
-    sr_path = out.with_suffix(".sr")
-    sr = int(sr_path.read_text(encoding="utf-8")) if sr_path.is_file() else 24000
-    return audio, int(sr)
+    with tempfile.TemporaryDirectory(prefix="qwen-ov-") as tmp:
+        out = Path(tmp) / "audio.npy"
+        job = {"repo": repo, "method": method, "kwargs": kwargs, "out": str(out)}
+        path = Path(tmp) / "job.json"
+        path.write_text(json.dumps(job), encoding="utf-8")
+        with _OVChild(path, ctx) as child:
+            child.wait()
+            audio = np.load(out)
+            sr_path = out.with_suffix(".sr")
+            sr = int(sr_path.read_text(encoding="utf-8")) if sr_path.is_file() else 24000
+            return audio, int(sr)
 
 
-def _read_follow(fh, proc, n):
+def _read_follow(fh, proc, n, checkpoint=None):
     """Read n bytes from a file the child is still writing."""
     buf = b""
     while len(buf) < n:
+        if checkpoint is not None:
+            checkpoint()
         chunk = fh.read(n - len(buf))
         if chunk:
             buf += chunk
@@ -282,60 +339,50 @@ def _read_follow(fh, proc, n):
     return buf
 
 
-def _ov_stream(repo, method, kwargs):
-    """Yield chunks while the child is still decoding. The child exits and returns the pool."""
+def _ov_stream(repo, method, kwargs, ctx=None):
+    if ctx is not None:
+        ctx.checkpoint()
     if _OV_STREAM_HOOK is not None:
         for audio, sr in _OV_STREAM_HOOK(repo, method, dict(kwargs)):
+            if ctx is not None:
+                ctx.checkpoint()
             wave = _mono(audio)
             if len(wave):
                 yield wave, int(sr)
         return
     import json
     import struct
-    import subprocess
-    import sys
     import tempfile
 
     import numpy as np
 
-    tmp = Path(tempfile.mkdtemp(prefix="qwen-ov-stream-"))
-    frames_path = tmp / "frames.bin"
-    frames_path.write_bytes(b"")
-    path = tmp / "job.json"
-    path.write_text(json.dumps({
-        "repo": repo, "method": method, "kwargs": kwargs, "stream": True,
-        "frames": str(frames_path),
-    }), encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "wrapper.caps.qwen3_ov_job", str(path)],
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    err = []
-
-    def _drain():
-        err.append(proc.stderr.read() if proc.stderr is not None else b"")
-
-    threading.Thread(target=_drain, daemon=True).start()
-    fh = open(frames_path, "rb", buffering=0)
-    try:
-        while True:
-            hdr = _read_follow(fh, proc, 8)
-            if hdr is None:
-                break
-            sr, n = struct.unpack("<II", hdr)
-            if n == 0:
-                break
-            raw = _read_follow(fh, proc, n * 4)
-            if raw is None:
-                break
-            wave = np.frombuffer(raw, dtype="<f4").astype("float32", copy=True)
-            if len(wave):
-                yield wave, int(sr or 24000)
-    finally:
-        fh.close()
-        rc = proc.wait(timeout=30)
-    if rc != 0:
-        detail = (err[0] if err else b"").decode("utf-8", "replace").strip()
-        raise RuntimeError(detail[-2000:] or "openvino stream child failed")
+    with tempfile.TemporaryDirectory(prefix="qwen-ov-stream-") as tmp:
+        frames_path = Path(tmp) / "frames.bin"
+        frames_path.write_bytes(b"")
+        path = Path(tmp) / "job.json"
+        path.write_text(json.dumps({
+            "repo": repo, "method": method, "kwargs": kwargs, "stream": True,
+            "frames": str(frames_path),
+        }), encoding="utf-8")
+        # Reap a stalled child before the shared stream watchdog restarts the engine.
+        idle_seconds = max(0.0, tts_el._STALL_SECONDS - 30.0)
+        with _OVChild(path, ctx, idle_seconds) as child:
+            with open(frames_path, "rb", buffering=0) as fh:
+                while True:
+                    hdr = _read_follow(fh, child.proc, 8, child.checkpoint)
+                    if hdr is None:
+                        break
+                    sr, n = struct.unpack("<II", hdr)
+                    if n == 0:
+                        break
+                    raw = _read_follow(fh, child.proc, n * 4, child.checkpoint)
+                    if raw is None:
+                        break
+                    wave = np.frombuffer(raw, dtype="<f4").astype("float32", copy=True)
+                    if len(wave):
+                        child.progress()
+                        yield wave, int(sr or 24000)
+            child.wait()
 
 
 def _ov_bake(dest):
@@ -462,8 +509,9 @@ class QwenVoiceBackend:
         try:
             model = self._custom_model()
             _apply_seed(seed)
-            return _pair(model.generate_custom_voice(
-                text=text, speaker=speaker, language=language, **gen))
+            with causal_decode(model):
+                return _pair(model.generate_custom_voice(
+                    text=text, speaker=speaker, language=language, **gen))
         finally:
             self._drop_custom()
             self._ensure_base()
@@ -476,15 +524,55 @@ class QwenVoiceBackend:
         path = self._prompt_path(prompt_audio, prompt_sr)
         try:
             _apply_seed(seed)
-            return _pair(self.model.generate_voice_clone(
-                text=text, language=language, ref_audio=path,
-                ref_text="" if xvec else (prompt_text or ""),
-                xvec_only=bool(xvec), **gen))
+            with causal_decode(self.model):
+                return _pair(self.model.generate_voice_clone(
+                    text=text, language=language, ref_audio=path,
+                    ref_text="" if xvec else (prompt_text or ""),
+                    xvec_only=bool(xvec), **gen))
         finally:
             try:
                 os.unlink(path)
             except OSError:
                 pass
+
+    def _speaker(self, meta):
+        meta = meta or {}
+        speaker = str(meta.get("voice_id") or "")
+        if meta.get("category") != "premade" or speaker not in {row[0] for row in SPEAKERS}:
+            raise tts_el.HTTPException(status_code=400, detail="unknown native voice %r" % speaker)
+        return speaker
+
+    def speak_native(self, meta, text, instruction=None, ctx=None, settings=None, sampling=None):
+        speaker = self._speaker(meta)
+        gen, speed, seed, language = _sampling(settings, text, instruction or "", sampling=sampling)
+        if self._openvino():
+            audio, sr = _ov_generate(CUSTOM_REPO, "generate_custom_voice", {
+                "text": text, "speaker": speaker, "language": language, "seed": seed, **gen}, ctx=ctx)
+        else:
+            audio, sr = self._generate_custom(speaker, text, gen, seed, language)
+        tts_el.job_tick(ctx, 1, 1)
+        return tts_long.pace(audio, sr, speed)
+
+    def iter_speak_native(self, meta, text, **kw):
+        speaker = self._speaker(meta)
+        gen, speed, seed, language = _sampling(
+            kw.get("settings"), text, kw.get("instruction") or "", sampling=kw.get("sampling"))
+        size = _chunk_size(kw)
+        if self._openvino():
+            chunks = _ov_stream(CUSTOM_REPO, "generate_custom_voice_streaming", {
+                "text": text, "speaker": speaker, "language": language,
+                "seed": seed, "chunk_size": size, **gen}, ctx=kw.get("ctx"))
+            yield from self._pace_chunks(chunks, speed)
+        else:
+            try:
+                model = self._custom_model()
+                chunks = self._iter_loaded(model, "generate_custom_voice", {
+                    "text": text, "speaker": speaker, "language": language, **gen}, seed, size)
+                yield from self._pace_chunks(chunks, speed)
+            finally:
+                self._drop_custom()
+                self._ensure_base()
+        tts_el.job_tick(kw.get("ctx"), 1, 1)
 
     def clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
         # One call for the whole text. Do not feed the previous sentence back in.
@@ -492,31 +580,20 @@ class QwenVoiceBackend:
         sampling = kw.get("sampling") or {}
         gen, speed, seed, language = _sampling(
             kw.get("settings"), text, instruction, sampling=sampling)
+        xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
         if self._openvino():
-            speaker = _official_speaker(prompt_text)
-            if speaker:
-                audio, sr = _ov_generate(CUSTOM_REPO, "generate_custom_voice", {
-                    "text": text, "speaker": speaker, "language": language,
-                    "seed": seed, **gen})
-            else:
-                xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
-                path = self._prompt_path(prompt_audio, prompt_sr)
+            path = self._prompt_path(prompt_audio, prompt_sr)
+            try:
+                audio, sr = _ov_generate(BASE_REPO, "generate_voice_clone", {
+                    "text": text, "language": language, "ref_audio": path,
+                    "ref_text": "" if xvec else (prompt_text or ""),
+                    "xvec_only": bool(xvec), "seed": seed, **gen}, ctx=kw.get("ctx"))
+            finally:
                 try:
-                    audio, sr = _ov_generate(BASE_REPO, "generate_voice_clone", {
-                        "text": text, "language": language, "ref_audio": path,
-                        "ref_text": "" if xvec else (prompt_text or ""),
-                        "xvec_only": bool(xvec), "seed": seed, **gen})
-                finally:
-                    try:
-                        os.unlink(path)
-                    except OSError:
-                        pass
-            return tts_long.pace(audio, sr, speed)
-        speaker = _official_speaker(prompt_text)
-        if speaker:
-            audio, sr = self._generate_custom(speaker, text, gen, seed, language)
+                    os.unlink(path)
+                except OSError:
+                    pass
         else:
-            xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
             audio, sr = self._generate_clone(
                 text, prompt_audio, prompt_sr, prompt_text, gen, seed, language, xvec)
         return tts_long.pace(audio, sr, speed)
@@ -539,6 +616,10 @@ class QwenVoiceBackend:
                 tempo.abort()
 
     def _iter_loaded(self, model, method, call, seed, chunk_size):
+        with causal_decode(model, chunk_size=chunk_size):
+            yield from self._iter_decoded(model, method, call, seed, chunk_size)
+
+    def _iter_decoded(self, model, method, call, seed, chunk_size):
         _apply_seed(seed)
         kwargs = dict(call)
         kwargs["chunk_size"] = int(chunk_size)
@@ -555,38 +636,22 @@ class QwenVoiceBackend:
                 yield audio, sr
 
     def _iter_clone_chunks(self, text, prompt_audio, prompt_sr, prompt_text, gen, seed,
-                           language, sampling, chunk_size):
+                           language, sampling, chunk_size, ctx=None):
         # One generation for the whole text. Chunks are codec steps, not earlier sentences.
         if self._openvino():
-            speaker = _official_speaker(prompt_text)
-            if speaker:
-                yield from _ov_stream(CUSTOM_REPO, "generate_custom_voice_streaming", {
-                    "text": text, "speaker": speaker, "language": language,
-                    "seed": seed, "chunk_size": chunk_size, **gen})
-                return
             xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
             path = self._prompt_path(prompt_audio, prompt_sr)
             try:
                 yield from _ov_stream(BASE_REPO, "generate_voice_clone_streaming", {
                     "text": text, "language": language, "ref_audio": path,
                     "ref_text": "" if xvec else (prompt_text or ""),
-                    "xvec_only": bool(xvec), "seed": seed, "chunk_size": chunk_size, **gen})
+                    "xvec_only": bool(xvec), "seed": seed, "chunk_size": chunk_size, **gen},
+                    ctx=ctx)
             finally:
                 try:
                     os.unlink(path)
                 except OSError:
                     pass
-            return
-        speaker = _official_speaker(prompt_text)
-        if speaker:
-            try:
-                model = self._custom_model()
-                yield from self._iter_loaded(model, "generate_custom_voice", {
-                    "text": text, "speaker": speaker, "language": language, **gen,
-                }, seed, chunk_size)
-            finally:
-                self._drop_custom()
-                self._ensure_base()
             return
         xvec = bool(sampling.get("x_vector_only")) or not str(prompt_text or "").strip()
         self._drop_design()
@@ -612,7 +677,7 @@ class QwenVoiceBackend:
             kw.get("settings"), text, instruction, sampling=sampling)
         chunks = self._iter_clone_chunks(
             text, prompt_audio, prompt_sr, prompt_text, gen, seed, language, sampling,
-            _chunk_size(kw))
+            _chunk_size(kw), ctx=kw.get("ctx"))
         yield from self._pace_chunks(chunks, speed)
         tts_el.job_tick(kw.get("ctx"), 1, 1)
 
@@ -620,8 +685,9 @@ class QwenVoiceBackend:
         try:
             model = self._design_model()
             _apply_seed(seed)
-            return _pair(model.generate_voice_design(
-                text=text, language=language, **gen))
+            with causal_decode(model):
+                return _pair(model.generate_voice_design(
+                    text=text, language=language, **gen))
         finally:
             self._drop_design()
             self._ensure_base()
@@ -633,18 +699,18 @@ class QwenVoiceBackend:
             base_cfg=tts_el.DESIGN_CFG, sampling=kw.get("sampling"))
         if self._openvino():
             audio, sr = _ov_generate(DESIGN_REPO, "generate_voice_design", {
-                "text": text, "language": language, "seed": seed, **gen})
+                "text": text, "language": language, "seed": seed, **gen}, ctx=kw.get("ctx"))
             paced, sr = tts_long.pace(audio, sr, speed)
             return paced, sr, {}
         audio, sr = self._generate_design(text, gen, seed, language)
         paced, sr = tts_long.pace(audio, sr, speed)
         return paced, sr, {}
 
-    def _iter_design_chunks(self, text, gen, seed, language, chunk_size):
+    def _iter_design_chunks(self, text, gen, seed, language, chunk_size, ctx=None):
         if self._openvino():
             yield from _ov_stream(DESIGN_REPO, "generate_voice_design_streaming", {
                 "text": text, "language": language, "seed": seed,
-                "chunk_size": chunk_size, **gen})
+                "chunk_size": chunk_size, **gen}, ctx=ctx)
             return
         try:
             model = self._design_model()
@@ -660,7 +726,8 @@ class QwenVoiceBackend:
             kw.get("settings"), text, instruction,
             seed_jitter=int(kw.get("seed_jitter") or 0),
             base_cfg=tts_el.DESIGN_CFG, sampling=kw.get("sampling"))
-        chunks = self._iter_design_chunks(text, gen, seed, language, _chunk_size(kw))
+        chunks = self._iter_design_chunks(
+            text, gen, seed, language, _chunk_size(kw), ctx=kw.get("ctx"))
         yield from self._pace_chunks(chunks, speed)
         tts_el.job_tick(kw.get("ctx"), 1, 1, stage="design")
 

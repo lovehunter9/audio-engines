@@ -50,3 +50,15 @@ shipped as premade; use Voice Design or clone.
 
 There is no portable speaker embedding. A card is the instruction and/or
 the reference wav+transcript the model actually consumes.
+
+## Shared saved voices
+
+`--shared-voice-dir` optionally selects a persistent library for the four shared
+voices and all saved user clones/designs. `--voice-dir` keeps the current model's
+native cards, preview drafts, history, and caches. The directories must differ.
+Without the shared-directory option, the existing single-directory layout stays.
+
+An engine lists the shared library plus its own native catalog. Saved user voices
+keep their reference wav/transcript and ID across models. Native cards are selected
+explicitly; a matching reference transcript never changes a clone into a native voice.
+In shared mode, public cards include `labels.voice_scope` (`shared` or `model`).
