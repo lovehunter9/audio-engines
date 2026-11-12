@@ -15,6 +15,7 @@ import os
 log = logging.getLogger("audio-simuls2st")
 
 _STAMP = ".ov-simuls2st-llm-v1"
+_TALKER_F32_STAMP = ".ov-simuls2st-talker-f32-v1"
 _MAX_T = 4096
 
 
@@ -40,19 +41,32 @@ def install(agent, snap, device):
     thinker = inference.base_model.thinker
     talker = inference.base_model.talker
     thinker.half()
-    _stack(thinker.model, snap, device, "simuls2st_thinker")
-    _linear(thinker.lm_head, snap, device, "simuls2st_thinker_head")
-    talker.half()
-    _stack(talker.model, snap, device, "simuls2st_talker")
-    _linear(talker.codec_head, snap, device, "simuls2st_talker_head")
-    _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj")
+    _stack(thinker.model, snap, device, "simuls2st_thinker", precision="f16", stamp=_STAMP)
+    _linear(thinker.lm_head, snap, device, "simuls2st_thinker_head", precision="f16", stamp=_STAMP)
+    talker_f32 = _talker_fp32()
+    if talker_f32:
+        talker.float()
+        tprec, tstamp = "f32", _TALKER_F32_STAMP
+    else:
+        talker.half()
+        tprec, tstamp = "f16", _STAMP
+    _stack(talker.model, snap, device, "simuls2st_talker", precision=tprec, stamp=tstamp)
+    _linear(talker.codec_head, snap, device, "simuls2st_talker_head", precision=tprec, stamp=tstamp)
+    _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj", precision=tprec, stamp=tstamp)
     vb = "OpenVINO GPU" if _voicebox_use_openvino() else "torch CPU"
+    talker_prec = "fp32" if talker_f32 else "fp16"
     log.info(
-        "simuls2st OV on %s: VoiceBox %s, Vocos torch CPU, thinker/talker fp16; "
+        "simuls2st OV on %s: VoiceBox %s, Vocos torch CPU, thinker fp16, talker %s; "
         "audio encoder stays on CPU",
         device,
         vb,
+        talker_prec,
     )
+
+
+def _talker_fp32():
+    raw = (os.environ.get("OV_SIMULS2ST_TALKER_FP32") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "f16", "fp16")
 
 
 def _voicebox_use_openvino():
@@ -117,7 +131,7 @@ def _vocoder(vocoder, mel_dim, snap, device):
     log.info("Vocos on torch CPU (backbone and ISTFT)")
 
 
-def _stack(model, snap, device, name):
+def _stack(model, snap, device, name, precision="f16", stamp=_STAMP):
     """One graph for prefill and decode. A second runner serves use_cache=False."""
     import torch
 
@@ -131,35 +145,37 @@ def _stack(model, snap, device, name):
     hidden = int(cfg.hidden_size)
     sections = _mrope_sections(cfg)
     example_q = 8
-    embeds = torch.zeros(1, example_q, hidden, dtype=torch.float16)
+    dt = torch.float32 if precision == "f32" else torch.float16
+    embeds = torch.zeros(1, example_q, hidden, dtype=dt)
     mask = torch.ones(1, example_q, _MAX_T, dtype=torch.long)
     position = torch.arange(example_q, dtype=torch.long).view(1, -1).expand(3, -1).contiguous()
     slot = torch.arange(example_q, dtype=torch.long)
     past = []
     for _ in range(n_layers):
-        past.append(torch.zeros(1, n_kv, _MAX_T, head_dim, dtype=torch.float16))
-        past.append(torch.zeros(1, n_kv, _MAX_T, head_dim, dtype=torch.float16))
-    _, xml, stamp = tts_ov.ir_paths(snap, name, _STAMP)
+        past.append(torch.zeros(1, n_kv, _MAX_T, head_dim, dtype=dt))
+        past.append(torch.zeros(1, n_kv, _MAX_T, head_dim, dtype=dt))
+    _, xml, stamp_path = tts_ov.ir_paths(snap, name, stamp)
     tts_ov.compile_causal(
         _slot_step(model, sections),
-        (embeds, mask, position, slot, *past), xml, stamp, device,
-        dynamize_ranks=(1, 2, 3), compile_graph=False, precision="f16",
+        (embeds, mask, position, slot, *past), xml, stamp_path, device,
+        dynamize_ranks=(1, 2, 3), compile_graph=False, precision=precision,
     )
     _release_stack(model, name)
     compiled = tts_ov.compile_causal(
         _slot_step(model, sections),
-        (embeds, mask, position, slot, *past), xml, stamp, device,
-        dynamize_ranks=(1, 2, 3), precision="f16",
+        (embeds, mask, position, slot, *past), xml, stamp_path, device,
+        dynamize_ranks=(1, 2, 3), precision=precision,
     )
     if compiled is None:
         raise RuntimeError("%s did not compile on %s" % (name, device))
-    live = _SlotRunner(compiled, n_layers, n_kv, head_dim)
-    once = _SlotRunner(compiled, n_layers, n_kv, head_dim)
+    f32 = precision == "f32"
+    live = _SlotRunner(compiled, n_layers, n_kv, head_dim, f32=f32)
+    once = _SlotRunner(compiled, n_layers, n_kv, head_dim, f32=f32)
     model.forward = _bound_forward(model, live, once)
-    log.info("%s on OpenVINO %s (%d layers, one graph)", name, device, n_layers)
+    log.info("%s on OpenVINO %s (%d layers, %s, one graph)", name, device, n_layers, precision)
 
 
-def _linear(mod, snap, device, name):
+def _linear(mod, snap, device, name, precision="f16", stamp=_STAMP):
     import torch
 
     from .. import tts_ov
@@ -167,29 +183,34 @@ def _linear(mod, snap, device, name):
     if not isinstance(mod, torch.nn.Linear):
         raise RuntimeError("%s is not a Linear" % name)
     hidden = int(mod.in_features)
-    example = torch.zeros(1, 8, hidden, dtype=mod.weight.dtype)
-    _, xml, stamp = tts_ov.ir_paths(snap, name, _STAMP)
+    dt = torch.float32 if precision == "f32" else mod.weight.dtype
+    example = torch.zeros(1, 8, hidden, dtype=dt)
+    _, xml, stamp_path = tts_ov.ir_paths(snap, name, stamp)
     tts_ov.compile_causal(
-        mod, example, xml, stamp, device,
-        dynamize_ranks=(3,), compile_graph=False, precision="f16",
+        mod, example, xml, stamp_path, device,
+        dynamize_ranks=(3,), compile_graph=False, precision=precision,
     )
     tts_ov.release_parameters(mod, name)
     compiled = tts_ov.compile_causal(
-        mod, example, xml, stamp, device,
-        dynamize_ranks=(3,), precision="f16",
+        mod, example, xml, stamp_path, device,
+        dynamize_ranks=(3,), precision=precision,
     )
     if compiled is None:
         raise RuntimeError("%s did not compile on %s" % (name, device))
+    use_f32 = precision == "f32"
 
     def forward(x):
         import numpy as np
 
-        arr = np.ascontiguousarray(x.detach().half().cpu().numpy())
+        if use_f32:
+            arr = np.ascontiguousarray(x.detach().float().cpu().numpy())
+        else:
+            arr = np.ascontiguousarray(x.detach().half().cpu().numpy())
         out = compiled(arr)[0]
         return torch.from_numpy(np.ascontiguousarray(out)).float()
 
     mod.forward = forward
-    log.info("%s on OpenVINO %s", name, device)
+    log.info("%s on OpenVINO %s (%s)", name, device, precision)
 
 
 def _release_stack(model, label):
@@ -381,20 +402,22 @@ def _mrope(q, k, cos, sin, sections):
 
 
 class _SlotRunner(object):
-    def __init__(self, compiled_fn, n_layers, n_kv, head_dim):
+    def __init__(self, compiled_fn, n_layers, n_kv, head_dim, f32=False):
         compiled = compiled_fn.compiled
         self.reqs = (compiled.create_infer_request(), compiled.create_infer_request())
         self.n_layers = int(n_layers)
         self.n_kv = int(n_kv)
         self.head_dim = int(head_dim)
         self.max_t = _MAX_T
+        self._f32 = bool(f32)
         self.reset()
 
     def _zeros(self):
         import numpy as np
         import openvino as ov
 
-        zeros = np.zeros((1, self.n_kv, self.max_t, self.head_dim), dtype=np.float16)
+        np_dt = np.float32 if self._f32 else np.float16
+        zeros = np.zeros((1, self.n_kv, self.max_t, self.head_dim), dtype=np_dt)
         return [ov.Tensor(np.array(zeros, copy=True)) for _ in range(2 * self.n_layers)]
 
     def reset(self):
@@ -414,7 +437,10 @@ class _SlotRunner(object):
             raise RuntimeError(
                 "simuls2st ov cache %d+%d exceeds %d" % (self.slot, q, self.max_t)
             )
-        emb = np.ascontiguousarray(embeds.detach().half().cpu().numpy())
+        if self._f32:
+            emb = np.ascontiguousarray(embeds.detach().float().cpu().numpy())
+        else:
+            emb = np.ascontiguousarray(embeds.detach().half().cpu().numpy())
         pos = np.ascontiguousarray(position.detach().long().cpu().numpy())
         mask = np.zeros((1, q, self.max_t), dtype=np.int64)
         for i in range(q):
