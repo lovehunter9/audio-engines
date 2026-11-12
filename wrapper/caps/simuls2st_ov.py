@@ -89,7 +89,6 @@ def _estimator(voicebox, snap, device):
 def _vocoder(vocoder, mel_dim, snap, device):
     """Keep Vocos on torch CPU. The conv backbone on OpenVINO GPU still smeared word onsets after dynamizing T."""
     del mel_dim, snap
-    import torch
 
     vocoder.cpu().float()
     if hasattr(vocoder, "eval"):
