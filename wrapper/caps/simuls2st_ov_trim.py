@@ -1,10 +1,11 @@
-"""OpenVINO-only waveform fix: drop prompt-mel prefix from synthesized audio.
+"""OpenVINO-only waveform fixes for streaming S2ST.
 
-The upstream streaming S2ST agent vocodes the full mel (prompt + generated) but never
-calls `_trim_prompt_prefix_audio`, unlike offline unpaired TTS. English source as
-prompt_mel then bleeds into the start of the translated clip (heard as smeared onsets).
+1. Drop vocoded prompt-mel prefix after Vocos (upstream streaming path never trims).
+2. On the first chunk with empty turn history, disable prompt_mel so English source
+   mel does not condition VoiceBox when the output mel cannot extend past the prompt.
 """
 import logging
+import types
 
 log = logging.getLogger("audio-simuls2st")
 
@@ -56,3 +57,19 @@ def patch_prompt_mel_trim(agent):
         "OpenVINO S2ST: trim prompt-mel prefix after Vocos "
         "(matches offline _trim_prompt_prefix_audio)"
     )
+
+    orig_syn = agent._synthesize_codes
+
+    @torch.inference_mode()
+    def synthesize_codes(self, generated_codes, states, current_audio_16k):
+        saved = bool(self.use_prompt_mel)
+        if saved and not (getattr(states, "turn_history", None) or []):
+            self.use_prompt_mel = False
+            log.debug("first S2ST chunk without history: disable prompt_mel")
+        try:
+            return orig_syn(generated_codes, states, current_audio_16k)
+        finally:
+            self.use_prompt_mel = saved
+
+    agent._synthesize_codes = types.MethodType(synthesize_codes, agent)
+    log.info("OpenVINO S2ST: disable prompt_mel on first chunk (empty turn_history)")
