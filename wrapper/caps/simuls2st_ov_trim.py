@@ -36,7 +36,17 @@ def patch_prompt_mel_trim(agent):
         pm = ctx.get("prompt_mel")
         fm = ctx.get("full_mel")
         if pm is not None and fm is not None and fm.data_ptr() == mel.data_ptr():
-            audio = inf._trim_prompt_prefix_audio(audio=audio, full_mel=mel, prompt_mel=pm)
+            full_len = int(mel.shape[1])
+            prompt_len = int(pm.shape[1])
+            if full_len > prompt_len > 0:
+                audio = inf._trim_prompt_prefix_audio(
+                    audio=audio, full_mel=mel, prompt_mel=pm,
+                )
+            else:
+                log.warning(
+                    "skip prompt-mel trim: full_mel=%d prompt_mel=%d (no safe prefix to drop)",
+                    full_len, prompt_len,
+                )
         return audio
 
     inf.codes_to_mel = codes_to_mel
