@@ -1,7 +1,7 @@
 """SimulS2ST on the Intel GPU. The official sampling loop stays in Python.
 
-VoiceBox and the Vocos backbone are FP32. The ISTFT head stays in torch:
-the GPU compiler segfaults on that complex op. The thinker and talker stacks are one FP16 graph
+VoiceBox diff_estimator is FP32 on the GPU. Vocos runs whole-stack torch on CPU:
+OpenVINO on the conv backbone drifted word onsets even with a dynamic time axis. The thinker and talker stacks are one FP16 graph
 each: a second FP32 copy of the 7B weights does not fit the 32Gi engine limit.
 Prefill and decode share that graph, and the KV cache stays on the GPU. Host
 tensors the official loop reads are FP32. The audio encoder stays on CPU. Its
@@ -46,7 +46,7 @@ def install(agent, snap, device):
     _linear(talker.codec_head, snap, device, "simuls2st_talker_head")
     _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj")
     log.info(
-        "simuls2st OV on %s: waveform fp32, ISTFT in torch, thinker and talker stacks fp16; "
+        "simuls2st OV on %s: VoiceBox diff on GPU, Vocos torch CPU, thinker/talker fp16; "
         "audio encoder stays on CPU",
         device,
     )
@@ -87,37 +87,14 @@ def _estimator(voicebox, snap, device):
 
 
 def _vocoder(vocoder, mel_dim, snap, device):
-    """Compile the conv backbone. ISTFT stays in torch; the GPU compiler segfaults on it."""
+    """Keep Vocos on torch CPU. The conv backbone on OpenVINO GPU still smeared word onsets after dynamizing T."""
+    del mel_dim, snap
     import torch
 
-    from .. import tts_ov
-
-    backbone = getattr(vocoder, "backbone", None)
-    head = getattr(vocoder, "head", None)
-    if backbone is None or head is None:
-        raise RuntimeError("Vocos has no backbone/head to split")
-    example = torch.zeros(1, mel_dim, 64, dtype=torch.float32)
-    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_vocos_backbone", ".ov-simuls2st-v3")
-    compiled = tts_ov.compile_module(
-        backbone, example, xml, stamp, device, dynamic_rank=3, dynamic_axis=-1
-    )
-    if compiled is None:
-        raise RuntimeError("Vocos backbone did not compile on %s" % device)
-
-    def forward(mel, *args, **kwargs):
-        import numpy as np
-
-        arr = np.ascontiguousarray(mel.detach().float().cpu().numpy())
-        hidden = torch.from_numpy(np.ascontiguousarray(compiled(arr)[0])).float()
-        with torch.inference_mode():
-            audio = head(hidden)
-        if audio.dim() == 2:
-            audio = audio[:, None, :]
-        return audio
-
-    vocoder.forward = forward
-    tts_ov.release_parameters(backbone, "simuls2st vocos backbone")
-    log.info("Vocos backbone on OpenVINO %s; ISTFT stays in torch", device)
+    vocoder.cpu().float()
+    if hasattr(vocoder, "eval"):
+        vocoder.eval()
+    log.info("Vocos on torch CPU (backbone and ISTFT); VoiceBox diff on OpenVINO %s", device)
 
 
 def _stack(model, snap, device, name):

@@ -3200,15 +3200,14 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
 
 
 class Simuls2stOvRecipeTest(unittest.TestCase):
-    def test_vocos_backbone_compiles_with_dynamic_time(self):
+    def test_vocos_stays_torch_cpu(self):
         import inspect
 
         from wrapper.caps import simuls2st_ov
 
         src = inspect.getsource(simuls2st_ov._vocoder)
-        self.assertIn("dynamic_rank=3", src)
-        self.assertIn("dynamic_axis=-1", src)
-        self.assertIn(".ov-simuls2st-v3", src)
+        self.assertIn("Vocos on torch CPU", src)
+        self.assertNotIn("compile_module", src)
 
     def test_voicebox_diff_compiles_with_dynamic_time(self):
         import inspect
