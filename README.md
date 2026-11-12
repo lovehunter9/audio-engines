@@ -671,7 +671,7 @@ premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
 
-**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. `intel` and `intel-gpu` both compile for device `GPU`. VoiceBox's `diff_estimator` and the Vocos conv backbone are FP32 on that GPU. The ISTFT head stays in torch, because compiling that complex op segfaults the GPU compiler. Thinker and talker prefill, decode, `lm_head`, `codec_head` and `thinker_to_talker_proj` are FP16 on that GPU: a second FP32 copy of the 7B stack does not fit the 32Gi engine limit. The official sampling loop stays in Python and still reads FP32 host tensors. The audio encoder stays on CPU, because its packed-chunk mask loops over the input lengths.
+**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. `intel` and `intel-gpu` both compile for device `GPU`. VoiceBox's `diff_estimator` is FP32 on that GPU. Vocos stays on torch CPU so vocoder math matches CUDA; an OpenVINO GPU conv backbone smeared word onsets even with a dynamic mel length. Thinker and talker prefill, decode, `lm_head`, `codec_head` and `thinker_to_talker_proj` are FP16 on that GPU: a second FP32 copy of the 7B stack does not fit the 32Gi engine limit. The official sampling loop stays in Python and still reads FP32 host tensors. The audio encoder stays on CPU, because its packed-chunk mask loops over the input lengths.
 
 **`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64. One load runs the thinker,
 the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the
