@@ -189,8 +189,10 @@ def _load():
             restore()
     if ov:
         from .simuls2st_ov import install
+        from .simuls2st_ov_trim import patch_prompt_mel_trim
 
         install(agent, snap, ov_device)
+        patch_prompt_mel_trim(agent)
     _state.update(agent=agent, dtype=dtype)
 
 
