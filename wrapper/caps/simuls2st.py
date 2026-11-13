@@ -424,6 +424,10 @@ def _ws_text(text, source, target, states, rate):
 
 
 def run(supports):
+    from .simuls2st_ov import configure_threads, is_ov
+
+    if is_ov():
+        configure_threads()
     _pair(SOURCE_LANG, TARGET_LANG)
     _runtime.serve(supports, _boot, build_app, "SimulS2ST-Omni engine",
                    disable_ws_ping=True, timeout_s=BOOT_TIMEOUT_S)
