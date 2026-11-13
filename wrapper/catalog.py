@@ -110,7 +110,8 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
-    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
+    "seamless": [(("audio_s2s",), "seamless")],
+    # audio_llm stays reserved until a base implements it.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.
@@ -135,6 +136,7 @@ FAMILIES = {
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
+    "seamless": "seamless-streaming",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -416,6 +418,11 @@ for _el_mod in ("firered", "breeze"):
         ("POST", "/v1/audio/speech/clone",
          "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
     )
+
+_MOUNTS[("seamless", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations", "Native streaming speech translation; text and 16 kHz audio", True),
+    ("WS", "/v1/audio/translations/stream", "Continuous PCM input, incremental translated text and speech", False),
+]
 
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
