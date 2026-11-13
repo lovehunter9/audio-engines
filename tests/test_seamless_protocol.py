@@ -8,6 +8,7 @@ from wrapper.caps import seamless
 class FakeEngine:
     def __init__(self):
         self.sessions = []
+        self.speech_languages = {"cmn", "eng"}
 
     def session(self, target, *, text_only=False):
         session = {'target': target, 'text_only': text_only, 'calls': 0}
@@ -45,6 +46,17 @@ class ProtocolTests(unittest.TestCase):
                 self.assertTrue(ws.receive_json()['finished'])
         self.assertEqual(len(self.engine.sessions), 2)
         self.assertTrue(all(s['calls'] == 2 for s in self.engine.sessions))
+
+    def test_text_only_stream_has_no_audio_frames(self):
+        with self.client.websocket_connect('/v1/audio/translations/stream') as ws:
+            ws.receive_json()
+            ws.send_json({'source_lang':'English', 'target_lang':'Chinese', 'response_format':'text'})
+            ws.send_bytes(b'\0\0' * 5120)
+            self.assertEqual(ws.receive_json()['text'], '开始')
+            ws.send_json({'event':'end'})
+            self.assertEqual(ws.receive_json()['text'], '结束')
+            self.assertTrue(ws.receive_json()['finished'])
+        self.assertTrue(self.engine.sessions[0]['text_only'])
 
     def test_invalid_language_and_empty_upload_are_rejected(self):
         response=self.client.post('/v1/audio/translations', files={'file':('a.wav',b'')},

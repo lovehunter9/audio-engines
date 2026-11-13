@@ -87,6 +87,8 @@ def _drain(states, source, target, finished, checkpoint=None):
     engine = _state["engine"]
     with _lock:
         if states.upstream is None:
+            if not states.text_only and target not in engine.speech_languages:
+                raise HTTPException(status_code=400, detail="target has text output only; use response_format=text")
             states.upstream = engine.session(target, text_only=states.text_only)
         events = []
         done = False
@@ -105,7 +107,7 @@ def _drain(states, source, target, finished, checkpoint=None):
                         value = " " + value
                     states.has_text = True
                     events.append((kind, value))
-                elif kind == "samples":
+                elif kind == "samples" and not states.text_only:
                     pcm = _pcm16(value)
                     if pcm:
                         events.append(("pcm", pcm))
@@ -187,6 +189,8 @@ def build_app(supports):
             raise HTTPException(status_code=400,
                                 detail="response_format must be json, text, wav, or pcm")
         source, target = _pair(source_lang, target_lang)
+        if fmt != "text" and target not in _state["engine"].speech_languages:
+            raise HTTPException(status_code=400, detail="target has text output only; use response_format=text")
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="file is empty")
@@ -264,6 +268,10 @@ def build_app(supports):
         except HTTPException as e:
             await ws.send_json({"error": e.detail})
             await ws.close()
+        except Exception:
+            log.exception("SeamlessStreaming session failed")
+            await ws.send_json({"error": "translation failed"})
+            await ws.close(code=1011)
 
     return app
 
@@ -282,7 +290,16 @@ def _ws_text(text, source, target, states, rate):
     if not stop and (obj.get("source_lang") or obj.get("target_lang")):
         source, target = _pair(obj.get("source_lang") or source, obj.get("target_lang") or target)
         if states.upstream is not None or states.processed_samples or states.source:
-            states = _new_states()
+            states = _new_states(text_only=states.text_only)
+    if obj.get("response_format") is not None:
+        fmt = str(obj["response_format"]).lower()
+        if fmt not in ("text", "pcm"):
+            raise HTTPException(status_code=400, detail="stream response_format must be text or pcm")
+        text_only = fmt == "text"
+        if text_only != states.text_only:
+            if states.upstream is not None or states.source:
+                raise HTTPException(status_code=400, detail="set response_format before sending audio")
+            states = _new_states(text_only=text_only)
     if obj.get("sample_rate"):
         try:
             rate = int(obj["sample_rate"])

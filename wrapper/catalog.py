@@ -525,6 +525,13 @@ def _modalities(operation_id):
 
 def _parameters(module, operation_id, path=""):
     params = []
+    if module == "seamless" and operation_id.startswith("audio.translate"):
+        params.extend([
+            {"name": "source_lang", "type": "string", "default": "English"},
+            {"name": "target_lang", "type": "string", "default": "Chinese"},
+            {"name": "response_format", "type": "string", "default": "pcm" if path.endswith("/stream") else "json",
+             "enum": ["text", "pcm"] if path.endswith("/stream") else ["json", "text", "wav", "pcm"]},
+        ])
     # `segments` is the protocol-level batching signal consumed by clients.
     # Keep it tied to the implementations that actually accept the multipart
     # field: a future single-clip recogniser must not inherit the claim merely
@@ -572,8 +579,14 @@ def _constraints(module, operation_id, path=""):
 
 def describe_endpoint(module, cap, method, path, is_async):
     operation_id = _operation_id(module, cap, method, path)
+    if module == "seamless" and cap == "audio_s2s" and method == "WS":
+        operation_id = "audio.translate.stream"
     inputs, outputs = _modalities(operation_id)
     formats, rates, limits = _constraints(module, operation_id, path)
+    if module == "seamless" and cap == "audio_s2s":
+        inputs, outputs = ["audio"], ["text", "audio"]
+        formats = ["text", "pcm"] if method == "WS" else ["json", "text", "wav", "pcm"]
+        rates = [16000]
     scope = "model"
     if operation_id.startswith("voice."):
         scope = "voice"
