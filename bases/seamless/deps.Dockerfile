@@ -16,3 +16,6 @@ RUN python3 -m pip install --no-cache-dir "datasets==2.18.0" "pyarrow==17.0.0" "
 RUN python3 -c "import torch, fairseq2, fairseq2n; from seamless_communication.streaming.agents.seamless_streaming_s2st import SeamlessStreamingS2STAgent; assert torch.__version__.startswith('2.8.'); print(SeamlessStreamingS2STAgent.__name__)" && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 ENV SEAMLESS_ROOT=/opt/seamless
 ENV LD_LIBRARY_PATH=/opt/conda/lib:${LD_LIBRARY_PATH}
+
+ARG SILERO_REVISION=5cd7945676eb32225748052e2e6a0580e4686a08
+RUN python3 -c "import hashlib,urllib.request; from pathlib import Path; root='https://raw.githubusercontent.com/snakers4/silero-vad/${SILERO_REVISION}/'; data=urllib.request.urlopen(root+'src/silero_vad/data/silero_vad.jit', timeout=60).read(); assert hashlib.sha256(data).hexdigest()=='e1122837f4154c511485fe0b9c64455f7b929c96fbb8d79fbdb336383ebd3720'; Path('/opt/seamless/silero_vad.jit').write_bytes(data); Path('/opt/seamless/silero-vad-LICENSE').write_bytes(urllib.request.urlopen(root+'LICENSE', timeout=60).read())"

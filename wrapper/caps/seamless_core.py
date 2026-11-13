@@ -1,8 +1,10 @@
 """Official SeamlessStreaming policies with local, shared-cache asset paths."""
 import argparse
 import copy
+import io
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 
 class Engine:
@@ -67,7 +69,7 @@ class Engine:
         args.decision_threshold = threshold
         args.no_early_stop = True
         args.max_len_a = 0
-        args.max_len_b = 200
+        args.max_len_b = 400
         args.min_unit_chunk_size = 50
         args.denormalize = False
         args.sample_rate = 16000
@@ -83,31 +85,59 @@ class Engine:
         text_graph[speech_modules[UnitYMMATextDecoderAgent]] = [speech_modules[UnitYDetokenizerAgent]]
         self.text_agent = UnitYAgentTreePipeline.__new__(JointPipeline)
         TreeAgentPipeline.__init__(self.text_agent, text_graph, copy.copy(args))
+        self.vad_checkpoint = (Path(os.environ.get("SEAMLESS_ROOT", "/opt/seamless")) / "silero_vad.jit").read_bytes()
 
     def session(self, target, *, text_only=False):
         if not text_only and target not in self.speech_languages:
             raise ValueError("target language has text output only; request response_format=text")
         agent = self.text_agent if text_only else self.speech_agent
-        return agent, agent.build_states()
+        import numpy as np
+        import torch
+        from .seamless_segmenter import UtteranceBuffer
+
+        vad = torch.jit.load(io.BytesIO(self.vad_checkpoint)).eval()
+
+        def probability(frame):
+            with torch.inference_mode():
+                return float(vad(torch.from_numpy(np.asarray(frame, dtype=np.float32)), 16000))
+
+        return SimpleNamespace(agent=agent, upstream=agent.build_states(),
+                               segmenter=UtteranceBuffer(probability))
 
     def push(self, session, samples, target, finished):
+        events = []
+        for chunk, last in session.segmenter.feed(samples, finished):
+            pieces, _done = self._decode((session.agent, session.upstream), chunk, target, last)
+            events.extend(pieces)
+            if last:
+                session.upstream = session.agent.build_states()
+        return events, finished
+
+    def _decode(self, session, samples, target, finished):
         import torch
         from simuleval.data.segments import SpeechSegment
 
         agent, states = session
-        if finished and not len(samples):
-            states[agent.source_module].source.clear()
-        with torch.inference_mode():
-            output = agent.pushpop(SpeechSegment(content=samples, sample_rate=16000,
-                                                tgt_lang=target, finished=finished), states)
         pieces = []
-        outputs = output if isinstance(output, list) else [output]
-        for segment in outputs:
-            if segment.is_empty:
-                continue
-            if segment.data_type == "text":
-                if segment.content:
-                    pieces.append(("text", str(segment.content)))
-            elif segment.data_type == "speech" and len(segment.content):
-                pieces.append(("samples", segment.content))
-        return pieces, all(segment.finished for segment in outputs)
+        with torch.inference_mode():
+            for attempt in range(16):
+                if finished and not len(samples):
+                    states[agent.source_module].source.clear()
+                output = agent.pushpop(SpeechSegment(content=samples, sample_rate=16000,
+                                                    tgt_lang=target, finished=finished), states)
+                outputs = output if isinstance(output, list) else [output]
+                previous = len(pieces)
+                for segment in outputs:
+                    if segment.is_empty:
+                        continue
+                    if segment.data_type == "text" and segment.content:
+                        pieces.append(("text", str(segment.content)))
+                    elif segment.data_type == "speech" and len(segment.content):
+                        pieces.append(("samples", segment.content))
+                done = all(segment.finished for segment in outputs)
+                if not finished or done:
+                    return pieces, done
+                if attempt and len(pieces) == previous:
+                    raise RuntimeError("SeamlessStreaming decoding stalled at end of input")
+                samples = []
+        raise RuntimeError("SeamlessStreaming did not finish after end of input")
