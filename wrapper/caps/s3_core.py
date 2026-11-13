@@ -47,6 +47,8 @@ class Engine:
         cfg._attn_implementation = "sdpa"
         with torch.device("meta"):
             self.model = Qwen3_5ForCausalLM(cfg)
+        rotary = self.model.model.rotary_emb
+        self.model.model.rotary_emb = type(rotary)(cfg, device="cpu")
         index = json.loads((self.root / "model.safetensors.index.json").read_text())
         loaded = set()
         for shard in sorted(set(index["weight_map"].values())):
@@ -63,7 +65,7 @@ class Engine:
         if loaded != expected:
             raise RuntimeError("S3 language checkpoint does not match its architecture")
         self.model.tie_weights()
-        self.model.to(device=self.device, dtype=self.dtype).eval()
+        self.model.to(device=self.device).eval()
         self.fusion_layers = self.config["thinker_layer_fusion"]["layers"]
         self.fusion = torch.load(
             self.root / "thinker_layer_fusion.pt", map_location="cpu", weights_only=True

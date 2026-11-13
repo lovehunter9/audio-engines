@@ -1,6 +1,7 @@
 """Export the pinned upstream PyTorch frontend without its serving framework."""
 
 import ast
+import copy
 from pathlib import Path
 
 root = Path("/opt/s3")
@@ -88,7 +89,6 @@ extra = "import time, threading, hashlib, json\nfrom pathlib import Path\nimport
 (out / "s3_pcm.py").write_text(header + extra + "\n\n".join(ast.unparse(n) for n in nodes) + "\n")
 
 # Keep optional dataset I/O outside the native waveform inference imports.
-import copy
 
 package = root / "vendor/FunASR/funasr"
 (package / "__init__.py").write_text(
@@ -132,3 +132,15 @@ for node in ast.walk(tree):
 tree.body = [n for n in tree.body if n not in optional]
 prefix = "\n".join(original.splitlines()[: tree.body[0].lineno - 1])
 source.write_text(prefix + "\n" + ast.unparse(tree) + "\n")
+
+# Flash-only helpers must not gate the native SDPA processor used by FM inference.
+source = package / "models/cosyvoice/modules/dit_flow_matching/dit_modules.py"
+tree = ast.parse(source.read_text())
+imports = [n for n in tree.body if isinstance(n, ast.ImportFrom) and n.module and n.module.startswith("flash_attn")]
+assert len(imports) == 2
+for cls in tree.body:
+    if isinstance(cls, ast.ClassDef) and cls.name == "FlashAttnProcessor":
+        method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == "__call__")
+        method.body[:0] = copy.deepcopy(imports)
+tree.body = [n for n in tree.body if n not in imports]
+source.write_text(ast.unparse(tree) + "\n")

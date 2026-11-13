@@ -13,6 +13,9 @@ file="$dir/deps.Dockerfile"
 
 # Hash deps.Dockerfile plus anything it COPY's (including ov patches/*) so the tag moves when those change.
 hash_inputs="$file"
+case "$BASE" in
+    s3s2st|s3s2stxpu) hash_inputs="$hash_inputs $root/bases/s3s2st/extract_native.py" ;;
+esac
 for f in "$dir"/probe_*.py "$dir"/collect_*.py \
          "$root/bases/runtime/strip_unused_cuda.sh"; do
     [ -f "$f" ] || continue
