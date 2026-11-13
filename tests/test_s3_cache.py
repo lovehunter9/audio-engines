@@ -2,7 +2,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 import numpy as np
-from wrapper.caps.s3_core import Engine
+from wrapper.caps.s3_core import Engine, Events
+from wrapper.caps.s3_speech import WaveBuffer
 
 
 class GateCacheTests(unittest.TestCase):
@@ -34,6 +35,22 @@ class GateCacheTests(unittest.TestCase):
         engine._gate_forward(state, changed)
         self.assertIsNone(calls[-1][1])
         np.testing.assert_array_equal(calls[-1][0], changed)
+
+    def test_streaming_wave_callback_has_no_buffered_duplicates(self):
+        output = []
+        waves = WaveBuffer()
+        waves.emit = lambda samples: output.append(("samples", samples))
+        samples = np.arange(12, dtype=np.float32)
+        waves.append(samples)
+        self.assertEqual(len(waves), 0)
+        self.assertIs(output[0][1], samples)
+        events = Events(output.append)
+        events.extend([("text", "hello")])
+        self.assertEqual(len(events), 0)
+        self.assertEqual(output[-1], ("text", "hello"))
+        ordinary = WaveBuffer()
+        ordinary.append(samples)
+        self.assertIs(ordinary[0], samples)
 
     def test_published_adaptive_policy_and_explicit_override(self):
         engine = Engine.__new__(Engine)

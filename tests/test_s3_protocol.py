@@ -1,3 +1,4 @@
+import threading
 import unittest
 from unittest.mock import patch
 import numpy as np
@@ -11,12 +12,17 @@ class FakeEngine:
     def session(self, target, *, text_only=False):
         return {"calls": 0}
 
-    def push(self, state, samples, target, finished):
+    def push(self, state, samples, target, finished, *, emit=None):
         state["calls"] += 1
-        return [
+        events = [
             ("text", "完成" if finished else "开始"),
             ("samples", np.ones(240, dtype=np.float32) * 0.1),
-        ], finished
+        ]
+        if emit is not None:
+            for event in events:
+                emit(event)
+            return [], finished
+        return events, finished
 
 
 class ProtocolTests(unittest.TestCase):
@@ -33,6 +39,31 @@ class ProtocolTests(unittest.TestCase):
                     ws.send_json({"event": "end"})
                     self.assertFalse(ws.receive_json()["finished"])
                     self.assertTrue(ws.receive_bytes())
+                    self.assertTrue(ws.receive_json()["finished"])
+
+    def test_decoded_audio_arrives_before_the_native_call_returns(self):
+        release = threading.Event()
+        completed = threading.Event()
+
+        class BlockingEngine(FakeEngine):
+            def push(self, state, samples, target, finished, *, emit=None):
+                emit(("samples", np.ones(240, dtype=np.float32) * 0.1))
+                release.wait(5)
+                completed.set()
+                return [], finished
+
+        with patch.dict(s3_s2st._state, ready=True, error=None, engine=BlockingEngine()):
+            with TestClient(s3_s2st.build_app(["audio_s2s"])) as client:
+                with client.websocket_connect("/v1/audio/translations/stream") as ws:
+                    ws.receive_json()
+                    ws.send_bytes(b"\0\0" * 2560)
+                    try:
+                        self.assertEqual(len(ws.receive_bytes()), 480)
+                        self.assertFalse(completed.is_set())
+                    finally:
+                        release.set()
+                    ws.send_json({"event": "end"})
+                    self.assertEqual(len(ws.receive_bytes()), 480)
                     self.assertTrue(ws.receive_json()["finished"])
 
 

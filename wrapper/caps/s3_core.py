@@ -6,6 +6,21 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+class Events(list):
+    def __init__(self, emit):
+        self.emit = emit
+
+    def append(self, item):
+        if self.emit is None:
+            super().append(item)
+        else:
+            self.emit(item)
+
+    def extend(self, items):
+        for item in items:
+            self.append(item)
+
+
 class Engine:
     def __init__(self, repo, *, dtype="bf16", threshold=None):
         import torch
@@ -249,14 +264,18 @@ class Engine:
             raise RuntimeError("S3 translation exceeded its token limit")
         return self.tokenizer.decode(ids, skip_special_tokens=True).strip()
 
-    def push(self, state, samples, target, finished):
+    def push(self, state, samples, target, finished, *, emit=None):
         import numpy as np
 
         torch = self.torch
         if state.finished:
             return [], True
         state.samples.extend(samples)
-        events = []
+        events = Events(emit)
+        if state.speech is not None:
+            state.speech.pcm.waves.emit = (
+                (lambda wave: events.append(("samples", wave))) if emit is not None else None
+            )
         with torch.inference_mode():
             while state.next_closed + 2600 <= len(state.samples) or finished:
                 final = bool(finished and state.next_closed + 2600 >= len(state.samples))

@@ -248,7 +248,6 @@ passes. For the same reason the build's final import check must go **through**
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
 | `seamless` | `beclab/audio-seamless` | `audio_s2s` | SeamlessStreaming native simultaneous speech translation (CUDA) | in progress |
 | `seamlessxpu` | `beclab/audio-seamless-xpu` | `audio_s2s` | SeamlessStreaming native simultaneous speech translation (Intel XPU) | in progress |
-
 | `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Native S3-S2ST Chinese/English simultaneous translation (CUDA) | in progress |
 | `s3s2stxpu` | `beclab/audio-s3-s2st-xpu` | `audio_s2s` | Native S3-S2ST Chinese/English simultaneous translation (Intel XPU) | in progress |
 
@@ -674,11 +673,38 @@ premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
 
-**`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
-the open models that do are, as of 2026-08, either research-licensed or too heavy
-to share a card with the rest of these. The capability names stay declared in
-llm-init and the gateway so nothing downstream has to change when a base for them
-does land.
+### Native simultaneous translation
+
+`seamless` / `seamlessxpu` run the pinned SeamlessStreaming agents, monotonic text
+policy, UnitY2 and vocoder. Input is segmented with online Silero VAD; output text
+keeps SentencePiece word boundaries. `s3s2st` / `s3s2stxpu` run the native S3-S2ST
+encoder, Thinker, gate, Talker, FM8 and vocoder in one process. S3 supports Chinese
+and English. Both Intel variants use Torch XPU, with the same neural stages on
+the selected GPU as their CUDA counterparts.
+
+Both expose `POST /v1/audio/translations` with multipart `file`, `source_lang`,
+`target_lang`, and `response_format` (`json`, `text`, `wav`, `pcm`). JSON contains
+`text`, `sample_rate` and base64 WAV `audio`. `?async=1` uses the shared task API.
+`response_format=text` skips speech synthesis.
+
+`WS /v1/audio/translations/stream` accepts JSON configuration followed by mono
+little-endian PCM16 frames at 16 kHz. `{"event":"end"}` drains pending output.
+The opening frame advertises input and output sample rates; output is JSON text
+updates plus binary PCM16 (Seamless: 16 kHz; S3: 24 kHz). `finished:true` is sent
+only after the final audio. A configuration frame may select text-only output.
+
+`ENGINE_ARGS` selects the default language pair, chunk size and dtype. Seamless
+uses `--decision-threshold 0.5 --dtype fp16`. S3 uses the published adaptive
+buffer-aware gate policy and `--dtype bf16`; an explicit
+`--decision-threshold` selects a fixed value strictly between zero and one. S3
+freezes speaker conditioning at the first nonempty WRITE, using at most ten
+seconds of source audio. Its gate prefix cache is independent of speculative
+text generation and rebuilds whenever the input prefix changes.
+
+These are research translation checkpoints. Successful requests do not guarantee
+semantic or pronunciation accuracy. Native-agent controls and generated audio
+should be reviewed separately from HTTP/WebSocket protocol and RTF checks.
+`audio_llm` remains reserved.
 
 ## Build
 

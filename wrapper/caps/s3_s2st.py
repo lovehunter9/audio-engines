@@ -96,7 +96,7 @@ def _new_states(text_only=False):
     )
 
 
-def _drain(states, source, target, finished, checkpoint=None):
+def _drain(states, source, target, finished, checkpoint=None, emit=None):
     engine = _state["engine"]
     with _lock:
         if states.upstream is None:
@@ -106,6 +106,30 @@ def _drain(states, source, target, finished, checkpoint=None):
                 )
             states.upstream = engine.session(target, text_only=states.text_only)
         events = []
+
+        def consume(piece):
+            kind, value = piece
+            if kind == "text" and value:
+                if (
+                    states.has_text
+                    and target not in ("cmn", "cmn_Hant", "jpn")
+                    and value[0] not in ",.!?:;，。！？：；"
+                ):
+                    value = " " + value
+                states.has_text = True
+                event = kind, value
+            elif kind == "samples" and not states.text_only:
+                pcm = _pcm16(value)
+                if not pcm:
+                    return
+                event = "pcm", pcm
+            else:
+                return
+            if emit is None:
+                events.append(event)
+            else:
+                emit(event)
+
         done = False
         size = max(1600, int(IN_RATE * CHUNK_MS / 1000))
         while len(states.source) - states.processed_samples >= size or finished:
@@ -114,22 +138,13 @@ def _drain(states, source, target, finished, checkpoint=None):
             start = states.processed_samples
             end = min(start + size, len(states.source))
             last = bool(finished and end == len(states.source))
-            pieces, done = engine.push(states.upstream, states.source[start:end], target, last)
+            kwargs = {"emit": consume} if emit is not None else {}
+            pieces, done = engine.push(
+                states.upstream, states.source[start:end], target, last, **kwargs
+            )
             states.processed_samples = end
-            for kind, value in pieces:
-                if kind == "text" and value:
-                    if (
-                        states.has_text
-                        and target not in ("cmn", "cmn_Hant", "jpn")
-                        and value[0] not in ",.!?:;，。！？：；"
-                    ):
-                        value = " " + value
-                    states.has_text = True
-                    events.append((kind, value))
-                elif kind == "samples" and not states.text_only:
-                    pcm = _pcm16(value)
-                    if pcm:
-                        events.append(("pcm", pcm))
+            for piece in pieces:
+                consume(piece)
             if last or done:
                 break
         if states.processed_samples:
@@ -181,6 +196,40 @@ async def _send_events(ws, events, finished):
             await ws.send_bytes(payload)
     if finished:
         await ws.send_json({"text": "", "finished": True, "sample_rate": OUT_RATE})
+
+
+async def _stream_drain(ws, states, source, target, finished):
+    loop = asyncio.get_running_loop()
+    pending = asyncio.Queue()
+    closed = threading.Event()
+
+    def emit(event):
+        if closed.is_set():
+            raise RuntimeError("translation stream closed")
+        loop.call_soon_threadsafe(pending.put_nowait, event)
+
+    def work():
+        try:
+            _events, done = _drain(states, source, target, finished, emit=emit)
+            result = done
+        except Exception as error:
+            result = error
+        loop.call_soon_threadsafe(pending.put_nowait, (None, result))
+
+    worker = asyncio.create_task(asyncio.to_thread(work))
+    try:
+        while True:
+            kind, value = await pending.get()
+            if kind is None:
+                if isinstance(value, Exception):
+                    raise value
+                if finished:
+                    await _send_events(ws, [], finished=True)
+                return value
+            await _send_events(ws, [(kind, value)], finished=False)
+    finally:
+        closed.set()
+        await worker
 
 
 def build_app(supports):
@@ -287,10 +336,7 @@ def build_app(supports):
                         text, source, target, states, rate
                     )
                     if stop:
-                        events, _done = await asyncio.to_thread(
-                            _drain, states, source, target, True
-                        )
-                        await _send_events(ws, events, finished=True)
+                        await _stream_drain(ws, states, source, target, True)
                         break
                     continue
                 data = msg.get("bytes")
@@ -303,8 +349,7 @@ def build_app(supports):
                 if rate != IN_RATE:
                     seg = resample_linear(seg, rate, IN_RATE)
                 states.source.extend(seg.tolist())
-                events, _done = await asyncio.to_thread(_drain, states, source, target, False)
-                await _send_events(ws, events, finished=False)
+                await _stream_drain(ws, states, source, target, False)
         except WebSocketDisconnect:
             return
         except HTTPException as e:

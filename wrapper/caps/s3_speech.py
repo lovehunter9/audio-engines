@@ -5,6 +5,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+class WaveBuffer(list):
+    emit = None
+
+    def append(self, samples):
+        if self.emit is None:
+            super().append(samples)
+        else:
+            self.emit(samples)
+
+
 class SpeechDecoder:
     def __init__(self, root, device):
         import torch
@@ -67,6 +77,7 @@ class SpeechDecoder:
         pcm.fm, pcm.voc, pcm.sr = self.fm, self.voc, 24000
         pcm.play = self.Playback()
         pcm.begin(0)
+        pcm.waves = WaveBuffer()
         return SimpleNamespace(
             pcm=pcm,
             wave_cursor=0,
