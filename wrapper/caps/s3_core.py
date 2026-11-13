@@ -32,6 +32,7 @@ class Engine:
                 snapshot_download(
                     repo,
                     local_files_only=True,
+                    allow_patterns=["streaming/**"],
                     cache_dir=os.environ.get("HF_HUB_CACHE"),
                     token=os.environ.get("HF_TOKEN") or None,
                 )
