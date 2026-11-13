@@ -185,6 +185,9 @@ def _load():
         from .simuls2st_ov import install
 
         install(agent, snap, ov_device)
+    from .simuls2st_cache import install as install_cache
+
+    install_cache(agent.inference)
     _state.update(agent=agent, dtype=dtype)
 
 
