@@ -8,6 +8,7 @@ on:
       - 'wrapper/**'
       - 'tests/**'
       - 'bases/seamless/**'
+      - 'bases/seamlessxpu/**'
       - 'bases/runtime/**'
       - '.github/workflows/seamless-ci.yml'
       - '.github/workflows/build-image.yml'
@@ -35,6 +36,15 @@ jobs:
     with:
       base: seamless
       repo: audio-seamless
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit
+  build-intel:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: seamlessxpu
+      repo: audio-seamless-xpu
       slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
       namespace: ${{ inputs.namespace || github.repository_owner }}
       image_tag: ${{ inputs.image_tag || '' }}

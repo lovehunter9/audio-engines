@@ -141,6 +141,8 @@ class SpeechDecoder:
             state.pcm.emb = self._speaker(source)
         if final:
             state.final = True
+            if not state.specs:
+                state.complete = True
             if text_start is None and state.next_spec == len(state.specs):
                 if state.active is not None:
                     state.active["final"] = True

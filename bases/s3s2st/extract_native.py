@@ -86,3 +86,49 @@ for cls in nodes:
                 FM8().visit(n)
 extra = "import time, threading, hashlib, json\nfrom pathlib import Path\nimport torchaudio\n"
 (out / "s3_pcm.py").write_text(header + extra + "\n\n".join(ast.unparse(n) for n in nodes) + "\n")
+
+# Keep optional dataset I/O outside the native waveform inference imports.
+import copy
+
+package = root / "vendor/FunASR/funasr"
+(package / "__init__.py").write_text(
+    'from pathlib import Path\n__version__ = (Path(__file__).parent/"version.txt").read_text().strip()\n'
+)
+source = package / "models/cosyvoice/flow_matching_model.py"
+original = source.read_text()
+tree = ast.parse(original)
+optional = [
+    n
+    for n in tree.body
+    if isinstance(n, ast.ImportFrom)
+    and n.module in {"funasr.utils.load_utils", "funasr.utils.oss_io"}
+]
+protected = {
+    id(n): ast.dump(n)
+    for n in ast.walk(tree)
+    if isinstance(n, ast.FunctionDef) and n.name == "_inference"
+}
+for node in ast.walk(tree):
+    if not isinstance(node, ast.FunctionDef):
+        continue
+    refs = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+    imports = [
+        copy.deepcopy(imp) for imp in optional if refs & {a.asname or a.name for a in imp.names}
+    ]
+    offset = (
+        1
+        if node.body
+        and isinstance(node.body[0], ast.Expr)
+        and isinstance(node.body[0].value, ast.Constant)
+        and isinstance(node.body[0].value.value, str)
+        else 0
+    )
+    node.body[offset:offset] = imports
+for node in ast.walk(tree):
+    if id(node) in protected:
+        assert ast.dump(node) == protected[id(node)], (
+            "Native FM inference must not acquire generic audio I/O"
+        )
+tree.body = [n for n in tree.body if n not in optional]
+prefix = "\n".join(original.splitlines()[: tree.body[0].lineno - 1])
+source.write_text(prefix + "\n" + ast.unparse(tree) + "\n")

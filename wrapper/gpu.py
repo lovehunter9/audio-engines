@@ -87,6 +87,7 @@ def _nvml_stats():
 def gpu_metrics_text(nvml_fallback=False):
     present, used, total, util = 0, 0, 0, 0.0
     slice_scoped = True
+    xpu_scoped = False
     try:
         import torch
 
@@ -99,6 +100,11 @@ def gpu_metrics_text(nvml_fallback=False):
                 util = float(torch.cuda.utilization()) / 100.0  # needs pynvml; 0 if absent
             except Exception:
                 util = 0.0
+        elif (os.environ.get("AUDIO_BASE") or "").endswith("xpu") and torch.xpu.is_available():
+            present = 1
+            used = int(torch.xpu.memory_allocated())
+            total = _quota_bytes()
+            xpu_scoped = True
     except Exception:
         present = 0
     if not present:
@@ -119,12 +125,14 @@ def gpu_metrics_text(nvml_fallback=False):
         lines.append("# TYPE %s gauge" % name)
         lines.append("%s %s" % (name, val))
 
-    scope = ("on this engine's device slice" if slice_scoped
+    scope = ("by this process's XPU allocator" if xpu_scoped else
+             "on this engine's device slice" if slice_scoped
              else "on the whole device as NVML reports it, which may include other pods")
-    g("gpu_present", "1 if a CUDA device is visible to this engine, else 0", present)
+    g("gpu_present", "1 if an XPU device is visible to this engine, else 0" if xpu_scoped
+      else "1 if a CUDA device is visible to this engine, else 0", present)
     g("gpu_mem_used_bytes", "GPU memory in use %s (bytes)" % scope, used)
     g("gpu_mem_total_bytes", "GPU memory reported to this engine %s (bytes)"
-      % ("by CUDA" if slice_scoped else "by NVML"), total)
+      % ("as its configured scheduling quota" if xpu_scoped else "by CUDA" if slice_scoped else "by NVML"), total)
     g("gpu_util_ratio", "GPU compute utilization 0..1 (0 when unavailable)", "%.4f" % util)
     return "\n".join(lines) + "\n"
 
