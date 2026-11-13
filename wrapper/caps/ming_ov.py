@@ -565,6 +565,8 @@ def install(ming, device):
     props = _props(device)
     src = ming.local_path
     _install_vae_decode(bailing, src, device, props)
+    from .ming_ov_stream import install as install_stream
+    install_stream(bailing, src, device, props)
     _install_dit(bailing, src, device, props)
     hidden = int(bailing.model.config.hidden_size)
     ov_dir = os.path.join(src, "openvino")

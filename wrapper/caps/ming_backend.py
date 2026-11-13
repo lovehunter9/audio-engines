@@ -152,6 +152,7 @@ class MingBackend:
     card_instruction_is_direction = False
     # The socket is raw pcm. A container format belongs on POST.
     socket_pcm_only = True
+    streams_while_generating = True
 
     def __init__(self, model):
         _use_soundfile()
@@ -177,7 +178,7 @@ class MingBackend:
         turn.applied_instruction = (instruction or "").strip() or None
         turn.applied_xvec = bool(xvec)
 
-    def _call(self, turn, **kwargs):
+    def _call(self, turn, stream=False, ctx=None, **kwargs):
         sampling = getattr(turn, "applied_sampling", None) or {}
         cfg = getattr(turn, "applied_cfg", None)
         if cfg is not None:
@@ -193,6 +194,9 @@ class MingBackend:
             kwargs["temperature"] = float(sampling["temperature"])
         if sampling.get("max_new_tokens") is not None:
             kwargs["max_decode_steps"] = int(sampling["max_new_tokens"])
+        if stream:
+            from .ming_stream import iter_synthesize
+            return iter_synthesize(self.model, kwargs, ctx=ctx)
         return self.model.synthesize(**kwargs)
 
     def _paced(self, audio, sr, speed):
@@ -341,12 +345,79 @@ class MingBackend:
             self.sample_rate = int(getattr(self.model, "sample_rate", 0) or 0)
         return _audio(wave), self.sample_rate
 
-    def _generate(self, turn):
+    def _iter_turns(self, turns, kn, ctx):
+        widen_decode_cache()
+        tempo = tts_long.TempoStream(self.sample_rate, kn.speed)
+        try:
+            with self._lock:
+                for index, turn in enumerate(turns):
+                    if index:
+                        gap = np.zeros(int(self.sample_rate * .08), dtype="float32")
+                        for wave in tempo.write(gap, self.sample_rate):
+                            yield wave, self.sample_rate
+                    for audio in self._generate(turn, stream=True, ctx=ctx):
+                        if ctx is not None:
+                            ctx.checkpoint()
+                        for wave in tempo.write(audio, self.sample_rate):
+                            yield wave, self.sample_rate
+                for wave in tempo.finish():
+                    yield wave, self.sample_rate
+        finally:
+            tempo.abort()
+
+    def iter_speak_native(self, meta, text, instruction=None, ctx=None, settings=None, sampling=None):
+        kn = self._knobs(settings, text, "")
+        vid = str((meta or {}).get("ip") or (meta or {}).get("voice_id") or "")
+        lang = str(((meta or {}).get("labels") or {}).get("language") or "")
+        self._seed(kn)
+        turn = Turn(task="ip", text=text, ip=vid, language_id=lang)
+        self._arm(turn, kn, sampling)
+        yield from self._iter_turns((turn,), kn, ctx)
+
+    def iter_clone(self, text, prompt_audio, prompt_sr, prompt_text, **kw):
+        kn = self._knobs(kw.get("settings"), text, "")
+        self._seed(kn)
+        sampling = dict(kw.get("sampling") or {})
+        transcript = (prompt_text or "").strip()
+        xvec = bool(sampling.get("x_vector_only")) or not transcript
+        path = self._prompt_path(_reference_audio(prompt_audio, prompt_sr), prompt_sr)
+        def turns():
+            for piece in self._clone_pieces(text) or [(text or "").strip()]:
+                options = dict(sampling)
+                if options.get("max_new_tokens") is None:
+                    options["max_new_tokens"] = _steps_for(piece)
+                turn = Turn(task="clone", text=piece, prompt_wav=path,
+                            prompt_text="" if xvec else transcript)
+                self._arm(turn, kn, options, instruction=(kw.get("instruction") or "").strip(), xvec=xvec)
+                yield turn
+
+        try:
+            yield from self._iter_turns(turns(), kn, kw.get("ctx"))
+        finally:
+            cache = getattr(self.model, "_prompt_cache", None)
+            if isinstance(cache, dict):
+                cache.pop(path, None)
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+    def iter_design(self, instruction, text, **kw):
+        kn = self._knobs(kw.get("settings"), text, "", seed_jitter=int(kw.get("seed_jitter") or 0))
+        self._seed(kn)
+        sampling = dict(kw.get("sampling") or {})
+        if sampling.get("max_new_tokens") is None:
+            sampling["max_new_tokens"] = _steps_for(text)
+        turn = Turn(task="design", text=text, style=(instruction or "").strip())
+        self._arm(turn, kn, sampling)
+        yield from self._iter_turns((turn,), kn, kw.get("ctx"))
+
+    def _generate(self, turn, stream=False, ctx=None):
         # The checkpoint misreads raw digits. 22号楼 has to arrive as 二十二号楼.
         turn.text = spoken_zh_numbers(turn.text)
         if turn.task == "ip":
             return self._call(
-                turn, task="IP", text=turn.text, controls={"ip": turn.ip},
+                turn, stream=stream, ctx=ctx, task="IP", text=turn.text, controls={"ip": turn.ip},
                 use_zero_spk_emb=True)
         if turn.task == "clone":
             if not turn.prompt_wav:
@@ -363,11 +434,11 @@ class MingBackend:
             instr = getattr(turn, "applied_instruction", None)
             if instr:
                 kwargs["instruction"] = instr
-            return self._call(turn, **kwargs)
+            return self._call(turn, stream=stream, ctx=ctx, **kwargs)
         if turn.task == "design":
             if not turn.style:
                 raise ValueError("design needs a style instruction")
             return self._call(
-                turn, task="VOICE_DESIGN", text=turn.text,
+                turn, stream=stream, ctx=ctx, task="VOICE_DESIGN", text=turn.text,
                 controls={"style": turn.style}, use_zero_spk_emb=True)
         raise ValueError("unknown task %r" % turn.task)
