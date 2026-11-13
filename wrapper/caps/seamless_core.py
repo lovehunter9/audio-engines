@@ -55,7 +55,7 @@ class Engine:
 
         parser = argparse.ArgumentParser(conflict_handler="resolve")
         JointPipeline.add_args(parser)
-        args = parser.parse_args([])
+        args = parser.parse_args(["--min-unit-chunk-size", "50"])
         args.device = "cuda:0"
         args.dtype = dtype
         args.fp16 = False
@@ -67,7 +67,7 @@ class Engine:
         args.max_len_a = 0
         args.max_len_b = 200
         args.min_unit_chunk_size = 50
-        args.denormalize = True
+        args.denormalize = False
         args.sample_rate = 16000
         models = UnitYPipelineMixin.load_model(args)
         speech_modules = {cls: cls.from_args(args, **models) for cls in JointPipeline.pipeline}
