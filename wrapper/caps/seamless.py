@@ -103,10 +103,11 @@ def _drain(states, source, target, finished, checkpoint=None):
             states.processed_samples = end
             for kind, value in pieces:
                 if kind == "text" and value:
-                    if states.has_text and target not in ("cmn", "cmn_Hant", "jpn") and value[0] not in ",.!?:;，。！？：；":
-                        value = " " + value
-                    states.has_text = True
-                    events.append((kind, value))
+                    if not states.has_text or target in ("cmn", "cmn_Hant", "jpn"):
+                        value = value.lstrip()
+                    if value:
+                        states.has_text = True
+                        events.append((kind, value))
                 elif kind == "samples" and not states.text_only:
                     pcm = _pcm16(value)
                     if pcm:

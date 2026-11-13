@@ -47,12 +47,16 @@ class Engine:
         self.languages = set(asset_store.retrieve_card("seamless_streaming_unity").field("langs").as_(list))
         self.speech_languages = set(asset_store.retrieve_card("vocoder_v2").field("model_config").as_(dict)["lang_spkr_idx_map"]["multilingual"])
 
+        class StreamingDetokenizer(UnitYDetokenizerAgent):
+            def decode(self, tokens):
+                return tokens.replace(" ", "").replace("\u2581", " ")
+
         class JointPipeline(UnitYAgentTreePipeline):
             pipeline = {
                 OnlineFeatureExtractorAgent: [OfflineWav2VecBertEncoderAgent],
                 OfflineWav2VecBertEncoderAgent: [UnitYMMATextDecoderAgent],
-                UnitYMMATextDecoderAgent: [UnitYDetokenizerAgent, NARUnitYUnitDecoderAgent],
-                UnitYDetokenizerAgent: [],
+                UnitYMMATextDecoderAgent: [StreamingDetokenizer, NARUnitYUnitDecoderAgent],
+                StreamingDetokenizer: [],
                 NARUnitYUnitDecoderAgent: [VocoderAgent],
                 VocoderAgent: [],
             }
@@ -82,7 +86,7 @@ class Engine:
         TreeAgentPipeline.__init__(self.speech_agent, graph, args)
         text_graph = {key: value for key, value in graph.items()
                       if key not in (speech_modules[NARUnitYUnitDecoderAgent], speech_modules[VocoderAgent])}
-        text_graph[speech_modules[UnitYMMATextDecoderAgent]] = [speech_modules[UnitYDetokenizerAgent]]
+        text_graph[speech_modules[UnitYMMATextDecoderAgent]] = [speech_modules[StreamingDetokenizer]]
         self.text_agent = UnitYAgentTreePipeline.__new__(JointPipeline)
         TreeAgentPipeline.__init__(self.text_agent, text_graph, copy.copy(args))
         self.vad_checkpoint = (Path(os.environ.get("SEAMLESS_ROOT", "/opt/seamless")) / "silero_vad.jit").read_bytes()

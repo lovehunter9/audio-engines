@@ -58,6 +58,18 @@ class ProtocolTests(unittest.TestCase):
             self.assertTrue(ws.receive_json()['finished'])
         self.assertTrue(self.engine.sessions[0]['text_only'])
 
+    def test_streamed_subword_boundaries_are_not_replaced_with_spaces(self):
+        for fragments, expected in [(["inter", "net"], "internet"),
+                                    (["first", " second"], "first second")]:
+            values = iter(fragments)
+            self.engine.push = lambda session, samples, target, finished: ([("text", next(values))], finished)
+            state = seamless._new_states()
+            state.source = [0.0] * 5120
+            first, _ = seamless._drain(state, "cmn", "eng", False)
+            last, done = seamless._drain(state, "cmn", "eng", True)
+            self.assertTrue(done)
+            self.assertEqual("".join(value for kind, value in first + last if kind == "text"), expected)
+
     def test_invalid_language_and_empty_upload_are_rejected(self):
         response=self.client.post('/v1/audio/translations', files={'file':('a.wav',b'')},
                                   data={'source_lang':'English','target_lang':'Chinese'})
