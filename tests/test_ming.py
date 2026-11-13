@@ -322,8 +322,15 @@ class HttpTests(unittest.TestCase):
 
         tts_el.install(ming_backend.MingBackend(Model()), store=tts_el._store(),
                        sample_rate=24000)
+        from unittest.mock import patch
+        from wrapper.caps import ming_stream
+
+        def silent_stream(model, kwargs, ctx=None):
+            tail = ming_stream.SilenceTail(model.sample_rate)
+            yield tail.push(model.synthesize(**kwargs), final=True)
+
         for suffix in ("", "/stream"):
-            with self.subTest(suffix=suffix):
+            with self.subTest(suffix=suffix), patch.object(ming_stream, "iter_synthesize", silent_stream):
                 response = self.client.post("/v1/text-to-speech/灵小柔" + suffix,
                                             json={"text": "你好。", "output_format": "pcm_24000"})
                 self.assertEqual(response.status_code, 500, response.text)
