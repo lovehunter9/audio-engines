@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 
 class Engine:
-    def __init__(self, repo, *, dtype="fp16", threshold=0.5):
+    def __init__(self, repo, *, dtype="fp16", threshold=0.5, chunk_ms=320):
         import torch
         torch.set_num_threads(1)
         from fairseq2.assets import InProcAssetMetadataProvider, asset_store
@@ -90,6 +90,8 @@ class Engine:
         text_graph[speech_modules[UnitYMMATextDecoderAgent]] = [speech_modules[StreamingDetokenizer]]
         self.text_agent = UnitYAgentTreePipeline.__new__(JointPipeline)
         TreeAgentPipeline.__init__(self.text_agent, text_graph, copy.copy(args))
+        self.decoder = speech_modules[UnitYMMATextDecoderAgent]
+        self.chunk_size = max(1600, int(chunk_ms * 16))
         self.vad_checkpoint = (Path(os.environ.get("SEAMLESS_ROOT", "/opt/seamless")) / "silero_vad.jit").read_bytes()
 
     def session(self, target, *, text_only=False):
@@ -107,7 +109,7 @@ class Engine:
                 return float(vad(torch.from_numpy(np.asarray(frame, dtype=np.float32)), 16000))
 
         return SimpleNamespace(agent=agent, upstream=agent.build_states(),
-                               segmenter=UtteranceBuffer(probability))
+                               segmenter=UtteranceBuffer(probability, chunk_size=self.chunk_size))
 
     def push(self, session, samples, target, finished):
         events = []
@@ -120,16 +122,20 @@ class Engine:
 
     def _decode(self, session, samples, target, finished):
         import torch
-        from simuleval.data.segments import SpeechSegment
+        from simuleval.data.segments import EmptySegment, SpeechSegment
 
         agent, states = session
         pieces = []
         with torch.inference_mode():
             for attempt in range(16):
-                if finished and not len(samples):
-                    states[agent.source_module].source.clear()
-                output = agent.pushpop(SpeechSegment(content=samples, sample_rate=16000,
-                                                    tgt_lang=target, finished=finished), states)
+                if len(samples):
+                    output = agent.pushpop(SpeechSegment(content=samples, sample_rate=16000,
+                                                        tgt_lang=target, finished=finished), states)
+                else:
+                    states[agent.source_module].source_finished = True
+                    agent.push_impl(self.decoder, EmptySegment(finished=True, tgt_lang=target),
+                                    states, {})
+                    output = agent.pop(states)
                 outputs = output if isinstance(output, list) else [output]
                 previous = len(pieces)
                 for segment in outputs:

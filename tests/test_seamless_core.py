@@ -8,20 +8,29 @@ from wrapper.caps.seamless_core import Engine
 
 
 class CoreDrainTests(unittest.TestCase):
-    def run_engine(self, outputs, finished):
+    def run_engine(self, outputs, finished, samples=None):
         calls = []
         source = object()
-        state = types.SimpleNamespace(source=[[0.25]])
+        state = types.SimpleNamespace(source=[[0.25]], source_finished=False)
 
         def pushpop(segment, states):
             calls.append(segment)
             return next(outputs)
 
-        agent = types.SimpleNamespace(source_module=source, pushpop=pushpop)
+        def push_impl(decoder, segment, states, upstream):
+            calls.append(segment)
+
+        agent = types.SimpleNamespace(source_module=source, pushpop=pushpop,
+                                      push_impl=push_impl, pop=lambda states: next(outputs))
         torch = types.SimpleNamespace(inference_mode=contextlib.nullcontext)
-        segments = types.SimpleNamespace(SpeechSegment=lambda **kw: types.SimpleNamespace(**kw))
+        segments = types.SimpleNamespace(
+            SpeechSegment=lambda **kw: types.SimpleNamespace(**kw),
+            EmptySegment=lambda **kw: types.SimpleNamespace(content=[], **kw),
+        )
         with patch.dict(sys.modules, {'torch': torch, 'simuleval.data.segments': segments}):
-            result = Engine.__new__(Engine)._decode((agent, {source: state}), [0.5], 'eng', finished)
+            engine = Engine.__new__(Engine)
+            engine.decoder = object()
+            result = engine._decode((agent, {source: state}), [0.5] if samples is None else samples, 'eng', finished)
         return result, calls, state
 
     @staticmethod
@@ -40,7 +49,17 @@ class CoreDrainTests(unittest.TestCase):
         self.assertTrue(done)
         self.assertEqual([s.content for s in calls], [[0.5], []])
         self.assertTrue(all(s.finished for s in calls))
-        self.assertEqual(state.source, [])
+        self.assertEqual(state.source, [[0.25]])
+        self.assertTrue(state.source_finished)
+
+    def test_empty_final_packet_closes_decoder_without_reusing_waveform(self):
+        (pieces, done), calls, state = self.run_engine(
+            iter([[self.segment('text', 'last', True), self.segment('speech', [0.2], True)]]),
+            True, samples=[])
+        self.assertTrue(done)
+        self.assertEqual(pieces, [('text', 'last'), ('samples', [0.2])])
+        self.assertEqual([x.content for x in calls], [[]])
+        self.assertEqual(state.source, [[0.25]])
 
     def test_live_input_returns_without_forcing_eof(self):
         (pieces, done), calls, state = self.run_engine(

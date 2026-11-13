@@ -68,7 +68,7 @@ def _boot():
     try:
         from .seamless_core import Engine
 
-        engine = Engine(_runtime._hub_spec()[0], dtype=DTYPE, threshold=THRESHOLD)
+        engine = Engine(_runtime._hub_spec()[0], dtype=DTYPE, threshold=THRESHOLD, chunk_ms=CHUNK_MS)
         _state.update(engine=engine, languages=engine.languages, dtype=DTYPE, ready=True, error=None)
         log.info("SeamlessStreaming loaded (%s)", DTYPE)
     except Exception as error:
