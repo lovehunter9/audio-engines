@@ -5,7 +5,14 @@ import os
 import threading
 
 from fastapi import (
-    FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
 )
 
 from .. import hfgate
@@ -34,8 +41,13 @@ OUT_RATE = 24000
 BOOT_TIMEOUT_S = 3600.0
 
 _LANGS = {
-    "en": "eng", "english": "eng", "en-us": "eng", "en-gb": "eng",
-    "zh": "cmn", "zh-cn": "cmn", "chinese": "cmn",
+    "en": "eng",
+    "english": "eng",
+    "en-us": "eng",
+    "en-gb": "eng",
+    "zh": "cmn",
+    "zh-cn": "cmn",
+    "chinese": "cmn",
 }
 
 
@@ -65,7 +77,9 @@ def _boot():
         from .s3_core import Engine
 
         engine = Engine(_runtime._hub_spec()[0], dtype=DTYPE, threshold=THRESHOLD)
-        _state.update(engine=engine, languages=engine.languages, dtype=DTYPE, ready=True, error=None)
+        _state.update(
+            engine=engine, languages=engine.languages, dtype=DTYPE, ready=True, error=None
+        )
         log.info("S3-S2ST loaded (%s)", DTYPE)
     except Exception as error:
         _state["error"] = hfgate.explain(_runtime._hub_spec()[0], error)
@@ -75,8 +89,9 @@ def _boot():
 def _new_states(text_only=False):
     from types import SimpleNamespace
 
-    return SimpleNamespace(source=[], processed_samples=0, upstream=None,
-                           text_only=text_only, has_text=False)
+    return SimpleNamespace(
+        source=[], processed_samples=0, upstream=None, text_only=text_only, has_text=False
+    )
 
 
 def _drain(states, source, target, finished, checkpoint=None):
@@ -84,7 +99,9 @@ def _drain(states, source, target, finished, checkpoint=None):
     with _lock:
         if states.upstream is None:
             if not states.text_only and target not in engine.speech_languages:
-                raise HTTPException(status_code=400, detail="target has text output only; use response_format=text")
+                raise HTTPException(
+                    status_code=400, detail="target has text output only; use response_format=text"
+                )
             states.upstream = engine.session(target, text_only=states.text_only)
         events = []
         done = False
@@ -99,7 +116,11 @@ def _drain(states, source, target, finished, checkpoint=None):
             states.processed_samples = end
             for kind, value in pieces:
                 if kind == "text" and value:
-                    if states.has_text and target not in ("cmn", "cmn_Hant", "jpn") and value[0] not in ",.!?:;，。！？：；":
+                    if (
+                        states.has_text
+                        and target not in ("cmn", "cmn_Hant", "jpn")
+                        and value[0] not in ",.!?:;，。！？：；"
+                    ):
                         value = " " + value
                     states.has_text = True
                     events.append((kind, value))
@@ -110,7 +131,7 @@ def _drain(states, source, target, finished, checkpoint=None):
             if last or done:
                 break
         if states.processed_samples:
-            states.source = states.source[states.processed_samples:]
+            states.source = states.source[states.processed_samples :]
             states.processed_samples = 0
         return events, done
 
@@ -163,9 +184,17 @@ async def _send_events(ws, events, finished):
 def build_app(supports):
     app = FastAPI(title="audio-s3-s2st (S3-S2ST)")
     mount_metrics(app)
-    register(app, model_name=MODEL_NAME, module="s3_s2st", served=supports, repo=MODEL_REPO,
-             is_ready=lambda: _state["ready"], error=lambda: _state["error"], task_api=True,
-             sample_rate=OUT_RATE)
+    register(
+        app,
+        model_name=MODEL_NAME,
+        module="s3_s2st",
+        served=supports,
+        repo=MODEL_REPO,
+        is_ready=lambda: _state["ready"],
+        error=lambda: _state["error"],
+        task_api=True,
+        sample_rate=OUT_RATE,
+    )
     _args.warn_unclaimed(log)
 
     def _require_ready():
@@ -173,20 +202,26 @@ def build_app(supports):
             raise HTTPException(status_code=503, detail=_state["error"] or "engine not ready")
 
     @app.post("/v1/audio/translations")
-    async def translations(request: Request, file: UploadFile = File(...),
-                           model: str = Form(default=None),
-                           response_format: str = Form(default="json"),
-                           source_lang: str = Form(default=None),
-                           target_lang: str = Form(default=None)):
+    async def translations(
+        request: Request,
+        file: UploadFile = File(...),
+        model: str = Form(default=None),
+        response_format: str = Form(default="json"),
+        source_lang: str = Form(default=None),
+        target_lang: str = Form(default=None),
+    ):
         """Whole utterance through the speech agent. JSON returns text and 24 kHz wav."""
         _require_ready()
         fmt = str(response_format or "json").strip().lower()
         if fmt not in ("json", "text", "wav", "pcm"):
-            raise HTTPException(status_code=400,
-                                detail="response_format must be json, text, wav, or pcm")
+            raise HTTPException(
+                status_code=400, detail="response_format must be json, text, wav, or pcm"
+            )
         source, target = _pair(source_lang, target_lang)
         if fmt != "text" and target not in _state["engine"].speech_languages:
-            raise HTTPException(status_code=400, detail="target has text output only; use response_format=text")
+            raise HTTPException(
+                status_code=400, detail="target has text output only; use response_format=text"
+            )
         data = await file.read()
         if not data:
             raise HTTPException(status_code=400, detail="file is empty")
@@ -204,6 +239,7 @@ def build_app(supports):
             headers = {"X-Audio-Sample-Rate": str(OUT_RATE)}
             if fmt == "text":
                 from fastapi.responses import PlainTextResponse
+
                 return PlainTextResponse(text)
             if fmt == "wav":
                 return tasks.Binary(wav, "audio/wav", headers=headers, suffix=".wav")
@@ -212,8 +248,13 @@ def build_app(supports):
                 return tasks.Binary(pcm, "audio/L16", headers=headers, suffix=".pcm")
             return {"text": text, "sample_rate": OUT_RATE, "audio": b64}
 
-        return await tasks.dispatch(request.query_params.get("async"), "audio_s2s", MODEL_NAME,
-                                    _work, fail="translation failed")
+        return await tasks.dispatch(
+            request.query_params.get("async"),
+            "audio_s2s",
+            MODEL_NAME,
+            _work,
+            fail="translation failed",
+        )
 
     @app.websocket("/v1/audio/translations/stream")
     async def translations_stream(ws: WebSocket):
@@ -227,8 +268,9 @@ def build_app(supports):
             await ws.send_json({"error": _state["error"] or "engine not ready"})
             await ws.close()
             return
-        await ws.send_json({
-            "event": "ready", "sample_rate": OUT_RATE, "input_sample_rate": IN_RATE})
+        await ws.send_json(
+            {"event": "ready", "sample_rate": OUT_RATE, "input_sample_rate": IN_RATE}
+        )
         source, target = _pair(None, None)
         states = _new_states()
         rate = IN_RATE
@@ -240,10 +282,12 @@ def build_app(supports):
                 text = msg.get("text")
                 if text is not None:
                     source, target, states, rate, stop = _ws_text(
-                        text, source, target, states, rate)
+                        text, source, target, states, rate
+                    )
                     if stop:
                         events, _done = await asyncio.to_thread(
-                            _drain, states, source, target, True)
+                            _drain, states, source, target, True
+                        )
                         await _send_events(ws, events, finished=True)
                         break
                     continue
@@ -290,11 +334,15 @@ def _ws_text(text, source, target, states, rate):
     if obj.get("response_format") is not None:
         fmt = str(obj["response_format"]).lower()
         if fmt not in ("text", "pcm"):
-            raise HTTPException(status_code=400, detail="stream response_format must be text or pcm")
+            raise HTTPException(
+                status_code=400, detail="stream response_format must be text or pcm"
+            )
         text_only = fmt == "text"
         if text_only != states.text_only:
             if states.upstream is not None or states.source:
-                raise HTTPException(status_code=400, detail="set response_format before sending audio")
+                raise HTTPException(
+                    status_code=400, detail="set response_format before sending audio"
+                )
             states = _new_states(text_only=text_only)
     if obj.get("sample_rate"):
         try:
@@ -308,5 +356,6 @@ def _ws_text(text, source, target, states, rate):
 
 def run(supports):
     _pair(SOURCE_LANG, TARGET_LANG)
-    _runtime.serve(supports, _boot, build_app, "S3-S2ST engine",
-                   disable_ws_ping=True, timeout_s=BOOT_TIMEOUT_S)
+    _runtime.serve(
+        supports, _boot, build_app, "S3-S2ST engine", disable_ws_ping=True, timeout_s=BOOT_TIMEOUT_S
+    )
