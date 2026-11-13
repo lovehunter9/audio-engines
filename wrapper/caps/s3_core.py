@@ -9,6 +9,7 @@ from types import SimpleNamespace
 class Engine:
     def __init__(self, repo, *, dtype="bf16", threshold=0.5):
         import torch
+        torch.set_num_threads(1)
         from huggingface_hub import snapshot_download
         from safetensors import safe_open
         from transformers import AutoTokenizer, Qwen3_5ForCausalLM, Qwen3_5TextConfig

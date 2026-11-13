@@ -10,6 +10,7 @@ from types import SimpleNamespace
 class Engine:
     def __init__(self, repo, *, dtype="fp16", threshold=0.5):
         import torch
+        torch.set_num_threads(1)
         from fairseq2.assets import InProcAssetMetadataProvider, asset_store
         from huggingface_hub import snapshot_download
         from seamless_communication.streaming.agents.detokenizer import UnitYDetokenizerAgent
