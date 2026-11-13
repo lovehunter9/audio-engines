@@ -19,7 +19,7 @@ on:
         required: false
         default: beclab
       image_tag:
-        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        description: 'Image tag (empty = only main/v* refs publish)'
         required: false
         default: ''
 

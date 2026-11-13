@@ -1,7 +1,6 @@
 # The official streaming speech agent serves both whole recordings and live PCM.
 import asyncio
 import logging
-import os
 import threading
 
 from fastapi import (
@@ -20,7 +19,6 @@ log = logging.getLogger("audio-seamless")
 _runtime = Runtime(model=None, dtype=None)
 MODEL_NAME = _runtime.model_name
 MODEL_REPO = _runtime.model_repo
-HF_TOKEN = os.environ.get("HF_TOKEN") or None
 
 _args = EngineArgs()
 SOURCE_LANG = str(_args.text("--source-lang", "English") or "English")
@@ -301,7 +299,7 @@ def _ws_text(text, source, target, states, rate):
             if states.upstream is not None or states.source:
                 raise HTTPException(status_code=400, detail="set response_format before sending audio")
             states = _new_states(text_only=text_only)
-    if obj.get("sample_rate"):
+    if obj.get("sample_rate") is not None:
         try:
             rate = int(obj["sample_rate"])
         except (TypeError, ValueError):
