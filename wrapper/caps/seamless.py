@@ -83,7 +83,7 @@ def _new_states(text_only=False):
                            text_only=text_only, has_text=False)
 
 
-def _drain(states, source, target, finished):
+def _drain(states, source, target, finished, checkpoint=None):
     engine = _state["engine"]
     with _lock:
         if states.upstream is None:
@@ -92,6 +92,8 @@ def _drain(states, source, target, finished):
         done = False
         size = max(1600, int(IN_RATE * CHUNK_MS / 1000))
         while len(states.source) - states.processed_samples >= size or finished:
+            if checkpoint is not None:
+                checkpoint()
             start = states.processed_samples
             end = min(start + size, len(states.source))
             last = bool(finished and end == len(states.source))
@@ -195,7 +197,7 @@ def build_app(supports):
             ctx.progress(ratio=0.0, stage="translate")
             states = _new_states(text_only=fmt == "text")
             states.source = samples
-            events, _done = _drain(states, source, target, True)
+            events, _done = _drain(states, source, target, True, ctx.checkpoint)
             text, audio, wav, b64 = _join(events)
             ctx.meter(output_seconds=seconds(audio, OUT_RATE))
             ctx.progress(ratio=1.0, stage="done")

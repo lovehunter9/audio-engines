@@ -93,6 +93,8 @@ class Engine:
         from simuleval.data.segments import SpeechSegment
 
         agent, states = session
+        if finished and not len(samples):
+            states[agent.source_module].source.clear()
         with torch.inference_mode():
             output = agent.pushpop(SpeechSegment(content=samples, sample_rate=16000,
                                                 tgt_lang=target, finished=finished), states)
