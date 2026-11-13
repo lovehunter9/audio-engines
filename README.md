@@ -249,6 +249,9 @@ passes. For the same reason the build's final import check must go **through**
 | `seamless` | `beclab/audio-seamless` | `audio_s2s` | SeamlessStreaming native simultaneous speech translation (CUDA) | in progress |
 | `seamlessxpu` | `beclab/audio-seamless-xpu` | `audio_s2s` | SeamlessStreaming native simultaneous speech translation (Intel XPU) | in progress |
 
+| `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Native S3-S2ST Chinese/English simultaneous translation (CUDA) | in progress |
+| `s3s2stxpu` | `beclab/audio-s3-s2st-xpu` | `audio_s2s` | Native S3-S2ST Chinese/English simultaneous translation (Intel XPU) | in progress |
+
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
 capability alone.

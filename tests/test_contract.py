@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from wrapper import catalog, contract, gpu, tasks
 
 EXPECTED_CAPABILITY_ENDPOINTS = {
+    ("s3_s2st", "audio_s2s", "POST", "/v1/audio/translations"): {"async_supported": True},
+    ("s3_s2st", "audio_s2s", "WS", "/v1/audio/translations/stream"): {"async_supported": False},
     ("seamless", "audio_s2s", "POST", "/v1/audio/translations"): {"async_supported": True},
     ("seamless", "audio_s2s", "WS", "/v1/audio/translations/stream"): {"async_supported": False},
     ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},

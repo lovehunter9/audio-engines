@@ -112,6 +112,8 @@ BASES = {
     ],
     "seamless": [(("audio_s2s",), "seamless")],
     "seamlessxpu": [(("audio_s2s",), "seamless")],
+    "s3s2st": [(("audio_s2s",), "s3_s2st")],
+    "s3s2stxpu": [(("audio_s2s",), "s3_s2st")],
     # audio_llm stays reserved until a base implements it.
 }
 
@@ -138,6 +140,7 @@ FAMILIES = {
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
     "seamless": "seamless-streaming",
+    "s3_s2st": "s3-s2st",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -425,6 +428,11 @@ _MOUNTS[("seamless", "audio_s2s")] = [
     ("WS", "/v1/audio/translations/stream", "Continuous PCM input, incremental translated text and speech", False),
 ]
 
+_MOUNTS[("s3_s2st", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations", "Native Chinese/English speech translation; text and 24 kHz audio", True),
+    ("WS", "/v1/audio/translations/stream", "Continuous PCM input, incremental translated text and speech", False),
+]
+
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
 _MOUNTS[("tts_ov", "tts_clone")] = list(_MOUNTS[("tts", "tts_clone")])
@@ -525,7 +533,7 @@ def _modalities(operation_id):
 
 def _parameters(module, operation_id, path=""):
     params = []
-    if module == "seamless" and operation_id.startswith("audio.translate"):
+    if module in ("seamless", "s3_s2st") and operation_id.startswith("audio.translate"):
         params.extend([
             {"name": "source_lang", "type": "string", "default": "English"},
             {"name": "target_lang", "type": "string", "default": "Chinese"},
@@ -579,14 +587,14 @@ def _constraints(module, operation_id, path=""):
 
 def describe_endpoint(module, cap, method, path, is_async):
     operation_id = _operation_id(module, cap, method, path)
-    if module == "seamless" and cap == "audio_s2s" and method == "WS":
+    if module in ("seamless", "s3_s2st") and cap == "audio_s2s" and method == "WS":
         operation_id = "audio.translate.stream"
     inputs, outputs = _modalities(operation_id)
     formats, rates, limits = _constraints(module, operation_id, path)
-    if module == "seamless" and cap == "audio_s2s":
+    if module in ("seamless", "s3_s2st") and cap == "audio_s2s":
         inputs, outputs = ["audio"], ["text", "audio"]
         formats = ["text", "pcm"] if method == "WS" else ["json", "text", "wav", "pcm"]
-        rates = [16000]
+        rates = [24000] if module == "s3_s2st" else [16000]
     scope = "model"
     if operation_id.startswith("voice."):
         scope = "voice"
