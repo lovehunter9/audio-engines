@@ -104,7 +104,8 @@ class Engine:
 
     def _hook(self, number):
         def capture(_module, _inputs, output):
-            self.capture[number] = output.detach()
+            if self.capture is not None:
+                self.capture[number] = output.detach()
 
         return capture
 
@@ -132,7 +133,6 @@ class Engine:
             committed="<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n",
             segments=[],
             text_only=text_only,
-            has_write=False,
             finished=False,
             speech=None if text_only else self.speech.session(),
             target=target,
@@ -180,8 +180,8 @@ class Engine:
             raise RuntimeError("S3 audio placeholder mismatch")
         return torch.cat(parts, dim=0).unsqueeze(0), text
 
-    def _forward(self, embeds, cache=None):
-        self.capture.clear()
+    def _forward(self, embeds, cache=None, *, project=True):
+        self.capture = {} if project else None
         out = self.model(
             inputs_embeds=embeds,
             past_key_values=cache,
@@ -189,6 +189,8 @@ class Engine:
             logits_to_keep=1,
             return_dict=True,
         )
+        if not project:
+            return out, None, None
         hidden = self.capture[self.fusion_layers[0]].float() * self.fusion[0].float()
         for i, layer in enumerate(self.fusion_layers[1:], 1):
             hidden = hidden + self.capture[layer].float() * self.fusion[i].float()
@@ -197,7 +199,7 @@ class Engine:
 
     def _generate(self, embeds):
         torch = self.torch
-        out, _, _ = self._forward(embeds)
+        out, _, _ = self._forward(embeds, project=False)
         ids = []
         for _ in range(256):
             token = int(out.logits[0, -1].argmax())
@@ -205,10 +207,10 @@ class Engine:
                 break
             ids.append(token)
             step = self.model.get_input_embeddings()(torch.tensor([[token]], device=self.device))
-            out, _, _ = self._forward(step, out.past_key_values)
+            out, _, _ = self._forward(step, out.past_key_values, project=False)
         else:
             raise RuntimeError("S3 translation exceeded its token limit")
-        return ids, self.tokenizer.decode(ids, skip_special_tokens=True).strip()
+        return self.tokenizer.decode(ids, skip_special_tokens=True).strip()
 
     def push(self, state, samples, target, finished):
         import numpy as np
@@ -247,7 +249,7 @@ class Engine:
                 write = final or float(self.gate(last).float().softmax(-1)[0, 1]) >= self.threshold
                 if write:
                     prompt, prompt_text = self._prompt(state, open_write=True)
-                    ids, text = self._generate(prompt)
+                    text = self._generate(prompt)
                     final_embeds = prompt
                     if text:
                         ids = self.tokenizer.encode(text, add_special_tokens=False)
@@ -272,7 +274,6 @@ class Engine:
                         state.committed = prompt_text + text + "<|im_end|>\n"
                         state.segments.append(state.pending)
                         state.pending = None
-                        state.has_write = True
                     elif not final:
                         raise RuntimeError("S3 non-final WRITE returned empty text")
                 if final:
