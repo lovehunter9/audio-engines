@@ -138,7 +138,8 @@ class SpeechDecoder:
         state.hidden = hidden
         if text_start is not None:
             state.specs.append({"start": text_start, "final": final})
-            state.pcm.emb = self._speaker(source)
+            if state.pcm.emb is None:
+                state.pcm.emb = self._speaker(source[:160000])
         if final:
             state.final = True
             if not state.specs:

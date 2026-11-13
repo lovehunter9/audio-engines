@@ -7,8 +7,9 @@ from types import SimpleNamespace
 
 
 class Engine:
-    def __init__(self, repo, *, dtype="bf16", threshold=0.5):
+    def __init__(self, repo, *, dtype="bf16", threshold=None):
         import torch
+
         torch.set_num_threads(1)
         from huggingface_hub import snapshot_download
         from safetensors import safe_open
@@ -27,6 +28,8 @@ class Engine:
         if dtype != "bf16":
             raise ValueError("S3-S2ST uses the published bf16 language-model weights")
         self.dtype = torch.bfloat16
+        if threshold is not None and not 0 < threshold < 1:
+            raise ValueError("--decision-threshold must be between 0 and 1")
         self.threshold = threshold
         self.root = (
             Path(
@@ -105,6 +108,9 @@ class Engine:
         self.window = torch.hann_window(400, device=self.device)
         self.speech = SpeechDecoder(self.root, self.device)
         self.languages = self.speech_languages = {"cmn", "eng"}
+        from .s3_cache import install
+
+        install(self.model)
 
     def _hook(self, number):
         def capture(_module, _inputs, output):
@@ -131,6 +137,10 @@ class Engine:
     def session(self, target, *, text_only=False):
         return SimpleNamespace(
             samples=[],
+            gate_cache=None,
+            gate_prefix=None,
+            gate_hidden=None,
+            gate_result=None,
             next_closed=10240,
             encoded=0,
             pending=None,
@@ -201,6 +211,29 @@ class Engine:
         projected = self.projection(hidden.to(self.dtype))[0]
         return out, projected, self.capture[self.fusion_layers[-1]][:, -1]
 
+    def _gate_forward(self, state, embeds):
+        torch = self.torch
+        previous = state.gate_prefix
+        reuse = previous is not None and embeds.shape[1] >= previous.shape[1]
+        if reuse:
+            reuse = torch.equal(embeds[:, : previous.shape[1]], previous)
+        if reuse and embeds.shape[1] == previous.shape[1]:
+            return state.gate_result
+        suffix = embeds[:, previous.shape[1] :] if reuse else embeds
+        output, new_hidden, last = self._forward(suffix, state.gate_cache if reuse else None)
+        hidden = torch.cat([state.gate_hidden, new_hidden]) if reuse else new_hidden
+        state.gate_cache = output.past_key_values
+        state.gate_prefix, state.gate_hidden = embeds, hidden
+        state.gate_result = output, hidden, last
+        return state.gate_result
+
+    def _threshold(self, state):
+        if self.threshold is not None:
+            return self.threshold
+        if state.speech is None:
+            return 0.5
+        return state.speech.pcm.play.threshold(0.1, 0.99, 1.0, 0.5)[0]
+
     def _generate(self, embeds):
         torch = self.torch
         out, _, _ = self._forward(embeds, project=False)
@@ -247,10 +280,12 @@ class Engine:
                         break
                     continue
                 prompt, _ = self._prompt(state, open_write=False)
-                _, hidden, last = self._forward(prompt)
+                _, hidden, last = self._gate_forward(state, prompt)
                 if state.speech is not None:
                     events.extend(("samples", x) for x in self.speech.update(state.speech, hidden))
-                write = final or float(self.gate(last).float().softmax(-1)[0, 1]) >= self.threshold
+                write = final or float(
+                    self.gate(last).float().softmax(-1)[0, 1]
+                ) >= self._threshold(state)
                 if write:
                     prompt, prompt_text = self._prompt(state, open_write=True)
                     text = self._generate(prompt)

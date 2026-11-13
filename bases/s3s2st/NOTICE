@@ -1,0 +1,5 @@
+Qwen3.5 cached continuation in wrapper/caps/s3_cache.py is adapted from Transformers 5.3.0.
+Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
+Licensed under Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+Modification: continue convolution and recurrent state for complete streaming audio blocks.
+Native S3-S2ST modules retain their original upstream licenses in /opt/s3.

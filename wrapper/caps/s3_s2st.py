@@ -34,7 +34,9 @@ SOURCE_LANG = str(_args.text("--source-lang", "English") or "English")
 TARGET_LANG = str(_args.text("--target-lang", "Chinese") or "Chinese")
 CHUNK_MS = _args.count("--chunk-size-ms", 160)
 DTYPE = _args.text("--dtype", "bf16")
-THRESHOLD = _args.number("--decision-threshold", 0.5)
+THRESHOLD = (
+    _args.number("--decision-threshold", 0.5) if _args.given("--decision-threshold") else None
+)
 
 IN_RATE = 16000
 OUT_RATE = 24000
