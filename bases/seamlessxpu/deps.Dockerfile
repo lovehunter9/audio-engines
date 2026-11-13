@@ -44,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 RUN python3 -m pip install --no-cache-dir torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/xpu
-RUN python3 -m pip install --no-cache-dir "cmake>=3.21,<4" ninja "setuptools<81" wheel packaging "tbb==2021.13.1" "tbb-devel==2021.13.1" "numpy<2"
+RUN python3 -m pip install --no-cache-dir "cmake>=3.21,<4" ninja "setuptools<81" wheel packaging "tbb==2022.1.0" "tbb-devel==2022.1.0" "numpy<2"
 
 FROM runtime AS native
 ARG FAIRSEQ2_REVISION=c664a42ac30c5ba3ab23382327903cf690ea1ffb
@@ -57,6 +57,7 @@ COPY --from=native /wheels /wheels
 RUN python3 -m pip install --no-cache-dir /wheels/*.whl && rm -rf /wheels
 ARG SEAMLESS_REVISION=9a081e935c29c6b1e0e05bcbf3fcb623ad306524
 RUN git clone https://github.com/facebookresearch/seamless_communication.git /opt/seamless && git -C /opt/seamless checkout "$SEAMLESS_REVISION" && python3 -m pip install --no-cache-dir --no-deps /opt/seamless
-RUN python3 -m pip install --no-cache-dir "datasets==2.18.0" "pyarrow==17.0.0" "simuleval==1.1.4" fire "librosa==0.11.0" openai-whisper "sonar-space==0.2.1" scipy soundfile huggingface_hub safetensors einops fastapi uvicorn httpx python-multipart websockets
-RUN python3 -c "import torch, fairseq2, fairseq2n; from seamless_communication.streaming.agents.seamless_streaming_s2st import SeamlessStreamingS2STAgent; assert torch.__version__.startswith('2.8.'); assert torch.version.cuda is None; print(SeamlessStreamingS2STAgent.__name__)"
+RUN printf '%s\n' 'torch==2.8.0+xpu' 'torchaudio==2.8.0+xpu' 'fairseq2==0.2.1' 'fairseq2n==0.2.1' 'numpy==1.26.4' 'scipy==1.15.3' 'tbb==2022.1.0' 'packaging==23.2' > /opt/seamless-constraints.txt
+RUN python3 -m pip install --no-cache-dir -c /opt/seamless-constraints.txt "datasets==2.18.0" "pyarrow==17.0.0" "simuleval==1.1.4" fire "librosa==0.11.0" openai-whisper "sonar-space==0.2.1" scipy soundfile huggingface_hub safetensors einops fastapi uvicorn httpx python-multipart websockets
+RUN python3 -c "import torch, fairseq2, fairseq2n; from seamless_communication.streaming.agents.seamless_streaming_s2st import SeamlessStreamingS2STAgent; assert torch.__version__.startswith('2.8.'); assert torch.version.cuda is None; assert fairseq2.__version__ == '0.2.1'; print(SeamlessStreamingS2STAgent.__name__)"
 ENV SEAMLESS_ROOT=/opt/seamless
