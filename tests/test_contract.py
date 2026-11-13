@@ -16,6 +16,8 @@ from fastapi.testclient import TestClient
 from wrapper import catalog, contract, gpu, tasks
 
 EXPECTED_CAPABILITY_ENDPOINTS = {
+    ("seamless", "audio_s2s", "POST", "/v1/audio/translations"): {"async_supported": True},
+    ("seamless", "audio_s2s", "WS", "/v1/audio/translations/stream"): {"async_supported": False},
     ("align", "align", "POST", "/v1/audio/align"): {"async_supported": True},
     # 🔴 Listed here as well as in the catalog, which is the point of this table: a route
     # mounted and not advertised is the easy mistake, and a diagnostic one is the easiest
