@@ -3199,44 +3199,6 @@ class TtsOvCausalHelpersTest(unittest.TestCase):
         self.assertTrue(torch.isfinite(dec[0, 0, 3, 16]))
 
 
-class Simuls2stOvRecipeTest(unittest.TestCase):
-    def test_vocos_stays_torch_cpu(self):
-        import inspect
-
-        from wrapper.caps import simuls2st_ov
-
-        src = inspect.getsource(simuls2st_ov._vocoder)
-        self.assertIn("Vocos on torch CPU", src)
-        self.assertNotIn("compile_module", src)
-
-    def test_ov_talker_fp32_default(self):
-        import inspect
-
-        from wrapper.caps import simuls2st_ov
-
-        src = inspect.getsource(simuls2st_ov.install)
-        self.assertIn("_talker_fp32", src)
-        self.assertIn("_TALKER_F32_STAMP", inspect.getsource(simuls2st_ov))
-
-    def test_voicebox_defaults_to_torch_cpu(self):
-        import inspect
-
-        from wrapper.caps import simuls2st_ov
-
-        src = inspect.getsource(simuls2st_ov._voicebox)
-        self.assertIn("VoiceBox on torch CPU", src)
-        self.assertIn("OV_SIMULS2ST_VOICEBOX", inspect.getsource(simuls2st_ov._voicebox_use_openvino))
-
-    def test_voicebox_diff_compiles_with_dynamic_time(self):
-        import inspect
-
-        from wrapper.caps import simuls2st_ov
-
-        src = inspect.getsource(simuls2st_ov._estimator)
-        self.assertIn("dynamic_rank=3", src)
-        self.assertIn("dynamic_axis=1", src)
-
-
 class SlimTtsOvRecipeTest(unittest.TestCase):
     def test_intel_tts_bases_have_openvino_and_no_cuda(self):
         root = os.path.join(os.path.dirname(__file__), "../bases")

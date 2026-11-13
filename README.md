@@ -671,7 +671,12 @@ premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
 
-**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. Streamed mel from VoiceBox is already the generated segment; the wrapper does not trim audio after Vocos. `intel` and `intel-gpu` both compile for device `GPU`. VoiceBox (cond_emb + diff) and Vocos default to torch CPU so mel and waveform math match CUDA. Set container env `OV_SIMULS2ST_VOICEBOX=gpu` to compile only `diff_estimator` on the GPU again (older trial images). Thinker stays FP16 on the GPU; talker defaults to FP32 on the GPU (`OV_SIMULS2ST_TALKER_FP32=0` restores talker FP16). The official sampling loop stays in Python and still reads FP32 host tensors. The audio encoder stays on CPU, because its packed-chunk mask loops over the input lengths.
+**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. `intel` and
+`intel-gpu` both compile for device `GPU`. The thinker uses FP16; the talker,
+VoiceBox estimator and Vocos convolutional backbone use FP32 inference. The
+Vocos ISTFT and audio encoders stay on CPU. The official chunked decoding loop
+is preserved, including its upstream speech-boundary artifacts; the wrapper
+adds no waveform trimming or prompt-frame correction.
 
 **`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64. One load runs the thinker,
 the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the

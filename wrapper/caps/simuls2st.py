@@ -1,10 +1,4 @@
-# SimulS2ST-Omni simultaneous speech-to-speech. One in-process agent, no child engine.
-#
-# The streaming policy is the upstream speech agent. A finished utterance is that same policy
-# with source_finished set. Text is the transcript of the same pass, not a second model.
-#
-# Languages are English and Chinese, and the two sides differ, so one of them is Chinese.
-# The pair is per request: the system prompt is rebuilt under the generation lock. Weights stay.
+# The official streaming speech agent serves both whole recordings and live PCM.
 import asyncio
 import logging
 import os
@@ -191,9 +185,6 @@ def _load():
         from .simuls2st_ov import install
 
         install(agent, snap, ov_device)
-    from .simuls2st_audio import install as align_audio
-
-    align_audio(agent)
     _state.update(agent=agent, dtype=dtype)
 
 

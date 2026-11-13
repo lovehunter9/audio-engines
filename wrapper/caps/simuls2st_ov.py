@@ -1,14 +1,4 @@
-"""SimulS2ST on the Intel GPU. The official sampling loop stays in Python.
-
-VoiceBox and Vocos default to torch CPU. Set OV_SIMULS2ST_VOICEBOX=gpu to compile diff_estimator
-on the GPU instead (ov6-style). OpenVINO on the conv backbone drifted word onsets even with a dynamic
-time axis. The thinker and talker stacks are one FP16 graph
-each: a second FP32 copy of the 7B weights does not fit the 32Gi engine limit.
-Prefill and decode share that graph, and the KV cache stays on the GPU. Host
-tensors the official loop reads are FP32. The audio encoder stays on CPU. Its
-packed-chunk mask is a Python loop over the input lengths, so one graph would
-freeze the example's chunk count.
-"""
+"""SimulS2ST transformer and acoustic graphs on the Intel GPU."""
 import logging
 import os
 
@@ -35,7 +25,7 @@ def install(agent, snap, device):
             mod.float()
     agent.dtype = torch.float32
     agent.model_dtype = torch.float32
-    _voicebox(voicebox, snap, device)
+    _estimator(voicebox, snap, device)
     _vocoder(vocoder, int(voicebox.mel_dim), snap, device)
 
     thinker = inference.base_model.thinker
@@ -43,45 +33,12 @@ def install(agent, snap, device):
     thinker.half()
     _stack(thinker.model, snap, device, "simuls2st_thinker", precision="f16", stamp=_STAMP)
     _linear(thinker.lm_head, snap, device, "simuls2st_thinker_head", precision="f16", stamp=_STAMP)
-    talker_f32 = _talker_fp32()
-    if talker_f32:
-        talker.float()
-        tprec, tstamp = "f32", _TALKER_F32_STAMP
-    else:
-        talker.half()
-        tprec, tstamp = "f16", _STAMP
-    _stack(talker.model, snap, device, "simuls2st_talker", precision=tprec, stamp=tstamp)
-    _linear(talker.codec_head, snap, device, "simuls2st_talker_head", precision=tprec, stamp=tstamp)
-    _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj", precision=tprec, stamp=tstamp)
-    vb = "OpenVINO GPU" if _voicebox_use_openvino() else "torch CPU"
-    talker_prec = "fp32" if talker_f32 else "fp16"
-    log.info(
-        "simuls2st OV on %s: VoiceBox %s, Vocos torch CPU, thinker fp16, talker %s; "
-        "audio encoder stays on CPU",
-        device,
-        vb,
-        talker_prec,
-    )
-
-
-def _talker_fp32():
-    raw = (os.environ.get("OV_SIMULS2ST_TALKER_FP32") or "1").strip().lower()
-    return raw not in ("0", "false", "no", "f16", "fp16")
-
-
-def _voicebox_use_openvino():
-    raw = (os.environ.get("OV_SIMULS2ST_VOICEBOX") or "").strip().lower()
-    return raw in ("gpu", "openvino", "1", "true", "yes")
-
-
-def _voicebox(voicebox, snap, device):
-    if _voicebox_use_openvino():
-        _estimator(voicebox, snap, device)
-        return
-    voicebox.cpu().float()
-    if hasattr(voicebox, "eval"):
-        voicebox.eval()
-    log.info("VoiceBox on torch CPU (cond_emb + diff); talker/thinker on OpenVINO %s", device)
+    talker.float()
+    _stack(talker.model, snap, device, "simuls2st_talker", precision="f32", stamp=_TALKER_F32_STAMP)
+    _linear(talker.codec_head, snap, device, "simuls2st_talker_head", precision="f32", stamp=_TALKER_F32_STAMP)
+    _linear(talker.thinker_to_talker_proj, snap, device, "simuls2st_talker_proj", precision="f32", stamp=_TALKER_F32_STAMP)
+    log.info("simuls2st on %s: thinker fp16; talker, VoiceBox and Vocos backbone fp32; "
+             "audio encoders and ISTFT on CPU", device)
 
 
 def _estimator(voicebox, snap, device):
@@ -95,10 +52,19 @@ def _estimator(voicebox, snap, device):
     x = torch.zeros(1, 8, mel, dtype=torch.float32)
     t = torch.zeros(1, dtype=torch.float32)
     cond = torch.zeros(1, 8, hidden, dtype=torch.float32)
-    mask = torch.ones(1, 8, dtype=torch.float32)
-    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_diff", ".ov-simuls2st-diff-v2")
+    mask = torch.ones(1, 8, 1, dtype=torch.float32)
+
+    class AcousticStep(torch.nn.Module):
+        def __init__(self, module):
+            super().__init__()
+            self.module = module
+
+        def forward(self, x, t, cond, mask):
+            return self.module(x, t, cond, mask.squeeze(-1))
+
+    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_diff_v3", ".ov-simuls2st-diff-v3")
     compiled = tts_ov.compile_module(
-        step, (x, t, cond, mask), xml, stamp, device, dynamic_rank=3, dynamic_axis=1
+        AcousticStep(step), (x, t, cond, mask), xml, stamp, device, dynamic_rank=3, dynamic_axis=1
     )
     if compiled is None:
         raise RuntimeError("VoiceBox diff_estimator did not compile on %s" % device)
@@ -110,6 +76,7 @@ def _estimator(voicebox, snap, device):
             np.ascontiguousarray(item.detach().float().cpu().numpy())
             for item in (x_in, t_in, cond_in, mask_in)
         ]
+        arrays[-1] = arrays[-1][..., None]
         out = compiled(*arrays)[0]
         want = x_in if hasattr(x_in, "dtype") else t_in
         return torch.from_numpy(np.ascontiguousarray(out)).to(
@@ -122,13 +89,37 @@ def _estimator(voicebox, snap, device):
 
 
 def _vocoder(vocoder, mel_dim, snap, device):
-    """Keep Vocos on torch CPU. The conv backbone on OpenVINO GPU still smeared word onsets after dynamizing T."""
-    del mel_dim, snap
+    """Compile the conv backbone. ISTFT stays in torch; the GPU compiler segfaults on it."""
+    import torch
 
-    vocoder.cpu().float()
-    if hasattr(vocoder, "eval"):
-        vocoder.eval()
-    log.info("Vocos on torch CPU (backbone and ISTFT)")
+    from .. import tts_ov
+
+    backbone = getattr(vocoder, "backbone", None)
+    head = getattr(vocoder, "head", None)
+    if backbone is None or head is None:
+        raise RuntimeError("Vocos has no backbone/head to split")
+    example = torch.zeros(1, mel_dim, 64, dtype=torch.float32)
+    _, xml, stamp = tts_ov.ir_paths(snap, "simuls2st_vocos_backbone", ".ov-simuls2st-v3")
+    compiled = tts_ov.compile_module(
+        backbone, example, xml, stamp, device, dynamic_rank=3, dynamic_axis=-1
+    )
+    if compiled is None:
+        raise RuntimeError("Vocos backbone did not compile on %s" % device)
+
+    def forward(mel, *args, **kwargs):
+        import numpy as np
+
+        arr = np.ascontiguousarray(mel.detach().float().cpu().numpy())
+        hidden = torch.from_numpy(np.ascontiguousarray(compiled(arr)[0])).float()
+        with torch.inference_mode():
+            audio = head(hidden)
+        if audio.dim() == 2:
+            audio = audio[:, None, :]
+        return audio
+
+    vocoder.forward = forward
+    tts_ov.release_parameters(backbone, "simuls2st vocos backbone")
+    log.info("Vocos backbone on OpenVINO %s; ISTFT stays in torch", device)
 
 
 def _stack(model, snap, device, name, precision="f16", stamp=_STAMP):
