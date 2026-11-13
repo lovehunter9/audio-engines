@@ -13,22 +13,6 @@ def is_ov():
     return (os.environ.get("AUDIO_BASE") or "").strip() == "simuls2stov"
 
 
-
-def configure_threads():
-    import torch
-
-    threads = torch.get_num_threads()
-    try:
-        with open("/sys/fs/cgroup/cpu.max") as fh:
-            quota, period = fh.read().split()
-        if quota != "max":
-            threads = min(threads, max(1, int(quota) // int(period)))
-    except (OSError, ValueError):
-        pass
-    torch.set_num_threads(threads)
-    log.info("PyTorch CPU threads=%d", threads)
-
-
 def install(agent, snap, device):
     """Compile the waveform path and both transformer stacks. Fail if a graph misses the GPU."""
     import torch
