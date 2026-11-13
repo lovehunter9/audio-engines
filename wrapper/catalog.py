@@ -111,6 +111,7 @@ BASES = {
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
     "seamless": [(("audio_s2s",), "seamless")],
+    "seamlessxpu": [(("audio_s2s",), "seamless")],
     # audio_llm stays reserved until a base implements it.
 }
 

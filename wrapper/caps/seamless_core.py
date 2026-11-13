@@ -18,8 +18,10 @@ class Engine:
         from seamless_communication.streaming.agents.online_vocoder import VocoderAgent
         from seamless_communication.streaming.agents.unity_pipeline import UnitYAgentTreePipeline, UnitYPipelineMixin
 
-        if not torch.cuda.is_available():
-            raise RuntimeError("SeamlessStreaming CUDA engine requires CUDA")
+        device = "xpu:0" if os.environ.get("AUDIO_BASE") == "seamlessxpu" else "cuda:0"
+        backend = torch.xpu if device.startswith("xpu") else torch.cuda
+        if not backend.is_available():
+            raise RuntimeError("SeamlessStreaming requires its selected GPU backend")
         if dtype not in ("fp16", "fp32"):
             raise ValueError("--dtype must be fp16 or fp32")
         snap = Path(snapshot_download(repo, local_files_only=True,
@@ -56,7 +58,7 @@ class Engine:
         parser = argparse.ArgumentParser(conflict_handler="resolve")
         JointPipeline.add_args(parser)
         args = parser.parse_args(["--min-unit-chunk-size", "50"])
-        args.device = "cuda:0"
+        args.device = device
         args.dtype = dtype
         args.fp16 = False
         args.task = "s2st"
