@@ -277,8 +277,8 @@ class Engine:
                         state.committed = prompt_text + text + "<|im_end|>\n"
                         state.segments.append(state.pending)
                         state.pending = None
-                    elif not final:
-                        raise RuntimeError("S3 non-final WRITE returned empty text")
+                    elif final and not state.segments:
+                        raise RuntimeError("S3 final translation returned empty text")
                 if final:
                     if state.speech is not None:
                         pad = self.tokenizer.pad_token_id or 0
