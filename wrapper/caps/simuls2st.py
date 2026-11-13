@@ -191,6 +191,9 @@ def _load():
         from .simuls2st_ov import install
 
         install(agent, snap, ov_device)
+    from .simuls2st_audio import install as align_audio
+
+    align_audio(agent)
     _state.update(agent=agent, dtype=dtype)
 
 
