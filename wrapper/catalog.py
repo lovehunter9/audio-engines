@@ -118,7 +118,7 @@ BASES = {
     "simuls2stov": [
         (("audio_s2s",), "simuls2st"),
     ],
-    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
+    # audio_llm stays reserved until a base implements it.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.

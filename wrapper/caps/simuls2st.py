@@ -425,4 +425,5 @@ def _ws_text(text, source, target, states, rate):
 
 def run(supports):
     _pair(SOURCE_LANG, TARGET_LANG)
-    _runtime.serve(supports, _boot, build_app, "SimulS2ST-Omni engine", timeout_s=BOOT_TIMEOUT_S)
+    _runtime.serve(supports, _boot, build_app, "SimulS2ST-Omni engine",
+                   disable_ws_ping=True, timeout_s=BOOT_TIMEOUT_S)
