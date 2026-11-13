@@ -162,7 +162,7 @@ class Engine:
         prefix = direction if not state.segments else ""
         text = state.committed + "<|im_start|>user\n" + prefix + "<|audio_start|><|audio_pad|>"
         if open_write:
-            text += "<|audio_end|><|im_end|>\n<|im_start|>assistant\n"
+            text += "<|audio_end|><|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
         ids = self.tokenizer.encode(text, add_special_tokens=False)
         parts = []
         cursor = 0
