@@ -2,6 +2,23 @@
 name: build-image
 
 on:
+  workflow_dispatch:
+    inputs:
+      base:
+        required: true
+        type: string
+      repo:
+        required: true
+        type: string
+      namespace:
+        default: beclab
+        type: string
+      image_tag:
+        default: ''
+        type: string
+      slices:
+        default: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+        type: string
   workflow_call:
     inputs:
       base:
