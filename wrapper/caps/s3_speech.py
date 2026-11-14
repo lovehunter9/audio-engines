@@ -33,6 +33,7 @@ class SpeechDecoder:
         state = {k.removeprefix("model."): v for k, v in state.items()}
         self.model.load_state_dict(state, strict=True)
         self.model.to(device=device, dtype=torch.bfloat16)
+        self.model.rotary_emb = type(self.model.rotary_emb)(cfg, device=device)
         state = torch.load(root / "talker_codec_embed.pt", map_location="cpu", weights_only=True)
         self.embedding = torch.nn.Embedding(*state["weight"].shape)
         self.embedding.load_state_dict(state, strict=True)
