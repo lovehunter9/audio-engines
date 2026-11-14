@@ -699,7 +699,9 @@ buffer-aware gate policy and `--dtype bf16`; an explicit
 `--decision-threshold` selects a fixed value strictly between zero and one. S3
 freezes speaker conditioning at the first nonempty WRITE, using at most ten
 seconds of source audio. Its gate prefix cache is independent of speculative
-text generation and rebuilds whenever the input prefix changes.
+text generation and rebuilds whenever the input prefix changes. S3 Intel uses
+isolated FLA recurrent kernels for prefill and continuation, retaining the existing
+Torch BF16 query/key normalization. CUDA retains its existing kernels.
 
 These are research translation checkpoints. Successful requests do not guarantee
 semantic or pronunciation accuracy. Native-agent controls and generated audio

@@ -52,3 +52,11 @@ RUN python3 /opt/extract_s3_native.py
 RUN python3 -c "import site; from pathlib import Path; Path(site.getsitepackages()[0], 's3_native.pth').write_text(\"import sys; sys.path[:0] = ['/opt/s3/native', '/opt/s3/vendor/FunASR', '/opt/s3/inference/streaming', '/opt/s3']\n\")"
 ENV S3_ROOT=/opt/s3
 RUN env PYTHONPATH=/app python3 -c "import torch; from transformers import Qwen3_5ForCausalLM,Qwen3_5TextConfig,Qwen2Model,Qwen2Config; from s3_encoder import SenseVoiceEncoder; from s3_adaptor import Transformer; import funasr; assert funasr.__file__.startswith('/opt/s3/vendor/FunASR/'); import funasr.models.cosyvoice.flow_matching_model,funasr.models.cosyvoice.causal_bigvgan; from funasr.models.cosyvoice.modules.dit_flow_matching.dit_model import DiT; assert torch.__version__.startswith('2.8.'); print('S3 native modules loaded')" && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+
+RUN apt-get update && apt-get install -y --no-install-recommends libze-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip download --no-deps --dest /tmp/s3-xpu-kernels fla-core==0.4.0 \
+    && printf '%s\n' '5396f36a9838c99f9e45c70e88e2e0b26688f719d07d2ddd61be16d29327f4ea  /tmp/s3-xpu-kernels/fla_core-0.4.0-py3-none-any.whl' | sha256sum -c \
+    && python3 -m pip install --no-cache-dir --no-deps --target /opt/s3-xpu-kernels /tmp/s3-xpu-kernels/fla_core-0.4.0-py3-none-any.whl \
+    && rm -rf /tmp/s3-xpu-kernels \
+    && python3 -c "import importlib.util; assert importlib.util.find_spec('fla') is None"

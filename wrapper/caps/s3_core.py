@@ -126,6 +126,10 @@ class Engine:
         from .s3_cache import install
 
         install(self.model)
+        if self.device.startswith("xpu"):
+            from .s3_xpu import install as install_xpu
+
+            install_xpu(self.model)
 
     def _hook(self, number):
         def capture(_module, _inputs, output):
