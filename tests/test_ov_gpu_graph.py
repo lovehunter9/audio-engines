@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -7,7 +8,7 @@ try:
 except ImportError:
     ov = None
 
-from wrapper.caps.ov_gpu_graph import promote_1d_convolutions
+from wrapper.caps.ov_gpu_graph import infer_gpu, promote_1d_convolutions
 
 
 @unittest.skipIf(ov is None, "OpenVINO runtime is required for numerical graph equivalence")
@@ -30,3 +31,26 @@ class ConvolutionPromotionTests(unittest.TestCase):
                     expected = core.compile_model(original, "CPU", {"INFERENCE_PRECISION_HINT": "f32"})([data])[0].copy()
                     actual = core.compile_model(transformed, "CPU", {"INFERENCE_PRECISION_HINT": "f32"})([data])[0]
                     np.testing.assert_allclose(actual, expected, rtol=2e-5, atol=2e-6)
+
+
+class RequestIsolationTests(unittest.TestCase):
+    def test_shapes_use_fresh_requests_and_outputs_own_their_samples(self):
+        requests = []
+        class Request:
+            def infer(self, inputs, share_inputs=False):
+                self.data = inputs[0]
+            def get_output_tensor(self, index):
+                return SimpleNamespace(data=self.data)
+        def create():
+            value = Request()
+            requests.append(value)
+            return value
+        compiled = SimpleNamespace(create_infer_request=create, outputs=[0])
+        first = np.arange(32, dtype=np.float32)
+        a = infer_gpu(compiled, [first])[0]
+        b = infer_gpu(compiled, [np.arange(40, dtype=np.float32)])[0]
+        first[:] = -1
+        np.testing.assert_array_equal(a, np.arange(32, dtype=np.float32))
+        np.testing.assert_array_equal(b, np.arange(40, dtype=np.float32))
+        self.assertEqual(len(requests), 2)
+        self.assertIsNot(requests[0], requests[1])

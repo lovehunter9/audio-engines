@@ -34,7 +34,7 @@ class Graph:
             marker.write_text(json.dumps({"adapter": identity}))
             del traced, model
             gc.collect()
-        self.compiled = compile_gpu(graph)
+        self.compiled = compile_gpu(graph, precision="f16")
 
     def infer(self, inputs, *, retain=0):
         import openvino as ov
@@ -59,9 +59,11 @@ def _encoder(model, root):
         def __init__(self):
             super().__init__()
             self.frontend = model.speech_encoder_frontend
+            self.stride = self.frontend.feature_extractor.stride
             self.encoder = model.speech_encoder
 
         def forward(self, feature):
+            feature = feature[:, :feature.shape[1] // self.stride * self.stride]
             encoded, mask = self.frontend(feature, None)
             return self.encoder(encoded, mask)[0]
 
