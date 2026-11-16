@@ -61,6 +61,11 @@ RUN git init /opt/s3 \
         kaldiio tiktoken tqdm fastapi uvicorn httpx python-multipart websockets \
     && python3 -c "import torch, openvino, transformers; from optimum.intel import OVModelForCausalLM; assert torch.version.cuda is None; assert transformers.__version__ == '5.2.0'; print(torch.__version__, openvino.__version__, transformers.__version__)"
 
+RUN python3 -m pip install --no-cache-dir --root-user-action=ignore more-itertools \
+    && python3 -m pip install --no-cache-dir --root-user-action=ignore --no-deps "openai-whisper==20250625"
+COPY wrapper/caps/s3_ov_source.py /opt/s3_adapter/s3_ov_source.py
+RUN PYTHONPATH=/opt/s3_adapter python3 -c "from s3_ov_source import neural_definitions, definitions; e, a, s = neural_definitions('/opt/s3'); assert e.SenseVoiceEncoder and a.Transformer and s.enable_true_streaming_encoder; import whisper; print('original neural definitions and calibrated frontend dependencies loaded')"
+
 LABEL org.opencontainers.image.title="S3 OpenVINO graph export dependencies" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \
       org.opencontainers.image.revision="1ca52ea064ec2081f12675d853525d394571bf73"
