@@ -24,12 +24,19 @@ for pattern in ('flashinfer_jit_cache*', '__pycache__'):
 
 cuda = root / 'cuda'
 cuda_source = Path('/usr/local/cuda').resolve()
-for name in ('bin', 'include', 'nvvm'):
-    shutil.copytree(cuda_source / name, cuda / name, symlinks=False, dirs_exist_ok=True)
+required_tools = ('nvcc', 'nvcc.profile', 'ptxas', 'fatbinary', 'nvlink', 'cudafe++', 'bin2c')
+(cuda / 'bin').mkdir(parents=True)
+for name in required_tools:
+    original = cuda_source / 'bin' / name
+    if not original.is_file():
+        raise FileNotFoundError('Required native CUDA JIT tool: ' + str(original))
+    shutil.copy2(original, cuda / 'bin' / name)
+shutil.copytree(cuda_source / 'nvvm', cuda / 'nvvm', symlinks=False, dirs_exist_ok=True)
 for target in (cuda_source / 'targets').iterdir():
     if not target.is_dir():
         continue
     shutil.copytree(target / 'include', cuda / 'targets' / target.name / 'include', symlinks=False, dirs_exist_ok=True)
+    (cuda / 'include').symlink_to(Path('targets') / target.name / 'include')
     destination = cuda / 'targets' / target.name / 'lib'
     destination.mkdir(parents=True, exist_ok=True)
     for name in ('libcudadevrt.a', 'libcudart_static.a', 'libculibos.a'):
@@ -53,9 +60,15 @@ for path in python.rglob('*'):
                 path.unlink()
                 path.symlink_to(target)
                 break
-seeds = []
-for package in ('torch', 'torchaudio', 'torchvision', 'torchcodec', 'vllm'):
+seeds = list((python / 'torch').glob('_C*.so'))
+seeds.append(python / 'torch/lib/libtorch_global_deps.so')
+for package in ('torchaudio', 'torchvision', 'torchcodec', 'vllm'):
     seeds.extend(p for p in (python / package).rglob('*.so*') if p.is_file())
+link_environment = dict(os.environ)
+link_paths = [str(python / 'torch/lib'), *[str(p) for p in (python / 'nvidia').glob('*/lib')],
+              *[str(p) for location in locations for p in (location / 'nvidia').glob('*/lib')]]
+link_environment['LD_LIBRARY_PATH'] = ':'.join([*link_paths, os.environ.get('LD_LIBRARY_PATH', '')])
+required_cuda_packages = {'cudnn', 'cuda_nvrtc', 'nvjitlink', 'nccl', 'cuda_runtime'}
 queue = deque(seeds)
 seen = set()
 collected = []
@@ -85,7 +98,7 @@ while queue:
     if path in seen:
         continue
     seen.add(path)
-    result = subprocess.run(['ldd', str(path)], capture_output=True, text=True)
+    result = subprocess.run(['ldd', str(path)], capture_output=True, text=True, env=link_environment)
     for line in result.stdout.splitlines():
         if '=>' not in line:
             continue
@@ -98,12 +111,32 @@ while queue:
             continue
         if dependency.name.startswith(("libcuda.so", "libnvidia-ml.so")):
             continue
+        if dependency.is_relative_to(python / 'nvidia'):
+            required_cuda_packages.add(dependency.relative_to(python / 'nvidia').parts[0])
+            queue.append(dependency)
+            continue
+        located = False
+        for location in locations:
+            if dependency.is_relative_to(location / 'nvidia'):
+                required_cuda_packages.add(dependency.relative_to(location / 'nvidia').parts[0])
+                queue.append(dependency)
+                located = True
+                break
+        if located:
+            continue
         if any(dependency.is_relative_to(location) for location in locations):
+            queue.append(dependency)
             continue
         if dependency.is_relative_to(python):
+            queue.append(dependency)
             continue
         if str(dependency).startswith(('/usr/local/cuda', '/usr/local/lib')):
             collect_library(original)
+removed_cuda_packages = []
+for directory in (python / 'nvidia').iterdir():
+    if directory.is_dir() and directory.name not in required_cuda_packages and directory.name != '__pycache__':
+        removed_cuda_packages.append(directory.name)
+        shutil.rmtree(directory)
 source = Path('/opt/s3')
 subprocess.run(['git', '-C', str(source), 'diff', '--exit-code', 'HEAD'], check=True)
 for path in source.rglob('*.so'):
@@ -122,7 +155,8 @@ packages = sorted([{'name':p.name,'bytes':size(p)} for p in python.iterdir() if 
 report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),'jit_toolchain_bytes':size(cuda),
           'largest_packages':packages[:35], 'preserved_external_libraries':collected,
           'original_source_revision':(source/'COMMIT').read_text().strip(),
-          'tracked_source_unmodified':True}
+          'tracked_source_unmodified':True, 'retained_cuda_packages':sorted(required_cuda_packages),
+          'removed_cuda_packages':removed_cuda_packages}
 (root/'MANIFEST.json').write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
 for record in json.loads((source/'KERNELS.json').read_text())['libraries']:
