@@ -12,7 +12,7 @@ def compile_gpu(path, *, precision="f32", input_shapes=None):
     model = core.read_model(str(path))
     if input_shapes is not None:
         model.reshape({model.input(index): shape for index, shape in input_shapes.items()})
-    compiled = core.compile_model(model, "GPU", {"INFERENCE_PRECISION_HINT": precision, "NUM_STREAMS": 1})
+    compiled = core.compile_model(model, "GPU", {"INFERENCE_PRECISION_HINT": precision})
     devices = [str(device) for device in compiled.get_property("EXECUTION_DEVICES")]
     if not devices or any(not device.startswith("GPU") for device in devices):
         raise RuntimeError("S3 neural execution must use OpenVINO GPU: " + repr(devices))
