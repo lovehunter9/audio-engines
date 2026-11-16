@@ -41,7 +41,7 @@ class WhisperFeatures:
 
 
 class KaldiFeatures:
-    def __init__(self, target):
+    def __init__(self, target, *, center=True):
         import torch
         from torch import nn
         from torchaudio.compliance import kaldi
@@ -67,10 +67,10 @@ class KaldiFeatures:
                 padded = torch.nn.functional.pad(frames, (0, 112))
                 spectrum = (padded @ self.cosine).square()+(padded @ self.sine).square()
                 feature = (spectrum @ self.banks.T).clamp(min=torch.finfo(torch.float32).eps).log()
-                return (feature-feature.mean(dim=0, keepdim=True)).unsqueeze(0)
+                return (feature-feature.mean(dim=0, keepdim=True) if center else feature).unsqueeze(0)
 
         self.compiled = export_module(Features().eval(), (torch.zeros(1, 16000),), [[1, -1]], target,
-            source={"method": "original_kaldi_fbank_80_centered_dither0_16k_explicit_frame_gather_gpu_dft",
+            source={"method": "original_kaldi_fbank_80_dither0_16k_explicit_frame_gather_gpu_dft", "center": center,
                     "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
 
     def __call__(self, wave):

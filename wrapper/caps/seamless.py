@@ -4,6 +4,7 @@ import base64
 import io
 import json
 import logging
+import os
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 
@@ -30,7 +31,7 @@ def _boot():
         from .seamless_native import Engine
         repo, include, exclude = _runtime._hub_spec()
         snapshot = snapshot_download(repo, local_files_only=True, allow_patterns=include, ignore_patterns=exclude)
-        _runtime.state.update(engine=Engine(snapshot), ready=True, error=None)
+        _runtime.state.update(engine=Engine(snapshot, backend="openvino" if os.environ.get("AUDIO_BASE") == "seamlessov" else "cuda"), ready=True, error=None)
     except Exception as error:
         _runtime.state["error"] = hfgate.explain(_runtime.model_repo, error)
         log.exception("Official Seamless runtime initialization failed")

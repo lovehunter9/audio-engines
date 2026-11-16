@@ -119,6 +119,7 @@ BASES = {
         (("audio_s2s",), "simuls2st"),
     ],
     "seamless": [(("audio_s2s",), "seamless")],
+    "seamlessov": [(("audio_s2s",), "seamless")],
     "s3s2st": [(("audio_s2s",), "s3_s2st")],
     "s3s2stov": [(("audio_s2s",), "s3_s2st_ov")],
     # audio_llm stays reserved until a base implements it.

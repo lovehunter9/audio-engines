@@ -11,13 +11,15 @@ import numpy as np
 class Engine:
     sample_rate = 16000
 
-    def __init__(self, snapshot):
+    def __init__(self, snapshot, backend="cuda"):
         import torch
         from fairseq2.assets import InProcAssetMetadataProvider, asset_store
         from seamless_communication.streaming.agents.seamless_streaming_s2st import SeamlessStreamingS2STAgent
         from seamless_communication.streaming.agents.online_text_decoder import UnitYMMATextDecoderAgent
 
-        if not torch.cuda.is_available():
+        if backend not in ("cuda", "openvino"):
+            raise ValueError("Unsupported Seamless inference backend")
+        if backend == "cuda" and not torch.cuda.is_available():
             raise RuntimeError("The native Seamless CUDA runtime requires CUDA")
         self.lock = threading.Lock()
         snapshot = Path(snapshot)
@@ -36,12 +38,16 @@ class Engine:
         parser = argparse.ArgumentParser(conflict_handler="resolve")
         SeamlessStreamingS2STAgent.add_args(parser)
         args = parser.parse_args(["--min-unit-chunk-size", "50"])
-        args.device, args.dtype, args.fp16 = "cuda:0", "fp16", False
+        args.device = "cpu" if backend == "openvino" else "cuda:0"
+        args.dtype, args.fp16 = ("fp32" if backend == "openvino" else "fp16"), False
         args.task, args.tgt_lang = "s2st", "eng"
         args.min_starting_wait_w2vbert, args.decision_threshold = 192, .5
         args.no_early_stop, args.max_len_a, args.max_len_b = True, 0, 100
         args.denormalize, args.sample_rate = False, 16000
         self.agent = SeamlessStreamingS2STAgent.from_args(args)
+        if backend == "openvino":
+            from .seamless_ov import install
+            install(self.agent, snapshot)
         self.target_languages = set(asset_store.retrieve_card("seamless_streaming_unity").field("unit_langs").as_(list))
         self.pending = []
         decoder = next(module for module in self.agent.module_list if isinstance(module, UnitYMMATextDecoderAgent))
