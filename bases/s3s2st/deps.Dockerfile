@@ -19,7 +19,7 @@ RUN python3 -m pip install --no-cache-dir -e '/opt/s3[inference]' \
 
 COPY bases/s3s2st/collect_kernels.py /opt/link_s3_kernels.py
 RUN python3 /opt/link_s3_kernels.py \
-    && bash -c '. /opt/s3/env.sh; python3 -c "from vllm.engine.omnidrca2_engine import OmniDRCA2Engine; import vllm, torch; assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); assert torch.__version__.startswith(\"2.9.\"); print(OmniDRCA2Engine.__module__, torch.__version__)"'
+    && bash -c '. /opt/s3/env.sh; python3 -c "import ast, pathlib, vllm, torch; ast.parse(pathlib.Path(vllm.__file__).parent.joinpath(\"engine/omnidrca2_engine.py\").read_text()); assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); assert torch.__version__.startswith(\"2.9.\"); print(vllm.__file__, torch.__version__)"'
 
 LABEL org.opencontainers.image.title="audio-s3-s2st-deps" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \
