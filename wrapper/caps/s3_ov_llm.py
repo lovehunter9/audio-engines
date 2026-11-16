@@ -312,8 +312,7 @@ class StatefulGPU:
         self.reset()
 
     def reset(self):
-        for state in self.request.query_state():
-            state.reset()
+        self.request = self.compiled.create_infer_request()
         self.position = 0
 
     def infer(self, token_ids, *, embeddings=None, mask=None):

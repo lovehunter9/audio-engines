@@ -31,7 +31,8 @@ class CausalRequest:
 
 def runtime(projected=True):
     value = StatefulGPU.__new__(StatefulGPU)
-    value.request, value.width, value.position = CausalRequest(projected), 1, 0
+    value.compiled = SimpleNamespace(create_infer_request=lambda: CausalRequest(projected))
+    value.request, value.width, value.position = value.compiled.create_infer_request(), 1, 0
     value.inputs = {'input_ids', 'attention_mask', 'position_ids', 'beam_idx',
                     'embedding_override', 'embedding_override_mask'}
     value.outputs = {name: name for name in ['logits', 'final_hidden'] + (['projected_hidden'] if projected else [])}

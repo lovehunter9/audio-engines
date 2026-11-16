@@ -3,7 +3,6 @@ import gc
 import hashlib
 import json
 import logging
-from collections import OrderedDict
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
@@ -19,7 +18,7 @@ def _numpy(value):
 
 
 class Graph:
-    def __init__(self, module, examples, shapes, directory, *, static_inputs=False):
+    def __init__(self, module, examples, shapes, directory):
         import torch
         import openvino as ov
 
@@ -35,26 +34,12 @@ class Graph:
             marker.write_text(json.dumps({"adapter": identity}))
             del traced, model
             gc.collect()
-        self.graph, self.static_inputs = graph, static_inputs
-        self.entries = OrderedDict()
-        if not static_inputs:
-            self._entry(None)
-
-    def _entry(self, shapes):
-        if shapes not in self.entries:
-            compiled = compile_gpu(self.graph, input_shapes=None if shapes is None else dict(enumerate(shapes)))
-            self.entries[shapes] = (compiled, [compiled.create_infer_request() for _ in range(2)], 0)
-        compiled, requests, turn = self.entries[shapes]
-        self.entries[shapes] = (compiled, requests, turn + 1)
-        self.entries.move_to_end(shapes)
-        if len(self.entries) > 8:
-            self.entries.popitem(last=False)
-        return compiled, requests[turn % 2]
+        self.compiled = compile_gpu(graph)
 
     def infer(self, inputs, *, retain=0):
         import openvino as ov
-        shapes = tuple(tuple(value.shape) for value in inputs) if self.static_inputs else None
-        compiled, request = self._entry(shapes)
+        compiled = self.compiled
+        request = compiled.create_infer_request()
         if len(inputs) != len(compiled.inputs):
             raise RuntimeError("Official Seamless graph input signature changed")
         for index, value in enumerate(inputs):
@@ -258,7 +243,7 @@ def _vocoder(agent, root):
             return self.generator({"code": units, "lang": language, "spkr": speaker}, False)
 
     graph = Graph(Vocoder(), (torch.ones(1, 50, dtype=torch.int64), torch.zeros(1, 1, dtype=torch.int64),
-        torch.zeros(1, 1, dtype=torch.int64)), [[1, -1], [1, 1], [1, 1]], root/"vocoder", static_inputs=True)
+        torch.zeros(1, 1, dtype=torch.int64)), [[1, -1], [1, 1], [1, 1]], root/"vocoder")
     def vocoder(units, language, speaker, dur_prediction=False):
         if dur_prediction:
             raise ValueError("Official Seamless streaming disables vocoder duration prediction")

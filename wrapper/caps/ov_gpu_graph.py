@@ -55,10 +55,17 @@ def compile_gpu(path, *, precision="f32", input_shapes=None):
         model.reshape({model.input(index): shape for index, shape in input_shapes.items()})
     count = promote_1d_convolutions(model)
     log = logging.getLogger("openvino-gpu")
-    log.info("Compiling GPU graph %s (%s equivalent 2D convolutions)", path, count)
+    log.info("Compiling GPU graph %s (%s equivalent 2D convolutions, shapes=%s)", path, count, input_shapes)
     compiled = core.compile_model(model, context, {"INFERENCE_PRECISION_HINT": precision})
     devices = [str(device) for device in compiled.get_property("EXECUTION_DEVICES")]
     if not devices or any(not device.startswith("GPU") for device in devices):
         raise RuntimeError("Neural execution must use OpenVINO GPU: " + repr(devices))
     log.info("Compiled GPU graph %s", path)
     return compiled
+
+
+def infer_gpu(compiled, inputs):
+    import numpy as np
+    request = compiled.create_infer_request()
+    request.infer(inputs, share_inputs=False)
+    return [np.array(request.get_output_tensor(i).data, copy=True) for i in range(len(compiled.outputs))]

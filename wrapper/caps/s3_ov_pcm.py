@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from .s3_ov_graphs import compile_gpu
+from .ov_gpu_graph import infer_gpu
 from .s3_ov_source import REVISION, definitions
 
 
@@ -26,8 +27,7 @@ def _author_pcm(source_root, chunk):
                  "json": json, "Path": Path, "_S3_ROOT": source_root}
     author = definitions(source_root / "inference/runtime/pcm_runtime.py",
                          ["PCMRuntime", "Playback"], namespace)
-    # This is the author's s3_grid_diagnostic override, applied without importing
-    # the CUDA Thinker/Talker scheduler and its transport implementation.
+    # Load the author's diagnostic override without the CUDA scheduler.
     for name in ("on_codec", "decode"):
         old = inspect.unwrap(getattr(author.PCMRuntime, name))
         source = textwrap.dedent(inspect.getsource(old)).replace("@torch.inference_mode()\n", "")
@@ -74,7 +74,7 @@ class SourceSpeaker:
             if len(self.compiled_shapes) > 8:
                 self.compiled_shapes.popitem(last=False)
         self.compiled_shapes.move_to_end(shape)
-        output = compiled([feat])[0]
+        output = infer_gpu(compiled, [feat])[0]
         x = np.asarray(output, dtype=np.float32).reshape(1, -1).copy()
         if not np.isfinite(x).all() or np.linalg.norm(x) <= 0:
             raise RuntimeError("Invalid original CAMPPlus output")
@@ -102,8 +102,7 @@ class PCMRuntime:
         if self.fm_chunk not in (1, 4, 7, 8, 15):
             raise ValueError("Unsupported author FM chunk arm")
         self.author = _author_pcm(source_root, self.fm_chunk)
-        # Only integer control/slicing/output tensors use host Torch. Every
-        # neural module below compiles with literal GPU and verifies devices.
+        # Host tensors handle control and output; neural graphs enforce OpenVINO GPU.
         self.device = torch.device("cpu")
         graph_root = Path(graph_root or Path(source_root) / "cache/openvino/pcm")
         self.speaker = SourceSpeaker(source_root)
@@ -156,8 +155,7 @@ class PCMRuntime:
         return self.author.PCMRuntime.gate(self)
 
     def finish(self, key, truncated=False, allow_empty=True):
-        # Final curve explicitly preserves genuine empty outputs. The inherited
-        # finish retains unflushed-envelope failure and writes original PCM16.
+        # Preserve genuine empty outputs, original finish errors, and original PCM16.
         result = self.author.PCMRuntime.finish(self, key, truncated=truncated, allow_empty=True)
         result["speaker_refreshes"] = self.speaker_refreshes
         result["speaker_protocol"] = "all_consumed_prefix_each_nonempty_write_no_crop"

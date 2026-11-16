@@ -10,13 +10,13 @@ import sys
 import threading
 import time
 import types
-from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .s3_ov_graphs import compile_gpu, export_module
+from .s3_ov_graphs import export_module
+from .ov_gpu_graph import infer_gpu
 from .s3_ov_source import REVISION, definitions
 
 
@@ -64,8 +64,7 @@ def _base():
 
 
 def _dynamic_pad_mask(lengths):
-    # The author's helper converts lengths to Python lists. This tensor form is
-    # the same comparison, so a traced graph retains dynamic prefix lengths.
+    # Preserve the original mask comparison with dynamic tensor prefix lengths.
     import torch
 
     positions = torch.arange(lengths.max(), device=lengths.device)
@@ -231,8 +230,7 @@ class FlowMatching:
         self.chunk = int(config.get("fm_chunk", 8))
         self.graphs = {}
         self.lock = threading.RLock()
-        # Match original get_rand_noise: CPU float32 RNG, seed 0, then fp16.
-        # A dedicated generator retains that stream without changing Thinker RNG.
+        # Preserve original float32 seed-0 noise and fp16 cast without changing Thinker RNG.
         self.noise = torch.randn((1, 50 * 300, self.num_mels),
                                  generator=torch.Generator(device="cpu").manual_seed(0)).half().numpy()
 
@@ -279,7 +277,7 @@ class FlowMatching:
         if not finalize and n <= self.context_size:
             raise ValueError("Nonfinal FM prefix must contain its genuine lookahead context")
         with self.lock:
-            out = self.graphs[bool(finalize)]([codec.numpy(), xvec.numpy(), self.noise])[0]
+            out = infer_gpu(self.graphs[bool(finalize)], [codec.numpy(), xvec.numpy(), self.noise])[0]
             expected = (n if finalize else n - self.context_size) * self.feat_token_ratio
             if out.shape != (1, expected, self.num_mels) or not np.isfinite(out).all():
                 raise RuntimeError("Invalid OpenVINO original FM output")
@@ -322,7 +320,6 @@ class _VocoderGPU:
         self.h = generator.h
         self.lock = threading.RLock()
         self.graphs = {}
-        self.specializations = OrderedDict()
         example_feat = torch.zeros((1, self.h.num_mels, 32), dtype=torch.float32)
         with torch.inference_mode():
             _, initial = generator.inference_cache(example_feat, finalize=False, cache={})
@@ -353,7 +350,7 @@ class _VocoderGPU:
                 key = (final, cached)
                 self.graphs[key] = export_module(CachedGenerator(final, cached).eval(), inputs,
                     shapes, Path(graph_root) / ("final" if final else "stream") / ("cached" if cached else "first"),
-                    source=source, precision="f32", prepare_only=True)
+                    source=source, precision="f32")
         self.cache_count = len(example_cache)
 
     def inference_cache(self, feat, finalize=True, cache=None):
@@ -368,18 +365,10 @@ class _VocoderGPU:
         if not finalize and feat.shape[2] <= self.h.conv_pre_look_right:
             raise ValueError("Nonfinal vocoder needs genuine right context")
         with self.lock:
-            specialization = (*key, int(feat.shape[2]))
-            if specialization not in self.specializations:
-                compiled = compile_gpu(self.graphs[key], input_shapes={0: list(feat.shape)})
-                if len(compiled.outputs) != self.cache_count + 1:
-                    raise RuntimeError("OpenVINO export omitted original vocoder cache outputs")
-                self.specializations[specialization] = (compiled, [compiled.create_infer_request() for _ in range(2)], 0)
-            compiled, requests, turn = self.specializations[specialization]
-            request = requests[turn % 2]
-            self.specializations[specialization] = (compiled, requests, turn + 1)
-            self.specializations.move_to_end(specialization)
-            if len(self.specializations) > 8:
-                self.specializations.popitem(last=False)
+            compiled = self.graphs[key]
+            if len(compiled.outputs) != self.cache_count + 1:
+                raise RuntimeError("OpenVINO export omitted original vocoder cache outputs")
+            request = compiled.create_infer_request()
             request.set_input_tensor(0, ov.Tensor(np.ascontiguousarray(feat.numpy())))
             if cached:
                 if len(cache["tensors"]) != self.cache_count:

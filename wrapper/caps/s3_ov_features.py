@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from .s3_ov_graphs import export_module
+from .ov_gpu_graph import infer_gpu
 from .s3_ov_source import frontend_definitions
 
 
@@ -36,7 +37,7 @@ class WhisperFeatures:
 
     def __call__(self, wave):
         samples = np.ascontiguousarray(wave, dtype=np.float32).reshape(1, -1)
-        result = self.compiled([samples, np.array([samples.shape[1]], dtype=np.int64)])
+        result = infer_gpu(self.compiled, [samples, np.array([samples.shape[1]], dtype=np.int64)])
         return np.asarray(result[0]).copy(), np.asarray(result[1]).copy()
 
 
@@ -74,4 +75,4 @@ class KaldiFeatures:
                     "adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()})
 
     def __call__(self, wave):
-        return np.asarray(self.compiled([np.ascontiguousarray(wave, dtype=np.float32).reshape(1, -1)])[0]).copy()
+        return np.asarray(infer_gpu(self.compiled, [np.ascontiguousarray(wave, dtype=np.float32).reshape(1, -1)])[0]).copy()

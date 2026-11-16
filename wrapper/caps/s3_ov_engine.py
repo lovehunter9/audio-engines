@@ -54,7 +54,8 @@ class AudioEncoder:
                 time.sleep(wait)
         self.pcm.prefix(self.wave, len(wave))
         features, lengths = self.frontend(wave)
-        result = self.compiled([features, lengths])
+        from .ov_gpu_graph import infer_gpu
+        result = infer_gpu(self.compiled, [features, lengths])
         embeds = np.asarray(result[0]).copy()
         length = int(np.asarray(result[1]).reshape(-1)[0])
         return torch.from_numpy(embeds[0, :length]).to(torch.bfloat16).contiguous()
