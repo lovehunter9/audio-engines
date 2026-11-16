@@ -41,6 +41,8 @@ RUN set -eux; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh
 
+RUN python3 -m pip install --no-cache-dir "setuptools==80.10.2"
+
 FROM ${TARGETARCH} AS release
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
