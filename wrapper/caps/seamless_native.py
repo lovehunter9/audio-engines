@@ -43,6 +43,8 @@ class Engine:
         asset_store.user_metadata_providers.append(InProcAssetMetadataProvider([
             {"name": "seamless_streaming_unity@user", "checkpoint": uri(names[0]),
              "tokenizer": uri(names[2]), "char_tokenizer": uri(names[3])},
+            {"name": "seamlessM4T_v2_large@user", "tokenizer": uri(names[2]),
+             "char_tokenizer": uri(names[3])},
             {"name": "seamless_streaming_monotonic_decoder@user", "checkpoint": uri(names[1])},
             {"name": "vocoder_v2@user", "checkpoint": uri(names[4])}]))
         parser = argparse.ArgumentParser(conflict_handler="resolve")
