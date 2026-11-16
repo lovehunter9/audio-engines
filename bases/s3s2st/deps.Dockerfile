@@ -20,6 +20,7 @@ COPY bases/s3s2st/collect_requirements.py /opt/collect_s3_requirements.py
 RUN python3 -m pip install --no-cache-dir "torch==2.9.0" "torchaudio==2.9.0" "torchvision==0.24.0" \
         --index-url https://download.pytorch.org/whl/cu129 \
     && python3 -m pip install --no-cache-dir --no-deps "vllm==0.11.1" \
+    && python3 -m pip install --no-cache-dir "packaging==25.0" \
     && python3 /opt/collect_s3_requirements.py \
     && python3 -m pip install --no-cache-dir -r /tmp/s3-runtime-requirements.txt
 
@@ -58,7 +59,7 @@ ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
     LD_LIBRARY_PATH=/opt/s3-runtime/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-dev python3-pip gcc g++ libc6-dev \
+        python3 python3-dev python3-pip gcc g++ libc6-dev ninja-build \
         ffmpeg libsndfile1 libnuma1 libgomp1 libgl1 libsm6 libxext6 \
         libibverbs1 librdmacm1 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
