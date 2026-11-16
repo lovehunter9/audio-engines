@@ -347,7 +347,7 @@ class StatefulGPU:
 
 class Thinker:
     def __init__(self, model_dir, cache_dir, *, base_ir=None, max_new_tokens=256,
-                 max_codec_tokens=2048, blank_count=5):
+                 max_codec_tokens=2048, blank_count=5, prepare_only=False):
         from transformers import AutoTokenizer
 
         self.model_dir = Path(model_dir)
@@ -380,6 +380,8 @@ class Thinker:
                          "neural_device": "OpenVINO GPU", "sampling": "greedy"}
         graph = _adapt_thinker(base_ir, cache_dir / "thinker" / "model.xml", self.model_dir,
                                self.config, self.evidence, residual)
+        if prepare_only:
+            return
         self.runtime = StatefulGPU(graph, self.width)
         self.tokenizer = AutoTokenizer.from_pretrained(str(self.model_dir), local_files_only=True,
                                                        trust_remote_code=False)

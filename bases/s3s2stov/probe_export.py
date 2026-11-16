@@ -29,6 +29,7 @@ def thinker(model_dir, target):
     import torch
     from transformers import Qwen3_5ForCausalLM, Qwen3_5TextConfig
 
+    torch.set_num_threads(4)
     config = Qwen3_5TextConfig(**json.loads((Path(model_dir) / "config.json").read_text())["text_config"])
     model, info = Qwen3_5ForCausalLM.from_pretrained(
         str(model_dir), config=config, key_mapping={r"^model\.language_model\.": "model."},
@@ -43,6 +44,7 @@ def talker(model_dir, target, files):
     import torch
     from transformers import Qwen2Config, Qwen2ForCausalLM
 
+    torch.set_num_threads(4)
     config = Qwen2Config.from_pretrained(str(Path(model_dir) / files["config"]), local_files_only=True)
     if getattr(config, "rope_parameters", None) is None:
         config.rope_parameters = {"rope_type": "default", "rope_theta": getattr(config, "rope_theta", 1000000.0)}

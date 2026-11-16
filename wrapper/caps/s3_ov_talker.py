@@ -89,7 +89,7 @@ class Talker:
     ``last_hidden`` exposes the copied post-norm codec-LLM state needed by FM.
     """
 
-    def __init__(self, model_dir, cache_dir):
+    def __init__(self, model_dir, cache_dir, *, prepare_only=False):
         self.model_dir = Path(model_dir)
         config = json.loads((self.model_dir / "config.json").read_text())
         codex = config.get("cosyvoice_codex", {})
@@ -117,6 +117,8 @@ class Talker:
             raise RuntimeError("Original S3 Talker config hidden size disagrees with codex config")
         base = _export_talker(self.model_dir, Path(cache_dir) / "talker-base", files, self.evidence)
         graph = _adapt_talker(base, Path(cache_dir) / "talker" / "model.xml", self.width, self.evidence)
+        if prepare_only:
+            return
         self.runtime = StatefulGPU(graph, self.width)
         self.components, self.codec_vocab_size = _codec_graphs(
             self.model_dir, cache_dir, files, self.width, self.thinker_width, self.evidence)

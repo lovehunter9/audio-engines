@@ -256,6 +256,8 @@ class OpenVINOEngine(OfficialEngine):
         from .s3_ov_pcm import PCMRuntime
 
         cache = self.root / "cache/openvino"
+        Thinker(self.root/"models/streaming", cache/"thinker", prepare_only=True)
+        Talker(self.root/"models/streaming", cache/"talker", prepare_only=True)
         self.core, stream, finalizer = _record_functions(self.root)
         policies = {"adaptive":(.1,.99,.5),"fixed-0.1":(.1,.1,1.),"fixed-0.5":(.5,.5,1.)}
         base, cap, power = policies[self.preset]
