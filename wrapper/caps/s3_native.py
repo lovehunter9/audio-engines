@@ -26,6 +26,7 @@ class OfficialEngine:
         if marker.read_text().strip() != revision:
             raise RuntimeError("The application directory contains a different official S3 source revision")
         self.env = self._environment()
+        self.env["STREAMING_FEATURE_EXTRACTOR"] = str(self.root / "models/streaming")
         installed = self.root / ".model-installed"
         release = Path(snapshot) / "streaming" / "release.json"
         if not release.is_file():

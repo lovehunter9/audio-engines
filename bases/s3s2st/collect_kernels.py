@@ -5,7 +5,7 @@ import hashlib
 import json
 
 package = distribution("vllm")
-assert package.version == "0.11.1", package.version
+assert package.version.split("+", 1)[0] == "0.11.1", package.version
 source = Path(package.locate_file("vllm"))
 target = Path("/opt/s3/vendor/vllm")
 records = []

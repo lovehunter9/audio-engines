@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg libs
     && printf '%s\n' "$S3_REVISION" > /opt/s3/COMMIT
 
 RUN python3 -m pip install --no-cache-dir -e '/opt/s3[inference]' \
-        fastapi uvicorn httpx python-multipart websockets "torchcodec>=0.8,<0.9" \
+        fastapi uvicorn httpx python-multipart websockets "torchcodec>=0.8,<0.9" "opencv-python-headless==4.11.0.86" \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 COPY bases/s3s2st/collect_kernels.py /opt/link_s3_kernels.py

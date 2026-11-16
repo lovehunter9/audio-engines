@@ -33,8 +33,8 @@ def _boot():
     try:
         from huggingface_hub import snapshot_download
         from .s3_native import OfficialEngine
-        repo, _, _ = _runtime._hub_spec()
-        snapshot = snapshot_download(repo, local_files_only=True)
+        repo, include, exclude = _runtime._hub_spec()
+        snapshot = snapshot_download(repo, local_files_only=True, allow_patterns=include, ignore_patterns=exclude)
         if _PRESET not in ("adaptive", "fixed-0.1", "fixed-0.5"):
             raise ValueError("--preset must be adaptive, fixed-0.1, or fixed-0.5")
         _state.update(engine=OfficialEngine(snapshot, _PRESET), ready=True, error=None)
