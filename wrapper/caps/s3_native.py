@@ -2,8 +2,10 @@
 import atexit
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -70,6 +72,8 @@ class OfficialEngine:
         self._start()
 
     def _start(self):
+        from .s3_native_compat import prepare_checkpoint_loader
+        prepare_checkpoint_loader(self.root)
         service = self.root / "services" / uuid.uuid4().hex
         service.mkdir(parents=True)
         boot = service / "bootstrap.wav"
@@ -105,6 +109,12 @@ class OfficialEngine:
                       S3_NATIVE_OVERRIDE_DIR=str(self.root / "inference/streaming/vllm_overrides"))
         self.socket_path = str(service / "engine.sock")
         ready = service / "ready.json"
+        with self.log_path.open("a") as log:
+            probe = subprocess.run(["audio-python", "-m", "wrapper.caps.s3_native_compat", "--probe-cuda-ipc"],
+                                   cwd=self.root, env=config, stdout=log, stderr=subprocess.STDOUT, timeout=60)
+        if probe.returncode not in (0, 78):
+            raise RuntimeError("Native CUDA IPC capability probe failed: " + str(self.log_path))
+        config["S3_NATIVE_TRANSPORT"] = "cuda" if probe.returncode == 0 else "host"
         worker_config = service / "worker.json"
         worker_config.write_text(json.dumps({"command": command, "socket": self.socket_path,
                                              "ready": str(ready)}))
@@ -125,13 +135,23 @@ class OfficialEngine:
             time.sleep(0.5)
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
+        process = getattr(self, "process", None)
+        if process is None:
+            return
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
             try:
-                self.process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait(timeout=5)
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        process.wait(timeout=5)
 
     def _make_input(self, incoming, output, source):
         subprocess.run(

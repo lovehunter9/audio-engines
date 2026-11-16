@@ -18,6 +18,16 @@ def serve(config_path):
     entry = importlib.import_module(Path(command[1]).stem)
     entry = getattr(entry, "frozen", entry)
     module = entry.common.m
+    from .s3_native_compat import install_worker_compat
+    install_worker_compat()
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    original_post_init = AsyncEngineArgs.__post_init__
+
+    def post_init(self):
+        original_post_init(self)
+        self.worker_cls = "wrapper.caps.s3_cuda_worker.NativeWorker"
+
+    AsyncEngineArgs.__post_init__ = post_init
     backend_type = module.StreamingS2STBackend
     encoder_type = module.s2tt.FullRecordEncoder
     resident = {}
