@@ -289,7 +289,7 @@ class StatefulGPU:
     """One serial, batch-one OpenVINO request with persistent KV/SSM state."""
 
     def __init__(self, path, width):
-        self.compiled = compile_gpu(path, precision="f32")
+        self.compiled = compile_gpu(path, precision="f16")
         self.request = self.compiled.create_infer_request()
         self.width = int(width)
         self.inputs = {port.get_any_name() for port in self.compiled.inputs}
