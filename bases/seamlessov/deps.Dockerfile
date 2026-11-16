@@ -79,7 +79,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git python3-dev
          "openai-whisper==20240930" "sonar-space==0.2.1" /opt/seamless \
     && python3 -m pip install --no-cache-dir "openvino==2026.4.1" \
     && git -C /opt/seamless diff --exit-code HEAD \
-    && find /usr/local/lib/python3.12 -type d -name __pycache__ -prune -exec rm -rf '{}' +
+    && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
 FROM runtime AS release
 COPY --from=build /usr/local/lib/python3.12 /usr/local/lib/python3.12

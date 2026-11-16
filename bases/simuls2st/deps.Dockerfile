@@ -41,7 +41,8 @@ RUN set -eux; \
     sh /tmp/strip_unused_cuda.sh; \
     rm -f /tmp/strip_unused_cuda.sh
 
-RUN python3 -m pip install --no-cache-dir "setuptools==80.10.2"
+RUN python3 -m pip install --no-cache-dir "setuptools==80.10.2" \
+    && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
 FROM ${TARGETARCH} AS release
 ARG TARGETARCH

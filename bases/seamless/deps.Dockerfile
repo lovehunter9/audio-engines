@@ -52,7 +52,8 @@ COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN export LD_LIBRARY_PATH="$(python3 -c 'import site,pathlib; p=pathlib.Path(site.getsitepackages()[0]); print(":".join(str(x) for x in (p/"nvidia").glob("*/lib")))')" \
     && sh /tmp/strip_unused_cuda.sh \
     && git -C /opt/seamless diff --exit-code HEAD \
-    && rm -rf /opt/fairseq2 /opt/seamless/.git
+    && rm -rf /opt/fairseq2 /opt/seamless/.git \
+    && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
 FROM ${TARGETARCH}-release AS release
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1

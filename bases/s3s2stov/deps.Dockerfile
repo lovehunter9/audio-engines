@@ -1,4 +1,4 @@
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
@@ -10,12 +10,9 @@ ARG IGC_DEB=2.36.3+21719
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
-        git \
         python3 \
         python3-pip \
         python3-venv \
-        python3-dev \
-        build-essential \
         libsndfile1 \
         ffmpeg \
         libze1 \
@@ -42,6 +39,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
+FROM runtime AS build
+RUN apt-get update && apt-get install -y --no-install-recommends git python3-dev build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
         torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cpu \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
@@ -53,6 +54,7 @@ RUN git init /opt/s3 \
     && git -C /opt/s3 fetch --depth 1 origin "$S3_REVISION" \
     && git -C /opt/s3 checkout --detach FETCH_HEAD \
     && test "$(git -C /opt/s3 rev-parse HEAD)" = "$S3_REVISION" \
+    && rm -rf /opt/s3/.git \
     && printf '%s\n' "$S3_REVISION" > /opt/s3/COMMIT \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore \
         "numpy==1.26.4" "safetensors==0.5.3" "onnxruntime==1.28.0" \
@@ -65,6 +67,14 @@ RUN python3 -m pip install --no-cache-dir --root-user-action=ignore more-itertoo
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --no-deps "openai-whisper==20250625"
 COPY bases/s3s2stov/probe_export.py /opt/s3_adapter/export_causal.py
 RUN python3 -m py_compile /opt/s3_adapter/export_causal.py
+
+RUN find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
+
+FROM runtime AS release
+COPY --from=build /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=build /opt/s3 /opt/s3
+COPY --from=build /opt/s3_adapter /opt/s3_adapter
+RUN python3 -c "import torch, openvino; from optimum.intel import OVModelForCausalLM; assert torch.version.cuda is None; print(openvino.__version__)"
 
 LABEL org.opencontainers.image.title="S3 OpenVINO graph export dependencies" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \

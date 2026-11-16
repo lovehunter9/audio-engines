@@ -16,7 +16,7 @@ libs.mkdir(exist_ok=True)
 locations = [Path(p) for p in site.getsitepackages() if Path(p).is_dir()]
 for location in reversed(locations):
     shutil.copytree(location, python, dirs_exist_ok=True, symlinks=True,
-                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc', 'tests'))
 for pattern in ('flashinfer_jit_cache*', '__pycache__'):
     for unused in python.glob(pattern):
         if unused.is_dir():
