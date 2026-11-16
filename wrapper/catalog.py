@@ -564,6 +564,12 @@ def _parameters(module, operation_id, path=""):
             {"name": "style", "type": "number", "default": 0.0, "minimum": 0.0, "maximum": 1.0},
             {"name": "use_speaker_boost", "type": "boolean", "default": True},
         ])
+    if module == "s3_s2st" and operation_id == "audio.translate":
+        params.extend([
+            {"name": "source_lang", "type": "string", "default": "English", "enum": ["English", "Chinese"]},
+            {"name": "target_lang", "type": "string", "default": "Chinese", "enum": ["English", "Chinese"]},
+            {"name": "response_format", "type": "string", "default": "json", "enum": ["json", "text", "wav", "pcm"]},
+        ])
     return params
 
 
@@ -582,12 +588,16 @@ def _constraints(module, operation_id, path=""):
         limits["max_batch_items"] = 8 if module == "sound_fx" else 32
     if operation_id == "voice.clone":
         limits["reference_audio_seconds"] = {"minimum": 5, "maximum": 30}
+    if module == "s3_s2st" and operation_id == "audio.translate":
+        formats, rates = ["json", "text", "wav", "pcm"], [24000]
     return formats, rates, limits
 
 
 def describe_endpoint(module, cap, method, path, is_async):
     operation_id = _operation_id(module, cap, method, path)
     inputs, outputs = _modalities(operation_id)
+    if module == "s3_s2st" and operation_id == "audio.translate":
+        outputs = ["text", "audio"]
     formats, rates, limits = _constraints(module, operation_id, path)
     scope = "model"
     if operation_id.startswith("voice."):

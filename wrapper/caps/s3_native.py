@@ -1,10 +1,14 @@
 """Product file and process boundaries around the unchanged official S3 runner."""
+import atexit
 import json
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
+import wave
 import uuid
 
 
@@ -42,13 +46,76 @@ class OfficialEngine:
             )
             installed.write_text(release_id)
             shutil.rmtree(staged)
-        check = subprocess.run(
-            ["audio-python", "-c", "from vllm.engine.omnidrca2_engine import OmniDRCA2Engine; "
-             "import vllm; assert '/vendor/vllm/' in vllm.__file__; print(OmniDRCA2Engine.__module__)"],
-            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=120,
+        self._start()
+
+    def _start(self):
+        service = self.root / "services" / uuid.uuid4().hex
+        service.mkdir(parents=True)
+        boot = service / "bootstrap.wav"
+        with wave.open(str(boot), "wb") as wav:
+            wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            wav.writeframes(b"\x00" * 3200)
+        input_json = service / "input.jsonl"
+        self._make_input(boot, input_json, "English")
+        output = service / "output"
+        prepare = ["audio-python", str(self.root / "tools/infer.py"), "--mode", "streaming",
+                   "--preset", self.preset, "--model", str(self.root / "models/streaming"),
+                   "--input", str(input_json), "--output", str(output), "--gpu", "0",
+                   "--no-warmup", "--dry-run"]
+        self.log_path = service / "inference.log"
+        with self.log_path.open("w") as log:
+            subprocess.run(prepare, cwd=self.root, env=self.env, check=True,
+                           stdout=log, stderr=subprocess.STDOUT)
+        command = json.loads((output / "COMMAND.json").read_text())["command"]
+        config = self.env.copy()
+        config.update(
+            OMNIDRCA2_MODEL_DIR=str(self.root / "models/streaming"),
+            TUNE_ROOT=str(output), TUNE_CONFIG=str(output / "sampling.json"),
+            SINGLE_GPU_PHYSICAL_ID="0", SINGLE_CAPTURE_AUDIT=str(output / "hidden_audit.jsonl"),
+            S3_POLICY_CONFIG=str(output / "policy.json"), CODEX_TALKER_MAX_CODEC_TEXT_RATIO="0",
+            CODEX_AUDIO_BLANK_TOKEN_COUNT="5", CODEX_ALIGNMENT_MASK_TOKEN_ID="-60",
         )
-        if check.returncode:
-            raise RuntimeError("Official S3 engine import failed:\n" + check.stderr[-6000:])
+        for name, folder in {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor",
+                             "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
+                             "TORCH_EXTENSIONS_DIR": "torch_extensions"}.items():
+            config[name] = str(output / "cache" / folder)
+        config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2")
+        self.socket_path = str(service / "engine.sock")
+        ready = service / "ready.json"
+        worker_config = service / "worker.json"
+        worker_config.write_text(json.dumps({"command": command, "socket": self.socket_path,
+                                             "ready": str(ready)}))
+        worker = Path(__file__).with_name("s3_native_worker.py")
+        with self.log_path.open("a") as log:
+            self.process = subprocess.Popen(
+                ["audio-python", str(worker), str(worker_config)], cwd=self.root, env=config,
+                stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+        atexit.register(self.close)
+        deadline = time.monotonic() + 3300
+        while not ready.exists():
+            if self.process.poll() is not None:
+                raise RuntimeError("Official S3 startup failed:\n" + self.log_path.read_text()[-6000:])
+            if time.monotonic() > deadline:
+                self.close()
+                raise TimeoutError("Official S3 startup timed out; log: " + str(self.log_path))
+            time.sleep(0.5)
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait(timeout=5)
+
+    def _make_input(self, incoming, output, source):
+        subprocess.run(
+            ["audio-python", str(self.root / "tools/make_input.py"), "--audio", str(incoming),
+             "--direction", "zh2en" if source == "Chinese" else "en2zh", "--output", str(output)],
+            cwd=self.root, env=self.env, check=True, capture_output=True,
+        )
 
     def _environment(self):
         proc = subprocess.run(
@@ -66,42 +133,23 @@ class OfficialEngine:
             incoming = job / (job.name + ".wav")
             incoming.write_bytes(audio)
             input_json = job / "input.jsonl"
-            subprocess.run(
-                ["audio-python", str(self.root / "tools/make_input.py"), "--audio", str(incoming),
-                 "--direction", "zh2en" if source == "Chinese" else "en2zh", "--output", str(input_json)],
-                cwd=self.root, env=self.env, check=True, capture_output=True,
-            )
-            output = job / "output"
-            prepare = ["audio-python", str(self.root / "tools/infer.py"), "--mode", "streaming",
-                       "--preset", self.preset, "--model", str(self.root / "models/streaming"),
-                       "--input", str(input_json), "--output", str(output), "--gpu", "0",
-                       "--no-warmup", "--dry-run"]
-            with (job / "inference.log").open("w") as log:
-                subprocess.run(prepare, cwd=self.root, env=self.env, check=True,
-                               stdout=log, stderr=subprocess.STDOUT)
-                command = json.loads((output / "COMMAND.json").read_text())["command"]
-                config = self.env.copy()
-                config.update(
-                    OMNIDRCA2_MODEL_DIR=str(self.root / "models/streaming"),
-                    TUNE_ROOT=str(output), TUNE_CONFIG=str(output / "sampling.json"),
-                    SINGLE_GPU_PHYSICAL_ID="0", SINGLE_CAPTURE_AUDIT=str(output / "hidden_audit.jsonl"),
-                    S3_POLICY_CONFIG=str(output / "policy.json"), CODEX_TALKER_MAX_CODEC_TEXT_RATIO="0",
-                    CODEX_AUDIO_BLANK_TOKEN_COUNT="5", CODEX_ALIGNMENT_MASK_TOKEN_ID="-60",
-                )
-                for name, folder in {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor",
-                                     "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
-                                     "TORCH_EXTENSIONS_DIR": "torch_extensions"}.items():
-                    config[name] = str(output / "cache" / folder)
-                config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2")
-                proc = subprocess.run(command, cwd=self.root, env=config, stdout=log, stderr=subprocess.STDOUT)
-            if proc.returncode:
-                raise RuntimeError("Official S3 inference failed; log: " + str(job / "inference.log"))
-            rows = [json.loads(line) for line in (output / "raw.jsonl").read_text().splitlines() if line.strip()]
-            if len(rows) != 1 or rows[0].get("error"):
-                raise RuntimeError("Official S3 returned an incomplete or failed row: " + str(rows))
-            row = rows[0]
-            live = row.get("live_pcm") or {}
+            self._make_input(incoming, input_json, source)
+            row = json.loads(input_json.read_text().strip())
+            if self.process.poll() is not None:
+                raise RuntimeError("Official S3 worker stopped; log: " + str(self.log_path))
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(3300)
+                connection.connect(self.socket_path)
+                with connection.makefile("rwb") as channel:
+                    channel.write((json.dumps({"row": row}) + "\n").encode())
+                    channel.flush()
+                    response = json.loads(channel.readline())
+            if response.get("error"):
+                raise RuntimeError("Official S3 inference failed: " + response["error"])
+            result = response["result"]
+            live = result.get("live_pcm") or {}
             wav = Path(live.get("wav") or "")
             if not wav.is_file() or wav.suffix != ".wav":
                 raise RuntimeError("Official S3 did not produce its final WAV")
-            return row, wav.read_bytes()
+            (job / "result.json").write_text(json.dumps(result, ensure_ascii=False))
+            return result, wav.read_bytes()
