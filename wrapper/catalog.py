@@ -118,6 +118,7 @@ BASES = {
     "simuls2stov": [
         (("audio_s2s",), "simuls2st"),
     ],
+    "s3s2st": [(("audio_s2s",), "s3_s2st")],
     # audio_llm stays reserved until a base implements it.
 }
 
@@ -144,6 +145,7 @@ FAMILIES = {
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
     "simuls2st": "simuls2st-omni",
+    "s3_s2st": "s3-s2st",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -431,6 +433,10 @@ _MOUNTS[("simuls2st", "audio_s2s")] = [
      "Simultaneous speech-to-speech translation (English <-> Chinese, 24 kHz audio plus text)", True),
     ("WS", "/v1/audio/translations/stream",
      "Streaming speech-to-speech translation (16 kHz pcm in, 24 kHz pcm and text out)", False),
+]
+
+_MOUNTS[("s3_s2st", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations", "Official S3 Chinese/English speech translation with 24 kHz audio", True),
 ]
 
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
