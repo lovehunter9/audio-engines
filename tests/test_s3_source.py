@@ -21,7 +21,7 @@ class SourceLayoutTests(unittest.TestCase):
             _stage_source(source, target)
             self.assertEqual((target/neural.relative_to(source)).read_text(), neural.read_text())
             self.assertFalse((target/"models/weights.bin").exists())
-            self.assertEqual((target/".source-layout").read_text().strip(), "revision:3:native")
+            self.assertEqual((target/".source-layout").read_text().strip(), "revision:4:native")
 
     def test_compatibility_patch_change_refreshes_cached_sources(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -34,6 +34,19 @@ class SourceLayoutTests(unittest.TestCase):
             (source/"module.py").write_text("guarded optional registration")
             _stage_source(source, target)
             self.assertEqual((target/"module.py").read_text(), "guarded optional registration")
+
+    def test_kernel_manifest_refresh_removes_obsolete_cached_binaries(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, target = Path(temporary)/"source", Path(temporary)/"target"
+            (source/"vendor/runtime").mkdir(parents=True)
+            (source/"COMMIT").write_text("revision\n")
+            (source/"vendor/runtime/kernel.so").write_bytes(b"required kernel")
+            _stage_source(source, target)
+            (target/"vendor/runtime/unused.so").write_bytes(b"old optional kernel")
+            (source/"KERNELS.json").write_text('{"libraries":["kernel.so"]}')
+            _stage_source(source, target)
+            self.assertFalse((target/"vendor/runtime/unused.so").exists())
+            self.assertEqual((target/"vendor/runtime/kernel.so").read_bytes(), b"required kernel")
 
     def test_different_original_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

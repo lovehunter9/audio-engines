@@ -22,11 +22,12 @@ def _stage_source(source, root):
     layout = root / ".source-layout"
     if marker.exists() and marker.read_text().strip() != revision:
         raise RuntimeError("The application directory contains a different official S3 source revision")
-    patches = source / "PATCHES.json"
-    identity = hashlib.sha256(patches.read_bytes()).hexdigest() if patches.exists() else "native"
-    layout_id = revision + ":3:" + identity
+    identities = [(name, (source/name).read_bytes()) for name in ("PATCHES.json", "KERNELS.json") if (source/name).is_file()]
+    identity = hashlib.sha256(b"".join(name.encode()+b"\x00"+value for name, value in identities)).hexdigest() if identities else "native"
+    layout_id = revision + ":4:" + identity
     if not layout.exists() or layout.read_text().strip() != layout_id:
         root.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(root / "vendor", ignore_errors=True)
 
         def ignored(directory, names):
             excluded = {".git", "__pycache__"}
