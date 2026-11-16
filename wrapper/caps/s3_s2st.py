@@ -17,6 +17,7 @@ _runtime = Runtime(engine=None)
 _state = _runtime.state
 _args = EngineArgs()
 _PRESET = _args.text("--preset", "adaptive")
+_KV_GIB = _args.number("--kv-cache-gib", 0.5)
 _lock = threading.Lock()
 
 
@@ -37,7 +38,7 @@ def _boot():
         snapshot = snapshot_download(repo, local_files_only=True, allow_patterns=include, ignore_patterns=exclude)
         if _PRESET not in ("adaptive", "fixed-0.1", "fixed-0.5"):
             raise ValueError("--preset must be adaptive, fixed-0.1, or fixed-0.5")
-        _state.update(engine=OfficialEngine(snapshot, _PRESET), ready=True, error=None)
+        _state.update(engine=OfficialEngine(snapshot, _PRESET, kv_cache_gib=_KV_GIB), ready=True, error=None)
     except Exception as error:
         _state["error"] = hfgate.explain(_runtime.model_repo, error)
         log.exception("Official S3 runtime failed to initialize")

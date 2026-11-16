@@ -1,4 +1,5 @@
 """Keep the author's complete streaming runner resident behind a serial socket."""
+import importlib
 import json
 from pathlib import Path
 import signal
@@ -14,8 +15,9 @@ def serve(config_path):
     sys.path.insert(0, str(Path(command[1]).parent))
     sys.argv = command[1:] + ["--end", "0"]
     import numpy as np
-    import s3_syncgraphs_entry
-    module = s3_syncgraphs_entry.common.m
+    entry = importlib.import_module(Path(command[1]).stem)
+    entry = getattr(entry, "frozen", entry)
+    module = entry.common.m
     backend_type = module.StreamingS2STBackend
     encoder_type = module.s2tt.FullRecordEncoder
     resident = {}

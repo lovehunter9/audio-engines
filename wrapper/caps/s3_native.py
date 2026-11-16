@@ -39,10 +39,11 @@ def _stage_source(source, root):
 class OfficialEngine:
     sample_rate = 24000
 
-    def __init__(self, snapshot, preset="adaptive"):
+    def __init__(self, snapshot, preset="adaptive", kv_cache_gib=0.5):
         self.source = Path("/opt/s3")
         self.root = Path(tempfile.gettempdir()) / "s3-official"
         self.preset = preset
+        self.kv_cache_gib = float(kv_cache_gib)
         self.lock = threading.Lock()
         _stage_source(self.source, self.root)
         self.env = self._environment()
@@ -81,7 +82,7 @@ class OfficialEngine:
         prepare = ["audio-python", str(self.root / "tools/infer.py"), "--mode", "streaming",
                    "--preset", self.preset, "--model", str(self.root / "models/streaming"),
                    "--input", str(input_json), "--output", str(output), "--gpu", "0",
-                   "--no-warmup", "--dry-run"]
+                   "--no-warmup", "--dry-run", "--kv-cache-gib", str(self.kv_cache_gib)]
         self.log_path = service / "inference.log"
         with self.log_path.open("w") as log:
             subprocess.run(prepare, cwd=self.root, env=self.env, check=True,
@@ -94,6 +95,7 @@ class OfficialEngine:
             SINGLE_GPU_PHYSICAL_ID="0", SINGLE_CAPTURE_AUDIT=str(output / "hidden_audit.jsonl"),
             S3_POLICY_CONFIG=str(output / "policy.json"), CODEX_TALKER_MAX_CODEC_TEXT_RATIO="0",
             CODEX_AUDIO_BLANK_TOKEN_COUNT="5", CODEX_ALIGNMENT_MASK_TOKEN_ID="-60",
+            FLEURS_KV_CACHE_BYTES=str(int(self.kv_cache_gib * 1024**3)),
         )
         for name, folder in {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor",
                              "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
