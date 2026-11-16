@@ -1,0 +1,134 @@
+"""Stage the installed S3 runtime independently of the CUDA development image."""
+from pathlib import Path
+import hashlib
+import json
+import os
+import shutil
+import site
+import subprocess
+from collections import deque
+
+root = Path('/opt/s3-runtime')
+python = root / 'site'
+libs = root / 'lib'
+python.mkdir(parents=True, exist_ok=True)
+libs.mkdir(exist_ok=True)
+locations = [Path(p) for p in site.getsitepackages() if Path(p).is_dir()]
+for location in reversed(locations):
+    shutil.copytree(location, python, dirs_exist_ok=True, symlinks=True,
+                    ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+for pattern in ('flashinfer_jit_cache*', '__pycache__'):
+    for unused in python.glob(pattern):
+        if unused.is_dir():
+            shutil.rmtree(unused)
+
+cuda = root / 'cuda'
+cuda_source = Path('/usr/local/cuda').resolve()
+for name in ('bin', 'include', 'nvvm'):
+    shutil.copytree(cuda_source / name, cuda / name, symlinks=False, dirs_exist_ok=True)
+for target in (cuda_source / 'targets').iterdir():
+    if not target.is_dir():
+        continue
+    shutil.copytree(target / 'include', cuda / 'targets' / target.name / 'include', symlinks=False, dirs_exist_ok=True)
+    destination = cuda / 'targets' / target.name / 'lib'
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ('libcudadevrt.a', 'libcudart_static.a', 'libculibos.a'):
+        if (target / 'lib' / name).is_file():
+            shutil.copy2(target / 'lib' / name, destination / name)
+    for library in (target / 'lib').glob('libcudart.so*'):
+        if library.is_file():
+            shutil.copy2(library, destination / library.name)
+    (cuda / 'lib64').symlink_to(destination.relative_to(cuda))
+    stub = target / 'lib/stubs/libcuda.so'
+    if stub.is_file():
+        (destination / 'stubs').mkdir(exist_ok=True)
+        shutil.copy2(stub, destination / 'stubs/libcuda.so')
+
+for path in python.rglob('*'):
+    if path.is_symlink() and os.path.isabs(os.readlink(path)):
+        original = Path(os.readlink(path))
+        for location in locations:
+            if original.is_relative_to(location):
+                target = python / original.relative_to(location)
+                path.unlink()
+                path.symlink_to(target)
+                break
+seeds = []
+for package in ('torch', 'torchaudio', 'torchvision', 'torchcodec', 'vllm'):
+    seeds.extend(p for p in (python / package).rglob('*.so*') if p.is_file())
+queue = deque(seeds)
+seen = set()
+collected = []
+
+
+def collect_library(original):
+    dependency = original.resolve()
+    canonical = libs / dependency.name
+    if not canonical.exists():
+        shutil.copy2(dependency, canonical)
+        collected.append(str(dependency))
+        queue.append(dependency)
+    alias = libs / original.name
+    if alias != canonical and not alias.exists():
+        alias.symlink_to(canonical.name)
+
+
+for directory in [Path('/usr/local/cuda/lib64'), *Path('/usr/local').glob('cuda-*/targets/*/lib')]:
+    if not directory.is_dir():
+        continue
+    for pattern in ('libcudnn*.so*', 'libnvrtc-builtins.so*'):
+        for dependency in directory.glob(pattern):
+            if dependency.is_file():
+                collect_library(dependency)
+while queue:
+    path = queue.popleft().resolve()
+    if path in seen:
+        continue
+    seen.add(path)
+    result = subprocess.run(['ldd', str(path)], capture_output=True, text=True)
+    for line in result.stdout.splitlines():
+        if '=>' not in line:
+            continue
+        parts = line.split('=>', 1)[1].strip().split()
+        if not parts or not parts[0].startswith('/'):
+            continue
+        original = Path(parts[0])
+        dependency = original.resolve()
+        if not dependency.exists():
+            continue
+        if dependency.name.startswith(("libcuda.so", "libnvidia-ml.so")):
+            continue
+        if any(dependency.is_relative_to(location) for location in locations):
+            continue
+        if dependency.is_relative_to(python):
+            continue
+        if str(dependency).startswith(('/usr/local/cuda', '/usr/local/lib')):
+            collect_library(original)
+source = Path('/opt/s3')
+subprocess.run(['git', '-C', str(source), 'diff', '--exit-code', 'HEAD'], check=True)
+for path in source.rglob('*.so'):
+    if path.is_symlink():
+        data = path.resolve()
+        path.unlink()
+        shutil.copy2(data, path)
+shutil.rmtree(source / '.git', ignore_errors=True)
+shutil.rmtree(python / 'vllm', ignore_errors=True)
+
+def size(path):
+    return sum(p.stat().st_size for p in path.rglob('*') if p.is_file() and not p.is_symlink())
+
+packages = sorted([{'name':p.name,'bytes':size(p)} for p in python.iterdir() if p.is_dir()],
+                  key=lambda x:x['bytes'], reverse=True)
+report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),'jit_toolchain_bytes':size(cuda),
+          'largest_packages':packages[:35], 'preserved_external_libraries':collected,
+          'original_source_revision':(source/'COMMIT').read_text().strip(),
+          'tracked_source_unmodified':True}
+(root/'MANIFEST.json').write_text(json.dumps(report, indent=2))
+print(json.dumps(report, indent=2))
+for record in json.loads((source/'KERNELS.json').read_text())['libraries']:
+    path = source / 'vendor/vllm' / record['path']
+    with path.open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if digest != record['sha256']:
+        raise RuntimeError("The original compiled dependency changed: " + record['path'])
+print("Original compiled dependency hashes verified")

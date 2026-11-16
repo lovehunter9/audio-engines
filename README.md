@@ -246,6 +246,8 @@ passes. For the same reason the build's final import check must go **through**
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
+| `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Official S3-S2ST CUDA file runner; native-kernel compatibility pending | in progress |
+| `s3s2stov` | `beclab/audio-s3-s2st-ov` | `audio_s2s` | Original S3 graphs and streaming policy on OpenVINO GPU (amd64); validation pending | in progress |
 | `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64, English and Chinese) | in progress |
 | `simuls2stov` | `beclab/audio-simuls2st-ov` | `audio_s2s` | SimulS2ST-Omni on OpenVINO GPU (amd64, iGPU and Arc); same HTTP as `simuls2st` | in progress |
 
@@ -772,3 +774,7 @@ builder; see the `EXTRA` hook in the `Makefile`.
    Park a non-listing base by commenting out its `on` triggers (leave `speakrs`
    live).
 5. Update the **Bases** table above.
+
+### S3 official runtime integration
+
+The wrapper stages the verified streaming release and invokes the pinned author runtime without changing its source. It uses the author launcher dry run to obtain the complete command and policy, then runs that command directly. This avoids the outer launcher's whole-device idle check on a shared GPU. A serial resident service initializes the original encoder and backend through the author entry point and reuses the unchanged per-record evaluation and finalization functions. The HTTP endpoint accepts complete audio files; live microphone input is not claimed. The vLLM binary dependency is the public 0.11.1 build on PyTorch 2.9, not the unavailable author reference build; native import and inference must validate compatibility.
