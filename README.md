@@ -246,7 +246,11 @@ passes. For the same reason the build's final import check must go **through**
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
-| `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64, English and Chinese) | in progress |
+| `seamless` | `beclab/audio-seamless` | `audio_s2s` | Original Meta SeamlessStreaming agent, CUDA amd64/arm64 | in progress |
+| `seamlessov` | `beclab/audio-seamless-ov` | `audio_s2s` | Meta streaming policies with all neural graphs on OpenVINO GPU; validation pending | in progress |
+| `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Official S3-S2ST CUDA runner with file and duplex PCM boundaries; validation pending | in progress |
+| `s3s2stov` | `beclab/audio-s3-s2st-ov` | `audio_s2s` | Original S3 graphs and streaming policy on OpenVINO GPU (amd64); validation pending | in progress |
+| `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64/arm64, English and Chinese) | in progress |
 | `simuls2stov` | `beclab/audio-simuls2st-ov` | `audio_s2s` | SimulS2ST-Omni on OpenVINO GPU (amd64, iGPU and Arc); same HTTP as `simuls2st` | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
@@ -678,7 +682,7 @@ Vocos ISTFT and audio encoders stay on CPU. The official chunked decoding loop
 is preserved, including its upstream speech-boundary artifacts; the wrapper
 adds no waveform trimming or prompt-frame correction.
 
-**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64. One load runs the thinker,
+**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64/arm64. One load runs the thinker,
 the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the
 Qwen2.5-Omni base, `simuls2st_adapter/` is the LoRA, and `voicebox/`, `dualcodec/`,
 `w2v/` are the waveform path. `POST /v1/audio/translations` runs the official streaming
@@ -772,3 +776,15 @@ builder; see the `EXTRA` hook in the `Makefile`.
    Park a non-listing base by commenting out its `on` triggers (leave `speakrs`
    live).
 5. Update the **Bases** table above.
+
+### S3 official runtime integration
+
+The wrapper stages the pinned streaming release and obtains its complete command and policy through the author launcher dry run. A resident service reuses the original per-record evaluator, source-prefix controller, model definitions and finalizer. CUDA uses the native in-process vLLM executor; its asynchronous adapter passes original requests and tensors without CUDA IPC. Compatibility changes cover optional kernel registration, checkpoint deserialization and binary ABI dependencies; they are recorded with source hashes. The public vLLM 0.11.1 kernels on PyTorch 2.9 replace the unavailable author reference build, so real native inference is required in addition to import checks.
+
+`POST /v1/audio/translations` accepts complete files. `WS /v1/audio/translations/stream` accepts 16 kHz mono PCM16 after the ready message and a source/target language configuration; it emits translated text and 24 kHz PCM16 as the original acoustic decoder produces them. Send an `end` event at source EOF. The live source boundary waits for the original closed block plus lookahead, preserving final-block detection without invented audio. Sessions are serialized, and disconnects cancel pending source reads. CUDA and OpenVINO use the same transport protocol; all OpenVINO neural graphs and audio features compile for GPU.
+
+OpenVINO exports the original FM conditioning and one Euler body separately, then runs all ten original CFG steps on GPU with device tensor state. This avoids unrolling ten acoustic passes into a single GPU graph; model weights, cosine time intervals, seed-0 noise and finalization are preserved. Only loop dispatch and discrete token transport run on the host.
+
+### SeamlessStreaming source segments
+
+SeamlessStreaming keeps the native 320 ms source segments on CUDA. OpenVINO uses 1280 ms segments to reduce repeated full-prefix encoding; this can delay the first source update by up to 960 ms. Set `ENGINE_ARGS="--source-chunk-ms 320"` to use the native evaluation segment size, or select 640, 1280, or 2560 ms. Model weights and agent policies are unchanged.
