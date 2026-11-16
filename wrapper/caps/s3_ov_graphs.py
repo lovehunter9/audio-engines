@@ -17,7 +17,7 @@ def compile_gpu(path, *, precision="f32"):
     return compiled
 
 
-def export_module(module, example, shapes, target, *, source, precision="f32"):
+def export_module(module, example, shapes, target, *, source, precision="f32", prepare_only=False):
     import openvino as ov
     import torch
     target = Path(target)
@@ -37,15 +37,15 @@ def export_module(module, example, shapes, target, *, source, precision="f32"):
         gc.collect()
     elif json.loads((target / "source.json").read_text()) != source:
         raise RuntimeError("S3 OpenVINO graph source identity differs from the current original module")
-    return compile_gpu(graph, precision=precision)
+    return graph if prepare_only else compile_gpu(graph, precision=precision)
 
 
-def export_audio_encoder(source_root, model_dir, target):
+def export_audio_encoder(source_root, model_dir, target, *, prepare_only=False):
     import torch
     from .s3_ov_source import load_audio_encoder
     module, evidence = load_audio_encoder(source_root, model_dir)
     example = (torch.zeros(1, 128, 96), torch.tensor([96], dtype=torch.int64))
-    compiled = export_module(module, example, [[1, 128, -1], [1]], target, source=evidence)
+    compiled = export_module(module, example, [[1, 128, -1], [1]], target, source=evidence, prepare_only=prepare_only)
     del module
     gc.collect()
     return compiled, evidence

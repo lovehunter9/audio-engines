@@ -254,7 +254,7 @@ class OpenVINOEngine(OfficialEngine):
     def _start(self):
         import torch
         torch.set_num_threads(4)
-        from .s3_ov_graphs import export_audio_encoder
+        from .s3_ov_graphs import compile_gpu, export_audio_encoder
         from .s3_ov_llm import Thinker
         from .s3_ov_talker import Talker
         from .s3_ov_pcm import PCMRuntime
@@ -262,6 +262,8 @@ class OpenVINOEngine(OfficialEngine):
         cache = self.root / "cache/openvino"
         Thinker(self.root/"models/streaming", cache/"thinker", prepare_only=True)
         Talker(self.root/"models/streaming", cache/"talker", prepare_only=True)
+        encoder_graph, evidence = export_audio_encoder(
+            self.root, self.root/"models/streaming", cache/"encoder", prepare_only=True)
         self.core, stream, finalizer = _record_functions(self.root)
         policies = {"adaptive":(.1,.99,.5),"fixed-0.1":(.1,.1,1.),"fixed-0.5":(.5,.5,1.)}
         base, cap, power = policies[self.preset]
@@ -273,7 +275,7 @@ class OpenVINOEngine(OfficialEngine):
         pcm = PCMRuntime(self.root/'pcm', "GPU", config, source_root=self.root, graph_root=cache/'pcm')
         thinker = Thinker(self.root/'models/streaming',cache/'thinker')
         talker = Talker(self.root/'models/streaming',cache/'talker')
-        compiled, evidence = export_audio_encoder(self.root,self.root/'models/streaming',cache/'encoder')
+        compiled = compile_gpu(encoder_graph)
         self.encoder = AudioEncoder(self.root,compiled,pcm,stream)
         self.backend = Backend(thinker,talker,pcm,finalizer)
         self.args = SimpleNamespace(encoder_chunk_ms=640.,audio_sample_rate=16000)
