@@ -105,7 +105,9 @@ class OfficialEngine:
         for name, folder in {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor",
                              "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
                              "TORCH_EXTENSIONS_DIR": "torch_extensions"}.items():
-            config[name] = str(self.root / "cache/runtime" / folder)
+            cache = self.root / "cache/runtime" / folder
+            cache.mkdir(parents=True, exist_ok=True)
+            config[name] = str(cache)
         config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2",
                       S3_NATIVE_OVERRIDE_DIR=str(self.root / "inference/streaming/vllm_overrides"))
         self.socket_path = str(service / "engine.sock")
