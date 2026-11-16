@@ -1,6 +1,8 @@
 """Bound checkpoint deserialization memory without changing GPU inference."""
 import hashlib
 import json
+import threading
+import uuid
 from pathlib import Path
 
 
@@ -42,22 +44,44 @@ def _reduce_staged_tensor(value):
     return _rebuild_staged_tensor, (payload, tuple(value.shape), value.dtype, 0, 0, 0, value.device.index or 0)
 
 
+_local_payloads = {}
+_local_lock = threading.Lock()
+
+
+def _rebuild_local_tensor(key, unused_a, unused_b, unused_c, unused_d, unused_e, device):
+    with _local_lock:
+        tensor = _local_payloads.pop(key)
+    if tensor.device.index != int(device):
+        raise RuntimeError("Original S3 CUDA transport changed devices")
+    return tensor
+
+
+def _reduce_local_tensor(value):
+    if not value.is_cuda:
+        return _original_reduce(value)
+    key = uuid.uuid4().hex
+    with _local_lock:
+        _local_payloads[key] = value
+    return _rebuild_local_tensor, (key, 0, 0, 0, 0, 0, value.device.index or 0)
+
+
 def install_worker_compat():
     import importlib
     import os
     import sys
     import s3_runtime_plugin
     s3_runtime_plugin.register()
-    if os.environ.get("S3_NATIVE_TRANSPORT") == "host":
+    if os.environ.get("S3_NATIVE_TRANSPORT") in ("host", "local"):
         from torch.multiprocessing import reductions
         global _original_reduce
         _original_reduce = getattr(reductions, "_s3_original_reduce", reductions.reduce_tensor)
         reductions._s3_original_reduce = _original_reduce
-        reductions.reduce_tensor = _reduce_staged_tensor
+        reduce = _reduce_local_tensor if os.environ["S3_NATIVE_TRANSPORT"] == "local" else _reduce_staged_tensor
+        reductions.reduce_tensor = reduce
         for name in ("gpu_transport_entry", "gpu_native_entry", "prefix_gpu_entry", "capture_gpu_entry", "capture_gpu_worker", "prefix_gpu_worker"):
             module = sys.modules.get(name)
             if module is not None and hasattr(module, "reduce_tensor"):
-                module.reduce_tensor = _reduce_staged_tensor
+                module.reduce_tensor = reduce
     importlib.import_module("s3_syncgraphs_entry")
     from single_gpu_worker import install_model_hooks
     install_model_hooks()

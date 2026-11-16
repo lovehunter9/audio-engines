@@ -109,12 +109,7 @@ class OfficialEngine:
                       S3_NATIVE_OVERRIDE_DIR=str(self.root / "inference/streaming/vllm_overrides"))
         self.socket_path = str(service / "engine.sock")
         ready = service / "ready.json"
-        with self.log_path.open("a") as log:
-            probe = subprocess.run(["audio-python", "-m", "wrapper.caps.s3_native_compat", "--probe-cuda-ipc"],
-                                   cwd=self.root, env=config, stdout=log, stderr=subprocess.STDOUT, timeout=60)
-        if probe.returncode not in (0, 78):
-            raise RuntimeError("Native CUDA IPC capability probe failed: " + str(self.log_path))
-        config["S3_NATIVE_TRANSPORT"] = "cuda" if probe.returncode == 0 else "host"
+        config["S3_NATIVE_TRANSPORT"] = "local"
         worker_config = service / "worker.json"
         worker_config.write_text(json.dumps({"command": command, "socket": self.socket_path,
                                              "ready": str(ready)}))

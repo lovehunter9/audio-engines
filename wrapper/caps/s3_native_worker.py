@@ -18,6 +18,10 @@ def serve(config_path):
     entry = importlib.import_module(Path(command[1]).stem)
     entry = getattr(entry, "frozen", entry)
     module = entry.common.m
+    import os
+    os.environ["S3_NATIVE_TRANSPORT"] = "local"
+    from .s3_inproc import install
+    install()
     from .s3_native_compat import install_worker_compat
     install_worker_compat()
     from vllm.engine.arg_utils import AsyncEngineArgs
@@ -41,6 +45,8 @@ def serve(config_path):
     class Backend(backend_type):
         def __init__(self, args):
             super().__init__(args)
+            from .s3_inproc import use_original_eager_pcm
+            use_original_eager_pcm(self.pcm)
             resident.update(backend=self, args=args)
 
         def close(self):
