@@ -27,7 +27,7 @@ def _record_functions(root):
                  "json": json, "hashlib": hashlib, "time": time, "re": re,
                  "load_audio_text_image_video": read_audio, "OmniDRCA2Engine": object}
     core = definitions(root / "inference/streaming/streaming_core.py",
-                       ["evaluate_one_streaming_thinker_deferred_talker", "FullRecordEncoder"], namespace)
+                       ["evaluate_one_streaming_thinker_deferred_talker"], namespace)
     core.STREAMING_LOOKAHEAD_MS = 162.5
     stream = definitions(root / "inference/streaming/run_block640_lookahead160.py",
                          ["_stream_prefixes"], namespace)
