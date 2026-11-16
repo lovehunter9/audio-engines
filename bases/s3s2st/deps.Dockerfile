@@ -60,6 +60,9 @@ RUN python3 /opt/link_s3_kernels.py \
 COPY bases/s3s2st/collect_runtime.py /opt/collect_s3_runtime.py
 RUN python3 /opt/collect_s3_runtime.py
 
+COPY bases/runtime/split_layers.py /opt/split_runtime.py
+RUN python3 /opt/split_runtime.py /opt/s3-runtime
+
 FROM ubuntu:24.04 AS release
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/s3-runtime/site \
@@ -73,7 +76,23 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python \
     && python3 -c "import pathlib, site; p = pathlib.Path(site.getsitepackages()[0]); p.mkdir(parents=True, exist_ok=True); p.joinpath('s3_runtime.pth').write_text(\"import site; site.addsitedir('/opt/s3-runtime/site')\\n\")"
-COPY --from=build /opt/s3-runtime /opt/s3-runtime
+COPY --from=build /opt/runtime-parts/00/ /
+COPY --from=build /opt/runtime-parts/01/ /
+COPY --from=build /opt/runtime-parts/02/ /
+COPY --from=build /opt/runtime-parts/03/ /
+COPY --from=build /opt/runtime-parts/04/ /
+COPY --from=build /opt/runtime-parts/05/ /
+COPY --from=build /opt/runtime-parts/06/ /
+COPY --from=build /opt/runtime-parts/07/ /
+COPY --from=build /opt/runtime-parts/08/ /
+COPY --from=build /opt/runtime-parts/09/ /
+COPY --from=build /opt/runtime-parts/10/ /
+COPY --from=build /opt/runtime-parts/11/ /
+COPY --from=build /opt/runtime-parts/12/ /
+COPY --from=build /opt/runtime-parts/13/ /
+COPY --from=build /opt/runtime-parts/14/ /
+COPY --from=build /opt/runtime-parts/15/ /
+COPY --from=build /opt/runtime-layout.json /opt/runtime-layout.json
 COPY --from=build /opt/s3 /opt/s3
 RUN printf '%s\n' /opt/s3-runtime/lib > /etc/ld.so.conf.d/s3-runtime.conf && ldconfig
 COPY bases/s3s2st/probe_runtime.py /opt/probe_s3_runtime.py

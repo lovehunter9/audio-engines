@@ -55,12 +55,31 @@ RUN export LD_LIBRARY_PATH="$(python3 -c 'import site,pathlib; p=pathlib.Path(si
     && rm -rf /opt/fairseq2 /opt/seamless/.git \
     && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
+COPY bases/runtime/split_layers.py /opt/split_runtime.py
+RUN python3 /opt/split_runtime.py /usr/local/lib/python3.12
+
 FROM ${TARGETARCH}-release AS release
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 RUN apt-get update && apt-get install -y --no-install-recommends python3 ffmpeg libsndfile1 libtbb12 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
-COPY --from=build /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=build /opt/runtime-parts/00/ /
+COPY --from=build /opt/runtime-parts/01/ /
+COPY --from=build /opt/runtime-parts/02/ /
+COPY --from=build /opt/runtime-parts/03/ /
+COPY --from=build /opt/runtime-parts/04/ /
+COPY --from=build /opt/runtime-parts/05/ /
+COPY --from=build /opt/runtime-parts/06/ /
+COPY --from=build /opt/runtime-parts/07/ /
+COPY --from=build /opt/runtime-parts/08/ /
+COPY --from=build /opt/runtime-parts/09/ /
+COPY --from=build /opt/runtime-parts/10/ /
+COPY --from=build /opt/runtime-parts/11/ /
+COPY --from=build /opt/runtime-parts/12/ /
+COPY --from=build /opt/runtime-parts/13/ /
+COPY --from=build /opt/runtime-parts/14/ /
+COPY --from=build /opt/runtime-parts/15/ /
+COPY --from=build /opt/runtime-layout.json /opt/runtime-layout.json
 COPY --from=build /opt/cuda-stubs /usr/local/lib
 COPY --from=build /opt/seamless/COMMIT /opt/seamless/COMMIT
 RUN ldconfig \

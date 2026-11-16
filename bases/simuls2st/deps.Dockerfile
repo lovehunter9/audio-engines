@@ -44,11 +44,30 @@ RUN set -eux; \
 RUN python3 -m pip install --no-cache-dir "setuptools==80.10.2" \
     && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
+COPY bases/runtime/split_layers.py /opt/split_runtime.py
+RUN python3 /opt/split_runtime.py /usr/local/lib/python3.12
+
 FROM ${TARGETARCH} AS release
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
     SIMULS2ST_ROOT=/opt/simuls2st
-COPY --from=build /usr/local/lib/python3.12 /usr/local/lib/python3.12
+COPY --from=build /opt/runtime-parts/00/ /
+COPY --from=build /opt/runtime-parts/01/ /
+COPY --from=build /opt/runtime-parts/02/ /
+COPY --from=build /opt/runtime-parts/03/ /
+COPY --from=build /opt/runtime-parts/04/ /
+COPY --from=build /opt/runtime-parts/05/ /
+COPY --from=build /opt/runtime-parts/06/ /
+COPY --from=build /opt/runtime-parts/07/ /
+COPY --from=build /opt/runtime-parts/08/ /
+COPY --from=build /opt/runtime-parts/09/ /
+COPY --from=build /opt/runtime-parts/10/ /
+COPY --from=build /opt/runtime-parts/11/ /
+COPY --from=build /opt/runtime-parts/12/ /
+COPY --from=build /opt/runtime-parts/13/ /
+COPY --from=build /opt/runtime-parts/14/ /
+COPY --from=build /opt/runtime-parts/15/ /
+COPY --from=build /opt/runtime-layout.json /opt/runtime-layout.json
 COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
 COPY --from=build /opt/simuls2st /opt/simuls2st
 RUN set -eux; \
