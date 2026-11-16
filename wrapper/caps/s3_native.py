@@ -1,5 +1,6 @@
 """Product file and process boundaries around the unchanged official S3 runner."""
 import atexit
+import base64
 import hashlib
 import json
 import os
@@ -104,7 +105,7 @@ class OfficialEngine:
         for name, folder in {"TRITON_CACHE_DIR": "triton", "TORCHINDUCTOR_CACHE_DIR": "inductor",
                              "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
                              "TORCH_EXTENSIONS_DIR": "torch_extensions"}.items():
-            config[name] = str(output / "cache" / folder)
+            config[name] = str(self.root / "cache/runtime" / folder)
         config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2",
                       S3_NATIVE_OVERRIDE_DIR=str(self.root / "inference/streaming/vllm_overrides"))
         self.socket_path = str(service / "engine.sock")
@@ -191,3 +192,62 @@ class OfficialEngine:
                 raise RuntimeError("Official S3 did not produce its final WAV")
             (job / "result.json").write_text(json.dumps(result, ensure_ascii=False))
             return result, wav.read_bytes()
+
+
+    def translate_live(self, incoming, source, target, callback):
+        if (source, target) not in (("Chinese", "English"), ("English", "Chinese")):
+            raise ValueError("S3 supports Chinese/English bidirectional translation")
+        with self.lock:
+            job = self.root/"requests"/uuid.uuid4().hex
+            job.mkdir(parents=True)
+            bootstrap = job/"source.wav"
+            with wave.open(str(bootstrap), "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                wav.writeframes(b"\x00"*3200)
+            index = job/"input.jsonl"
+            self._make_input(bootstrap, index, source)
+            row = json.loads(index.read_text())
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+                connection.settimeout(3300)
+                connection.connect(self.socket_path)
+                with connection.makefile("rwb") as channel:
+                    channel.write((json.dumps({"row": row, "stream": True})+"\n").encode())
+                    channel.flush()
+                    def send_input():
+                        try:
+                            with wave.open(str(job/"input.wav"), "wb") as wav:
+                                wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                                while True:
+                                    data = incoming.read()
+                                    if data is None:
+                                        channel.write(b'{"event":"end"}\n')
+                                        channel.flush()
+                                        return
+                                    wav.writeframes(data)
+                                    channel.write((json.dumps({"audio": base64.b64encode(data).decode()})+"\n").encode())
+                                    channel.flush()
+                        except Exception:
+                            try:
+                                channel.write(b'{"event":"cancel"}\n')
+                                channel.flush()
+                            except (OSError, ValueError):
+                                pass
+                    sender = threading.Thread(target=send_input, daemon=True)
+                    sender.start()
+                    try:
+                        while True:
+                            line = channel.readline()
+                            if not line:
+                                raise RuntimeError("Original S3 worker disconnected")
+                            response = json.loads(line)
+                            if "error" in response:
+                                raise RuntimeError(response["error"])
+                            if "result" in response:
+                                (job/"result.json").write_text(json.dumps(response["result"], ensure_ascii=False))
+                                return response["result"]
+                            kind = response["event"]
+                            value = base64.b64decode(response["data"]) if kind == "audio" else response["data"]
+                            callback(kind, value)
+                    finally:
+                        incoming.cancel()
+                        sender.join(timeout=5)

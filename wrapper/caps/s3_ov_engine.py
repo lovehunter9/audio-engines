@@ -60,6 +60,10 @@ class AudioEncoder:
         return torch.from_numpy(embeds[0, :length]).to(torch.bfloat16).contiguous()
 
     def stream_prefixes(self, wave, chunk_samples, lookahead_samples):
+        live = getattr(self, "live_wave", None)
+        if live is not None:
+            wave = live
+            wave.configure(chunk_samples, lookahead_samples)
         self.wave = wave
         return self._stream(self, wave, chunk_samples, lookahead_samples)
 
@@ -304,3 +308,46 @@ class OpenVINOEngine(OfficialEngine):
             wav = Path(result['live_pcm']['wav'])
             (job/'result.json').write_text(json.dumps(result,ensure_ascii=False))
             return result,wav.read_bytes()
+
+
+    def translate_live(self, incoming, source, target, callback):
+        import io
+        import threading
+        import wave as wavefile
+        from .s3_live import LiveWave, observe_pcm
+        live = LiveWave()
+        def receive():
+            try:
+                while True:
+                    packet = incoming.read()
+                    if packet is None:
+                        live.finish()
+                        return
+                    live.append(np.frombuffer(packet, dtype="<i2").astype(np.float32)/32768.)
+            except Exception as error:
+                live.cancel(error)
+        receiver = threading.Thread(target=receive, daemon=True)
+        original_text = self.backend.generate_text
+        original_decode = observe_pcm(self.backend.pcm, callback)
+        def generate_text(*args, **kwargs):
+            text = original_text(*args, **kwargs)
+            if text:
+                callback("text", text)
+            return text
+        self.backend.generate_text = generate_text
+        self.encoder.live_wave = live
+        receiver.start()
+        try:
+            bootstrap = io.BytesIO()
+            with wavefile.open(bootstrap, "wb") as wav:
+                wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                wav.writeframes(b"\x00"*3200)
+            result, _ = self.translate(bootstrap.getvalue(), source, target)
+            return result
+        finally:
+            live.cancel()
+            incoming.cancel()
+            receiver.join(timeout=5)
+            self.encoder.live_wave = None
+            self.backend.generate_text = original_text
+            self.backend.pcm.decode = original_decode

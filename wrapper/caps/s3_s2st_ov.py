@@ -35,4 +35,4 @@ def build_app(supports):
 
 
 def run(supports):
-    _runtime.serve(supports, _boot, build_app, "S3 OpenVINO GPU", timeout_s=3600)
+    _runtime.serve(supports, _boot, build_app, "S3 OpenVINO GPU", timeout_s=3600, disable_ws_ping=True)

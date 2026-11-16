@@ -92,6 +92,8 @@ def build_app_for(runtime, args, supports, module, lock):
 
         return await tasks.dispatch(request.query_params.get("async"), "audio_s2s",
                                     runtime.model_name, work, fail="official translation failed")
+    from .s3_live import mount_stream
+    mount_stream(app, runtime, lock, _language)
     return app
 
 
@@ -101,4 +103,4 @@ def build_app(supports):
 
 
 def run(supports):
-    _runtime.serve(supports, _boot, build_app, "S3 official runtime", timeout_s=3600)
+    _runtime.serve(supports, _boot, build_app, "S3 official runtime", timeout_s=3600, disable_ws_ping=True)

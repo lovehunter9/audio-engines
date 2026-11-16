@@ -447,6 +447,7 @@ _MOUNTS[("seamless", "audio_s2s")] = [
 
 _MOUNTS[("s3_s2st", "audio_s2s")] = [
     ("POST", "/v1/audio/translations", "Official S3 Chinese/English speech translation with 24 kHz audio", True),
+    ("WS", "/v1/audio/translations/stream", "Official causal source prefixes, 16 kHz PCM input and 24 kHz PCM output", False),
 ]
 
 _MOUNTS[("s3_s2st_ov", "audio_s2s")] = list(_MOUNTS[("s3_s2st", "audio_s2s")])
@@ -576,7 +577,7 @@ def _parameters(module, operation_id, path=""):
             {"name": "style", "type": "number", "default": 0.0, "minimum": 0.0, "maximum": 1.0},
             {"name": "use_speaker_boost", "type": "boolean", "default": True},
         ])
-    if module in ("s3_s2st", "s3_s2st_ov") and operation_id == "audio.translate":
+    if module in ("s3_s2st", "s3_s2st_ov") and operation_id.startswith("audio.translate"):
         params.extend([
             {"name": "source_lang", "type": "string", "default": "English", "enum": ["English", "Chinese"]},
             {"name": "target_lang", "type": "string", "default": "Chinese", "enum": ["English", "Chinese"]},
@@ -600,7 +601,7 @@ def _constraints(module, operation_id, path=""):
         limits["max_batch_items"] = 8 if module == "sound_fx" else 32
     if operation_id == "voice.clone":
         limits["reference_audio_seconds"] = {"minimum": 5, "maximum": 30}
-    if module in ("s3_s2st", "s3_s2st_ov") and operation_id == "audio.translate":
+    if module in ("s3_s2st", "s3_s2st_ov") and operation_id.startswith("audio.translate"):
         formats, rates = ["json", "text", "wav", "pcm"], [24000]
     return formats, rates, limits
 
@@ -608,7 +609,7 @@ def _constraints(module, operation_id, path=""):
 def describe_endpoint(module, cap, method, path, is_async):
     operation_id = _operation_id(module, cap, method, path)
     inputs, outputs = _modalities(operation_id)
-    if module in ("s3_s2st", "s3_s2st_ov") and operation_id == "audio.translate":
+    if module in ("s3_s2st", "s3_s2st_ov") and operation_id.startswith("audio.translate"):
         outputs = ["text", "audio"]
     formats, rates, limits = _constraints(module, operation_id, path)
     scope = "model"

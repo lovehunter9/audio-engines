@@ -29,21 +29,6 @@ def prepare_checkpoint_loader(root):
 _original_reduce = None
 
 
-def _rebuild_staged_tensor(payload, shape, dtype, unused_a, unused_b, unused_c, device):
-    import torch
-    host = torch.frombuffer(bytearray(payload), dtype=torch.uint8).view(dtype).reshape(shape)
-    return host.to(device=torch.device("cuda", int(device)))
-
-
-def _reduce_staged_tensor(value):
-    import torch
-    if not value.is_cuda:
-        return _original_reduce(value)
-    host = value.detach().contiguous().cpu()
-    payload = host.view(torch.uint8).numpy().tobytes()
-    return _rebuild_staged_tensor, (payload, tuple(value.shape), value.dtype, 0, 0, 0, value.device.index or 0)
-
-
 _local_payloads = {}
 _local_lock = threading.Lock()
 
@@ -71,12 +56,12 @@ def install_worker_compat():
     import sys
     import s3_runtime_plugin
     s3_runtime_plugin.register()
-    if os.environ.get("S3_NATIVE_TRANSPORT") in ("host", "local"):
+    if os.environ.get("S3_NATIVE_TRANSPORT") == "local":
         from torch.multiprocessing import reductions
         global _original_reduce
         _original_reduce = getattr(reductions, "_s3_original_reduce", reductions.reduce_tensor)
         reductions._s3_original_reduce = _original_reduce
-        reduce = _reduce_local_tensor if os.environ["S3_NATIVE_TRANSPORT"] == "local" else _reduce_staged_tensor
+        reduce = _reduce_local_tensor
         reductions.reduce_tensor = reduce
         for name in ("gpu_transport_entry", "gpu_native_entry", "prefix_gpu_entry", "capture_gpu_entry", "capture_gpu_worker", "prefix_gpu_worker"):
             module = sys.modules.get(name)
@@ -85,25 +70,3 @@ def install_worker_compat():
     importlib.import_module("s3_syncgraphs_entry")
     from single_gpu_worker import install_model_hooks
     install_model_hooks()
-
-
-def probe_cuda_ipc():
-    import torch
-    try:
-        tensor = torch.zeros(16, device="cuda")
-        tensor.untyped_storage()._share_cuda_()
-        print(json.dumps({"cuda_ipc": True}))
-        return 0
-    except RuntimeError as error:
-        message = str(error)
-        if "invalid argument" in message or "not supported" in message:
-            print(json.dumps({"cuda_ipc": False, "reason": message}))
-            return 78
-        raise
-
-
-if __name__ == "__main__":
-    import sys
-    if sys.argv[1:] != ["--probe-cuda-ipc"]:
-        raise SystemExit("Expected --probe-cuda-ipc")
-    raise SystemExit(probe_cuda_ipc())

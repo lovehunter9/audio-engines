@@ -1,5 +1,7 @@
 """Keep the author's complete streaming runner resident behind a serial socket."""
+import base64
 import importlib
+import threading
 import json
 from pathlib import Path
 import signal
@@ -36,11 +38,18 @@ def serve(config_path):
     backend_type = module.StreamingS2STBackend
     encoder_type = module.s2tt.FullRecordEncoder
     resident = {}
+    live = {"wave": None, "emit": None}
 
     class Encoder(encoder_type):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             resident["encoder"] = self
+
+        def stream_prefixes(self, wave, chunk_samples, lookahead_samples):
+            if live["wave"] is not None:
+                wave = live["wave"]
+                wave.configure(chunk_samples, lookahead_samples)
+            return super().stream_prefixes(wave, chunk_samples, lookahead_samples)
 
     class Backend(backend_type):
         def __init__(self, args):
@@ -48,6 +57,12 @@ def serve(config_path):
             from .s3_inproc import use_original_eager_pcm
             use_original_eager_pcm(self.pcm)
             resident.update(backend=self, args=args)
+
+        def generate_text(self, *args, **kwargs):
+            result = super().generate_text(*args, **kwargs)
+            if result and live["emit"] is not None:
+                live["emit"]("text", result)
+            return result
 
         def close(self):
             pass
@@ -77,6 +92,41 @@ def serve(config_path):
             connection, _ = server.accept()
             with connection, connection.makefile("rwb") as channel:
                 request = json.loads(channel.readline())
+                write_lock = threading.Lock()
+                def send(value):
+                    with write_lock:
+                        channel.write((json.dumps(value, ensure_ascii=False)+"\n").encode())
+                        channel.flush()
+                original_decode = None
+                receiver = None
+                if request.get("stream"):
+                    from .s3_live import LiveWave, observe_pcm
+                    wave = LiveWave()
+                    live["wave"] = wave
+                    def emit(kind, value):
+                        send({"event": kind, "data": base64.b64encode(value).decode() if kind == "audio" else value})
+                    live["emit"] = emit
+                    original_decode = observe_pcm(backend.pcm, emit)
+                    def receive():
+                        try:
+                            while True:
+                                line = channel.readline()
+                                if not line:
+                                    raise RuntimeError("Source connection closed")
+                                packet = json.loads(line)
+                                if packet.get("event") == "end":
+                                    wave.finish()
+                                    return
+                                if packet.get("event") == "cancel":
+                                    raise RuntimeError("Source session disconnected")
+                                data = base64.b64decode(packet["audio"], validate=True)
+                                if len(data) % 2:
+                                    raise ValueError("Invalid source PCM frame")
+                                wave.append(np.frombuffer(data, dtype="<i2").astype(np.float32)/32768.)
+                        except Exception as error:
+                            wave.cancel(error)
+                    receiver = threading.Thread(target=receive, daemon=True)
+                    receiver.start()
                 try:
                     started = time.monotonic()
                     backend.start_sample()
@@ -93,9 +143,17 @@ def serve(config_path):
                 except Exception as error:
                     traceback.print_exc()
                     response = {"error": str(error) or repr(error)}
+                finally:
+                    if live["wave"] is not None:
+                        live["wave"].cancel()
+                    if original_decode is not None:
+                        backend.pcm.decode = original_decode
+                    if receiver is not None:
+                        connection.shutdown(socket.SHUT_RD)
+                        receiver.join(timeout=2)
+                    live.update(wave=None, emit=None)
                 index += 1
-                channel.write((json.dumps(response, ensure_ascii=False) + "\n").encode())
-                channel.flush()
+                send(response)
     finally:
         server.close()
         backend_type.close(backend)
