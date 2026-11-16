@@ -118,6 +118,7 @@ BASES = {
     "simuls2stov": [
         (("audio_s2s",), "simuls2st"),
     ],
+    "seamless": [(("audio_s2s",), "seamless")],
     "s3s2st": [(("audio_s2s",), "s3_s2st")],
     "s3s2stov": [(("audio_s2s",), "s3_s2st_ov")],
     # audio_llm stays reserved until a base implements it.
@@ -146,6 +147,7 @@ FAMILIES = {
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
     "simuls2st": "simuls2st-omni",
+    "seamless": "seamless-streaming",
     "s3_s2st": "s3-s2st",
     "s3_s2st_ov": "s3-s2st",
 }
@@ -435,6 +437,11 @@ _MOUNTS[("simuls2st", "audio_s2s")] = [
      "Simultaneous speech-to-speech translation (English <-> Chinese, 24 kHz audio plus text)", True),
     ("WS", "/v1/audio/translations/stream",
      "Streaming speech-to-speech translation (16 kHz pcm in, 24 kHz pcm and text out)", False),
+]
+
+_MOUNTS[("seamless", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations", "Official Seamless multilingual speech translation, 16 kHz audio and text", True),
+    ("WS", "/v1/audio/translations/stream", "Official streaming agent, 16 kHz PCM input and output", False),
 ]
 
 _MOUNTS[("s3_s2st", "audio_s2s")] = [
