@@ -12,6 +12,26 @@ import wave
 import uuid
 
 
+def _stage_source(source, root):
+    revision = (source / "COMMIT").read_text().strip()
+    marker = root / ".source-revision"
+    layout = root / ".source-layout"
+    if marker.exists() and marker.read_text().strip() != revision:
+        raise RuntimeError("The application directory contains a different official S3 source revision")
+    if not layout.exists() or layout.read_text().strip() != revision + ":2":
+        root.mkdir(parents=True, exist_ok=True)
+
+        def ignored(directory, names):
+            excluded = {".git", "__pycache__"}
+            if Path(directory) == source:
+                excluded.update(("cache", "models", "runs"))
+            return set(names).intersection(excluded)
+
+        shutil.copytree(source, root, dirs_exist_ok=True, ignore=ignored)
+        marker.write_text(revision + "\n")
+        layout.write_text(revision + ":2\n")
+
+
 class OfficialEngine:
     sample_rate = 24000
 
@@ -20,15 +40,7 @@ class OfficialEngine:
         self.root = Path(tempfile.gettempdir()) / "s3-official"
         self.preset = preset
         self.lock = threading.Lock()
-        revision = (self.source / "COMMIT").read_text().strip()
-        marker = self.root / ".source-revision"
-        if not marker.exists():
-            self.root.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(self.source, self.root, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns(".git", "cache", "models", "runs", "__pycache__"))
-            marker.write_text(revision + "\n")
-        if marker.read_text().strip() != revision:
-            raise RuntimeError("The application directory contains a different official S3 source revision")
+        _stage_source(self.source, self.root)
         self.env = self._environment()
         self.env["STREAMING_FEATURE_EXTRACTOR"] = str(self.root / "models/streaming")
         installed = self.root / ".model-installed"
