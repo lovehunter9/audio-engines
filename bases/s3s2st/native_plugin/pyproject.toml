@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "s3-native-runtime"
+version = "1.0.0"
+
+[project.entry-points."vllm.general_plugins"]
+s3_native = "s3_runtime_plugin:register"
+
+[tool.setuptools]
+py-modules = ["s3_runtime_plugin"]
