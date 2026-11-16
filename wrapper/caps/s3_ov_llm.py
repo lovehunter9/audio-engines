@@ -321,6 +321,10 @@ class StatefulGPU:
         length = ids.shape[1]
         if length == 0:
             raise ValueError("Cannot infer an empty S3 token sequence")
+        if embeddings is not None:
+            embeddings = _numpy(embeddings).reshape(1, length, self.width)
+        if mask is not None:
+            mask = np.asarray(mask, dtype=np.bool_).reshape(1, length, 1)
         if length > 64:
             chunks = []
             for start in range(0, length, 64):

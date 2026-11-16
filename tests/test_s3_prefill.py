@@ -55,6 +55,13 @@ class PrefillTests(unittest.TestCase):
         engine.reset()
         self.assertEqual(float(engine.infer([5])['logits'][0, 0, 0]), 5.)
 
+    def test_talker_accepts_unbatched_embedding_contract(self):
+        engine = runtime(False)
+        values = np.arange(1, 131, dtype=np.float32).reshape(130, 1)
+        result = engine.infer(np.zeros(130, dtype=np.int64), embeddings=values)
+        self.assertEqual(float(result['final_hidden'][0, 0, 0]), float(values.sum()))
+        self.assertEqual(engine.position, 130)
+
     def test_talker_keeps_only_last_hidden_and_all_context(self):
         engine = runtime(False)
         result = engine.infer(list(range(1, 131)))
