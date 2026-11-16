@@ -248,7 +248,7 @@ passes. For the same reason the build's final import check must go **through**
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
 | `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Official S3-S2ST CUDA file runner; native-kernel compatibility pending | in progress |
 | `s3s2stov` | `beclab/audio-s3-s2st-ov` | `audio_s2s` | Original S3 graphs and streaming policy on OpenVINO GPU (amd64); validation pending | in progress |
-| `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64, English and Chinese) | in progress |
+| `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64/arm64, English and Chinese) | in progress |
 | `simuls2stov` | `beclab/audio-simuls2st-ov` | `audio_s2s` | SimulS2ST-Omni on OpenVINO GPU (amd64, iGPU and Arc); same HTTP as `simuls2st` | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
@@ -680,7 +680,7 @@ Vocos ISTFT and audio encoders stay on CPU. The official chunked decoding loop
 is preserved, including its upstream speech-boundary artifacts; the wrapper
 adds no waveform trimming or prompt-frame correction.
 
-**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64. One load runs the thinker,
+**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64/arm64. One load runs the thinker,
 the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the
 Qwen2.5-Omni base, `simuls2st_adapter/` is the LoRA, and `voicebox/`, `dualcodec/`,
 `w2v/` are the waveform path. `POST /v1/audio/translations` runs the official streaming
