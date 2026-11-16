@@ -1,13 +1,13 @@
-FROM docker.io/vllm/vllm-openai:v0.11.1 AS build
+FROM docker.io/nvidia/cuda:12.9.1-devel-ubuntu24.04 AS build
 
 ARG TARGETARCH
-ARG FFMPEG_REVISION=e38092ef9395d7049f871ef4d5411eb410e283e0
 ARG TORCHCODEC_REVISION=c47b7dfe05aec660938437febc2055e6caedca5b
+ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore
 ARG S3_REVISION=1ca52ea064ec2081f12675d853525d394571bf73
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1
 ENTRYPOINT []
 
-RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg libsndfile1 \
+RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg libsndfile1 python3 python3-pip python3-dev build-essential ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && git init /opt/s3 \
     && git -C /opt/s3 remote add origin https://github.com/QwenAudio/S3-S2ST.git \
@@ -16,20 +16,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ffmpeg libs
     && test "$(git -C /opt/s3 rev-parse HEAD)" = "$S3_REVISION" \
     && printf '%s\n' "$S3_REVISION" > /opt/s3/COMMIT
 
+COPY bases/s3s2st/collect_requirements.py /opt/collect_s3_requirements.py
+RUN python3 -m pip install --no-cache-dir "torch==2.9.0" "torchaudio==2.9.0" "torchvision==0.24.0" \
+        --index-url https://download.pytorch.org/whl/cu129 \
+    && python3 -m pip install --no-cache-dir --no-deps "vllm==0.11.1" \
+    && python3 /opt/collect_s3_requirements.py \
+    && python3 -m pip install --no-cache-dir -r /tmp/s3-runtime-requirements.txt
+
 RUN if [ "$TARGETARCH" = arm64 ]; then \
         apt-get update && apt-get install -y --no-install-recommends \
-            cmake pkg-config \
+            cmake pkg-config libavcodec-dev libavformat-dev libavutil-dev \
+            libswresample-dev libavdevice-dev libavfilter-dev libswscale-dev \
         && rm -rf /var/lib/apt/lists/* \
-        && git init /opt/ffmpeg \
-        && git -C /opt/ffmpeg remote add origin https://github.com/FFmpeg/FFmpeg.git \
-        && git -C /opt/ffmpeg fetch --depth 1 origin "$FFMPEG_REVISION" \
-        && git -C /opt/ffmpeg checkout --detach FETCH_HEAD \
-        && cd /opt/ffmpeg \
-        && ./configure --prefix=/usr/local --disable-doc --disable-programs \
-            --disable-static --enable-shared --disable-debug --disable-autodetect \
-            --disable-gpl --disable-nonfree \
-        && make -j2 && make install && ldconfig \
-        && cd / && rm -rf /opt/ffmpeg \
         && python3 -m pip install --no-cache-dir pybind11 \
         && git init /opt/torchcodec \
         && git -C /opt/torchcodec remote add origin https://github.com/pytorch/torchcodec.git \
@@ -56,6 +54,7 @@ RUN python3 /opt/collect_s3_runtime.py
 FROM ubuntu:24.04 AS release
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
     PYTHONPATH=/opt/s3-runtime/site \
+    CUDA_HOME=/opt/s3-runtime/cuda PATH=/opt/s3-runtime/cuda/bin:$PATH \
     LD_LIBRARY_PATH=/opt/s3-runtime/lib:/usr/local/nvidia/lib:/usr/local/nvidia/lib64 \
     NVIDIA_VISIBLE_DEVICES=all NVIDIA_DRIVER_CAPABILITIES=compute,utility
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -68,7 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /opt/s3-runtime /opt/s3-runtime
 COPY --from=build /opt/s3 /opt/s3
 RUN printf '%s\n' /opt/s3-runtime/lib > /etc/ld.so.conf.d/s3-runtime.conf && ldconfig
-RUN env -u PYTHONPATH bash -c '. /opt/s3/env.sh; python3 -c "import torch, torchaudio, torchvision, vllm, triton, transformers; assert torch.version.cuda; assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); print(torch.__version__, torch.version.cuda, vllm.__file__, triton.__version__, transformers.__version__); import tempfile, pathlib; p = pathlib.Path(tempfile.mkdtemp()) / \"roundtrip.wav\"; torchaudio.save(str(p), torch.zeros(1, 1600), 16000); a, r = torchaudio.load(str(p)); assert a.shape == (1, 1600) and r == 16000; p.unlink()"'
+RUN env -u PYTHONPATH bash -c '. /opt/s3/env.sh; python3 -c "import torch, torchaudio, torchvision, vllm, triton, transformers, shutil; assert shutil.which(\"nvcc\"); assert torch.version.cuda; assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); print(torch.__version__, torch.version.cuda, vllm.__file__, triton.__version__, transformers.__version__); import tempfile, pathlib; p = pathlib.Path(tempfile.mkdtemp()) / \"roundtrip.wav\"; torchaudio.save(str(p), torch.zeros(1, 1600), 16000); a, r = torchaudio.load(str(p)); assert a.shape == (1, 1600) and r == 16000; p.unlink()"'
 LABEL org.opencontainers.image.title="audio-s3-s2st-deps" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \
       org.opencontainers.image.revision="1ca52ea064ec2081f12675d853525d394571bf73" \

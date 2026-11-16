@@ -17,6 +17,33 @@ locations = [Path(p) for p in site.getsitepackages() if Path(p).is_dir()]
 for location in reversed(locations):
     shutil.copytree(location, python, dirs_exist_ok=True, symlinks=True,
                     ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+for pattern in ('flashinfer_jit_cache*', '__pycache__'):
+    for unused in python.glob(pattern):
+        if unused.is_dir():
+            shutil.rmtree(unused)
+
+cuda = root / 'cuda'
+cuda_source = Path('/usr/local/cuda').resolve()
+for name in ('bin', 'include', 'nvvm'):
+    shutil.copytree(cuda_source / name, cuda / name, symlinks=False, dirs_exist_ok=True)
+for target in (cuda_source / 'targets').iterdir():
+    if not target.is_dir():
+        continue
+    shutil.copytree(target / 'include', cuda / 'targets' / target.name / 'include', symlinks=False, dirs_exist_ok=True)
+    destination = cuda / 'targets' / target.name / 'lib'
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in ('libcudadevrt.a', 'libcudart_static.a', 'libculibos.a'):
+        if (target / 'lib' / name).is_file():
+            shutil.copy2(target / 'lib' / name, destination / name)
+    for library in (target / 'lib').glob('libcudart.so*'):
+        if library.is_file():
+            shutil.copy2(library, destination / library.name)
+    (cuda / 'lib64').symlink_to(destination.relative_to(cuda))
+    stub = target / 'lib/stubs/libcuda.so'
+    if stub.is_file():
+        (destination / 'stubs').mkdir(exist_ok=True)
+        shutil.copy2(stub, destination / 'stubs/libcuda.so')
+
 for path in python.rglob('*'):
     if path.is_symlink() and os.path.isabs(os.readlink(path)):
         original = Path(os.readlink(path))
@@ -92,7 +119,7 @@ def size(path):
 
 packages = sorted([{'name':p.name,'bytes':size(p)} for p in python.iterdir() if p.is_dir()],
                   key=lambda x:x['bytes'], reverse=True)
-report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),
+report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),'jit_toolchain_bytes':size(cuda),
           'largest_packages':packages[:35], 'preserved_external_libraries':collected,
           'original_source_revision':(source/'COMMIT').read_text().strip(),
           'tracked_source_unmodified':True}
