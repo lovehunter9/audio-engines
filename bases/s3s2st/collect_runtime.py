@@ -137,6 +137,7 @@ for directory in (python / 'nvidia').iterdir():
     if directory.is_dir() and directory.name not in required_cuda_packages and directory.name != '__pycache__':
         removed_cuda_packages.append(directory.name)
         shutil.rmtree(directory)
+shutil.rmtree(python / 'nvidia_cutlass_dsl', ignore_errors=True)
 source = Path('/opt/s3')
 subprocess.run(['git', '-C', str(source), 'diff', '--exit-code', 'HEAD'], check=True)
 for path in source.rglob('*.so'):
