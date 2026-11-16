@@ -321,6 +321,18 @@ class StatefulGPU:
         length = ids.shape[1]
         if length == 0:
             raise ValueError("Cannot infer an empty S3 token sequence")
+        if length > 64:
+            chunks = []
+            for start in range(0, length, 64):
+                end = start + 64
+                chunks.append(self.infer(ids[:, start:end],
+                    embeddings=None if embeddings is None else embeddings[:, start:end],
+                    mask=None if mask is None else mask[:, start:end]))
+            result = dict(chunks[-1])
+            if "projected_hidden" in result:
+                for name in ("final_hidden", "projected_hidden"):
+                    result[name] = np.concatenate([chunk[name] for chunk in chunks], axis=1)
+            return result
         if embeddings is None:
             embeddings = np.zeros((1, length, self.width), dtype=np.float32)
             mask = np.zeros((1, length, 1), dtype=np.bool_)
@@ -340,9 +352,10 @@ class StatefulGPU:
                       for name, port in self.outputs.items()}
             self.position += length
             return result
-        except Exception:
+        except Exception as error:
+            position = self.position
             self.reset()
-            raise
+            raise RuntimeError(f"S3 OpenVINO causal inference failed at position {position}, tokens {length}: {error}") from error
 
 
 class Thinker:
