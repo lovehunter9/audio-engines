@@ -32,6 +32,27 @@ for package in ('torch', 'torchaudio', 'torchvision', 'torchcodec', 'vllm'):
 queue = deque(seeds)
 seen = set()
 collected = []
+
+
+def collect_library(original):
+    dependency = original.resolve()
+    canonical = libs / dependency.name
+    if not canonical.exists():
+        shutil.copy2(dependency, canonical)
+        collected.append(str(dependency))
+        queue.append(dependency)
+    alias = libs / original.name
+    if alias != canonical and not alias.exists():
+        alias.symlink_to(canonical.name)
+
+
+for directory in [Path('/usr/local/cuda/lib64'), *Path('/usr/local').glob('cuda-*/targets/*/lib')]:
+    if not directory.is_dir():
+        continue
+    for pattern in ('libcudnn*.so*', 'libnvrtc-builtins.so*'):
+        for dependency in directory.glob(pattern):
+            if dependency.is_file():
+                collect_library(dependency)
 while queue:
     path = queue.popleft().resolve()
     if path in seen:
@@ -44,7 +65,8 @@ while queue:
         parts = line.split('=>', 1)[1].strip().split()
         if not parts or not parts[0].startswith('/'):
             continue
-        dependency = Path(parts[0]).resolve()
+        original = Path(parts[0])
+        dependency = original.resolve()
         if not dependency.exists():
             continue
         if dependency.name.startswith(("libcuda.so", "libnvidia-ml.so")):
@@ -54,20 +76,9 @@ while queue:
         if dependency.is_relative_to(python):
             continue
         if str(dependency).startswith(('/usr/local/cuda', '/usr/local/lib')):
-            destination = libs / parts[0].split('/')[-1]
-            if not destination.exists():
-                shutil.copy2(dependency, destination)
-                collected.append(str(dependency))
-            queue.append(dependency)
-for directory in [Path('/usr/local/cuda/lib64'), *Path('/usr/local').glob('cuda-*/targets/*/lib')]:
-    if not directory.is_dir():
-        continue
-    for pattern in ('libcudnn*.so*', 'libnvrtc-builtins.so*'):
-        for dependency in directory.glob(pattern):
-            if dependency.is_file() and not (libs / dependency.name).exists():
-                shutil.copy2(dependency, libs / dependency.name)
-                collected.append(str(dependency.resolve()))
+            collect_library(original)
 source = Path('/opt/s3')
+subprocess.run(['git', '-C', str(source), 'diff', '--exit-code', 'HEAD'], check=True)
 for path in source.rglob('*.so'):
     if path.is_symlink():
         data = path.resolve()
@@ -83,9 +94,14 @@ packages = sorted([{'name':p.name,'bytes':size(p)} for p in python.iterdir() if 
                   key=lambda x:x['bytes'], reverse=True)
 report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),
           'largest_packages':packages[:35], 'preserved_external_libraries':collected,
-          'original_source_revision':(source/'COMMIT').read_text().strip()}
+          'original_source_revision':(source/'COMMIT').read_text().strip(),
+          'tracked_source_unmodified':True}
 (root/'MANIFEST.json').write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))
-for path in source.rglob('*.so'):
+for record in json.loads((source/'KERNELS.json').read_text())['libraries']:
+    path = source / 'vendor/vllm' / record['path']
     with path.open('rb') as stream:
-        hashlib.file_digest(stream,'sha256')
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if digest != record['sha256']:
+        raise RuntimeError("The original compiled dependency changed: " + record['path'])
+print("Original compiled dependency hashes verified")
