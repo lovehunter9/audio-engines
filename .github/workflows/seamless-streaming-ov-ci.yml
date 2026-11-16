@@ -1,0 +1,32 @@
+name: seamless-streaming-ov-ci
+
+on:
+  push:
+    tags: ['v*', 'seamless-streaming-ov-*']
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: beclab
+      image_tag:
+        description: Explicit image tag
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seamless-streaming-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: seamlessov
+      repo: audio-seamless-ov
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || github.ref_name }}
+    secrets: inherit

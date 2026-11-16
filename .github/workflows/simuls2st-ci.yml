@@ -2,7 +2,7 @@ name: simuls2st-ci
 
 on:
   push:
-    tags: ['v*']
+    tags: ['v*', 'simuls2st-cuda-*']
   pull_request:
     paths:
       - 'wrapper/**'
@@ -35,8 +35,7 @@ jobs:
     with:
       base: simuls2st
       repo: audio-simuls2st
-      # CUDA 12.8 so Blackwell (sm_120) has a kernel. An arm64 image would install and then be the wrong torch.
-      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"},{"arch":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]'
       namespace: ${{ inputs.namespace || github.repository_owner }}
-      image_tag: ${{ inputs.image_tag || '' }}
+      image_tag: ${{ inputs.image_tag || (startsWith(github.ref, 'refs/tags/simuls2st-cuda-') && github.ref_name) || '' }}
     secrets: inherit
