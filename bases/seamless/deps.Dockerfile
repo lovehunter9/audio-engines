@@ -23,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git -C /opt/fairseq2 checkout --detach FETCH_HEAD \
     && git -C /opt/fairseq2 submodule update --init --recursive --depth 1 \
     && if [ "$TARGETARCH" = arm64 ]; then threadlib=''; else threadlib=tbb; fi \
+    && sed -i 's/THPVariable_Wrap(at::TensorBase var)/THPVariable_Wrap(const at::TensorBase \&var)/' /opt/fairseq2/fairseq2n/python/src/fairseq2n/bindings/type_casters/torch.cc \
     && cmake -GNinja -S /opt/fairseq2/fairseq2n -B /opt/fairseq2/fairseq2n/build \
          -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
          -DFAIRSEQ2N_INSTALL_STANDALONE=ON -DFAIRSEQ2N_USE_CUDA=ON \
