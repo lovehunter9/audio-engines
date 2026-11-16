@@ -25,7 +25,8 @@ class SourceLayoutTests(unittest.TestCase):
     def test_different_original_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:
             source, target = Path(temporary)/"source", Path(temporary)/"target"
-            source.mkdir(); target.mkdir()
+            source.mkdir()
+            target.mkdir()
             (source/"COMMIT").write_text("new")
             (target/".source-revision").write_text("old")
             with self.assertRaisesRegex(RuntimeError, "different official S3"):

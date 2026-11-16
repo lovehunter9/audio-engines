@@ -246,6 +246,7 @@ passes. For the same reason the build's final import check must go **through**
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
+| `seamless` | `beclab/audio-seamless` | `audio_s2s` | Original Meta SeamlessStreaming agent, CUDA amd64/arm64 | in progress |
 | `s3s2st` | `beclab/audio-s3-s2st` | `audio_s2s` | Official S3-S2ST CUDA file runner; native-kernel compatibility pending | in progress |
 | `s3s2stov` | `beclab/audio-s3-s2st-ov` | `audio_s2s` | Original S3 graphs and streaming policy on OpenVINO GPU (amd64); validation pending | in progress |
 | `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64/arm64, English and Chinese) | in progress |
