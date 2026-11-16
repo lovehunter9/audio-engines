@@ -37,6 +37,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && git -C /opt/seamless fetch --depth 1 origin "$SEAMLESS_REVISION" \
     && git -C /opt/seamless checkout --detach FETCH_HEAD \
     && printf '%s\n' "$SEAMLESS_REVISION" > /opt/seamless/COMMIT \
+    && printf '%s\n' 'numpy==1.26.4' 'packaging==23.2' 'pandas==2.2.3' 'numba==0.61.2' 'llvmlite==0.44.0' > /tmp/seamless-constraints.txt \
+    && export PIP_CONSTRAINT=/tmp/seamless-constraints.txt \
     && python3 -m pip install --no-cache-dir \
          "jiwer==3.1.0" "overrides==7.7.0" "sacrebleu==2.5.1" "torcheval==0.0.7" \
          "datasets==2.18.0" "pyarrow==17.0.0" "simuleval==1.1.4" \
@@ -47,7 +49,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && python3 -m pip install --no-cache-dir --no-build-isolation --no-deps \
          "openai-whisper==20240930" "sonar-space==0.2.1" /opt/seamless
 COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
-RUN sh /tmp/strip_unused_cuda.sh \
+RUN export LD_LIBRARY_PATH="$(python3 -c 'import site,pathlib; p=pathlib.Path(site.getsitepackages()[0]); print(":".join(str(x) for x in (p/"nvidia").glob("*/lib")))')" \
+    && sh /tmp/strip_unused_cuda.sh \
     && git -C /opt/seamless diff --exit-code HEAD \
     && rm -rf /opt/fairseq2 /opt/seamless/.git
 

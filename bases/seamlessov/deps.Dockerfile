@@ -66,6 +66,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends git python3-dev
     && git -C /opt/seamless fetch --depth 1 origin "$SEAMLESS_REVISION" \
     && git -C /opt/seamless checkout --detach FETCH_HEAD \
     && printf '%s\n' "$SEAMLESS_REVISION" > /opt/seamless/COMMIT \
+    && printf '%s\n' 'numpy==1.26.4' 'packaging==23.2' 'pandas==2.2.3' 'numba==0.61.2' 'llvmlite==0.44.0' > /tmp/seamless-constraints.txt \
+    && export PIP_CONSTRAINT=/tmp/seamless-constraints.txt \
     && python3 -m pip install --no-cache-dir \
          "jiwer==3.1.0" "overrides==7.7.0" "sacrebleu==2.5.1" "torcheval==0.0.7" \
          "datasets==2.18.0" "pyarrow==17.0.0" "simuleval==1.1.4" \
