@@ -1,0 +1,41 @@
+name: seamless-streaming-ci
+
+on:
+  push:
+    tags: ['v*', 'seamless-streaming-*', '!seamless-streaming-ov-*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/seamless/**'
+      - 'bases/runtime/**'
+      - '.github/workflows/seamless-streaming-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: beclab
+      image_tag:
+        description: Explicit image tag
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: seamless-streaming-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: seamless
+      repo: audio-seamless
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"},{"arch":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || (startsWith(github.ref, 'refs/tags/seamless-streaming-') && github.ref_name) || '' }}
+    secrets: inherit
