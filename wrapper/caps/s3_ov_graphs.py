@@ -6,17 +6,7 @@ import time
 from pathlib import Path
 
 
-def compile_gpu(path, *, precision="f32", input_shapes=None):
-    import openvino as ov
-    core = ov.Core()
-    model = core.read_model(str(path))
-    if input_shapes is not None:
-        model.reshape({model.input(index): shape for index, shape in input_shapes.items()})
-    compiled = core.compile_model(model, "GPU", {"INFERENCE_PRECISION_HINT": precision})
-    devices = [str(device) for device in compiled.get_property("EXECUTION_DEVICES")]
-    if not devices or any(not device.startswith("GPU") for device in devices):
-        raise RuntimeError("S3 neural execution must use OpenVINO GPU: " + repr(devices))
-    return compiled
+from .ov_gpu_graph import compile_gpu
 
 
 def export_module(module, example, shapes, target, *, source, precision="f32", prepare_only=False):
@@ -25,7 +15,8 @@ def export_module(module, example, shapes, target, *, source, precision="f32", p
     target = Path(target)
     target.mkdir(parents=True, exist_ok=True)
     graph = target / "model.xml"
-    if not graph.exists():
+    marker = target / "source.json"
+    if not graph.exists() or not marker.exists() or json.loads(marker.read_text()) != source:
         started = time.monotonic()
         logging.getLogger("s3-openvino").info("Tracing original graph %s", target)
         with torch.inference_mode():
@@ -37,8 +28,6 @@ def export_module(module, example, shapes, target, *, source, precision="f32", p
         (target / "source.json").write_text(json.dumps(source, indent=2))
         del converted
         gc.collect()
-    elif json.loads((target / "source.json").read_text()) != source:
-        raise RuntimeError("S3 OpenVINO graph source identity differs from the current original module")
     return graph if prepare_only else compile_gpu(graph, precision=precision)
 
 

@@ -10,12 +10,13 @@ import sys
 import threading
 import time
 import types
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .s3_ov_graphs import export_module
+from .s3_ov_graphs import compile_gpu, export_module
 from .s3_ov_source import REVISION, definitions
 
 
@@ -320,7 +321,8 @@ class _VocoderGPU:
 
         self.h = generator.h
         self.lock = threading.RLock()
-        self.graphs, self.requests, self.turns = {}, {}, {}
+        self.graphs = {}
+        self.specializations = OrderedDict()
         example_feat = torch.zeros((1, self.h.num_mels, 32), dtype=torch.float32)
         with torch.inference_mode():
             _, initial = generator.inference_cache(example_feat, finalize=False, cache={})
@@ -351,11 +353,7 @@ class _VocoderGPU:
                 key = (final, cached)
                 self.graphs[key] = export_module(CachedGenerator(final, cached).eval(), inputs,
                     shapes, Path(graph_root) / ("final" if final else "stream") / ("cached" if cached else "first"),
-                    source=source, precision="f32")
-                if len(self.graphs[key].outputs) != len(example_cache) + 1:
-                    raise RuntimeError("OpenVINO export omitted original vocoder cache outputs")
-                self.requests[key] = [self.graphs[key].create_infer_request() for _ in range(2)]
-                self.turns[key] = 0
+                    source=source, precision="f32", prepare_only=True)
         self.cache_count = len(example_cache)
 
     def inference_cache(self, feat, finalize=True, cache=None):
@@ -370,8 +368,18 @@ class _VocoderGPU:
         if not finalize and feat.shape[2] <= self.h.conv_pre_look_right:
             raise ValueError("Nonfinal vocoder needs genuine right context")
         with self.lock:
-            request = self.requests[key][self.turns[key] % 2]
-            self.turns[key] += 1
+            specialization = (*key, int(feat.shape[2]))
+            if specialization not in self.specializations:
+                compiled = compile_gpu(self.graphs[key], input_shapes={0: list(feat.shape)})
+                if len(compiled.outputs) != self.cache_count + 1:
+                    raise RuntimeError("OpenVINO export omitted original vocoder cache outputs")
+                self.specializations[specialization] = (compiled, [compiled.create_infer_request() for _ in range(2)], 0)
+            compiled, requests, turn = self.specializations[specialization]
+            request = requests[turn % 2]
+            self.specializations[specialization] = (compiled, requests, turn + 1)
+            self.specializations.move_to_end(specialization)
+            if len(self.specializations) > 8:
+                self.specializations.popitem(last=False)
             request.set_input_tensor(0, ov.Tensor(np.ascontiguousarray(feat.numpy())))
             if cached:
                 if len(cache["tensors"]) != self.cache_count:
