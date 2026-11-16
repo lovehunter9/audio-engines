@@ -13,11 +13,14 @@ file="$dir/deps.Dockerfile"
 
 # Hash deps.Dockerfile plus anything it COPY's (including ov patches/*) so the tag moves when those change.
 hash_inputs="$file"
-for f in "$dir"/probe_*.py "$dir"/collect_*.py \
-         "$root/bases/runtime/strip_unused_cuda.sh"; do
+for f in "$dir"/probe_*.py "$dir"/collect_*.py "$dir"/apply_*.py \
+         "$dir"/native_plugin/* "$root/bases/runtime/strip_unused_cuda.sh"; do
     [ -f "$f" ] || continue
     hash_inputs="$hash_inputs $f"
 done
+case "$BASE" in
+    s3s2st|simuls2st|seamless) hash_inputs="$hash_inputs $root/bases/runtime/split_layers.py" ;;
+esac
 if [ -f "$dir/vendor.Dockerfile" ]; then
     hash_inputs="$hash_inputs $dir/vendor.Dockerfile"
 fi
