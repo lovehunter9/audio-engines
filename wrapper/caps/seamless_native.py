@@ -8,6 +8,16 @@ from pathlib import Path
 import numpy as np
 
 
+def _segments(samples, finished):
+    while len(samples) >= 5520 or (finished and samples):
+        count = len(samples) if finished and len(samples) < 5520 else 5120
+        if finished and count < 400:
+            raise ValueError("Seamless requires at least 25 milliseconds of source audio")
+        chunk = samples[:count]
+        del samples[:count]
+        yield chunk, finished and not samples
+
+
 class Engine:
     sample_rate = 16000
 
@@ -74,11 +84,7 @@ class Engine:
         session["samples"].extend(np.asarray(samples, dtype=np.float32).tolist())
         events = []
         with torch.inference_mode():
-            while len(session["samples"]) >= 5120 or finished:
-                count = min(5120, len(session["samples"]))
-                chunk = session["samples"][:count]
-                del session["samples"][:count]
-                last = finished and not session["samples"]
+            for chunk, last in _segments(session["samples"], finished):
                 result = self.agent.pushpop(SpeechSegment(content=chunk, sample_rate=16000,
                     tgt_lang=session["target"], finished=last), session["states"])
                 if self.pending:
