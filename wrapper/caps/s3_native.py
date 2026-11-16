@@ -44,8 +44,12 @@ class OfficialEngine:
                  "--local-dir", str(staged)],
                 cwd=self.root, env=self.env, check=True,
             )
+            shutil.copyfile(release, self.root / "models/streaming/release.json")
             installed.write_text(release_id)
             shutil.rmtree(staged)
+        model_release = self.root / "models/streaming/release.json"
+        if not model_release.is_file():
+            shutil.copyfile(release, model_release)
         self._start()
 
     def _start(self):

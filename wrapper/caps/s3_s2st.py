@@ -43,20 +43,20 @@ def _boot():
         log.exception("Official S3 runtime failed to initialize")
 
 
-def build_app(supports):
+def build_app_for(runtime, args, supports, module, lock):
+    state = runtime.state
     app = FastAPI(title="S3-S2ST official runtime")
     mount_metrics(app)
-    register(app, model_name=_runtime.model_name, module="s3_s2st", served=supports,
-             repo=_runtime.model_repo, is_ready=lambda: _state["ready"],
-             error=lambda: _state["error"], task_api=True, sample_rate=24000)
-    _args.warn_unclaimed(log)
+    register(app, model_name=runtime.model_name, module=module, served=supports,
+             repo=runtime.model_repo, is_ready=lambda: state["ready"],
+             error=lambda: state["error"], task_api=True, sample_rate=24000)
 
     @app.post("/v1/audio/translations")
     async def translate(request: Request, file: UploadFile = File(...),
                         source_lang: str = Form("English"), target_lang: str = Form("Chinese"),
                         response_format: str = Form("json"), model: str = Form(None)):
-        if not _state["ready"]:
-            raise HTTPException(503, _state["error"] or "engine not ready")
+        if not state["ready"]:
+            raise HTTPException(503, state["error"] or "engine not ready")
         source, target = _language(source_lang), _language(target_lang)
         if source == target:
             raise HTTPException(400, "source_lang and target_lang must differ")
@@ -70,9 +70,9 @@ def build_app(supports):
         def work(ctx):
             import numpy as np
             import soundfile as sf
-            with _lock:
+            with lock:
                 started = time.monotonic()
-                row, wav = _state["engine"].translate(audio, source, target)
+                row, wav = state["engine"].translate(audio, source, target)
             samples, rate = sf.read(io.BytesIO(wav), dtype="float32")
             ctx.meter(output_seconds=len(samples) / rate)
             text = row.get("text") or row.get("translation") or row.get("prediction") or ""
@@ -90,8 +90,13 @@ def build_app(supports):
                     "elapsed_seconds": time.monotonic() - started}
 
         return await tasks.dispatch(request.query_params.get("async"), "audio_s2s",
-                                    _runtime.model_name, work, fail="official translation failed")
+                                    runtime.model_name, work, fail="official translation failed")
     return app
+
+
+def build_app(supports):
+    _args.warn_unclaimed(log)
+    return build_app_for(_runtime, _args, supports, "s3_s2st", _lock)
 
 
 def run(supports):

@@ -73,13 +73,18 @@ def neural_definitions(root):
             "Tensor": Tensor, "Optional": Optional, "Tuple": Tuple, "ACT2FN": ACT2FN,
             "logger": logging.getLogger("s3-openvino"), "flash_attn_varlen_func": None}
     encoder = definitions(models / "omnidrca2_encoder.py", ["SenseVoiceEncoder", "apply_rotary_pos_emb"], base)
-    adaptor = definitions(models / "omnidrca2_next_thinker.py",
+    adaptor = definitions(root / "inference/streaming/vllm_overrides/omnidrca2_next_thinker.py",
                           ["Transformer", "encoder_conf", "audio_adaptor_conf", "load_pretrained_module"],
                           {**base, "flash_attn": None})
     streaming = definitions(root / "inference/streaming/true_streaming_encoder.py",
                             ["enable_true_streaming_encoder", "enable_true_streaming_adaptor"],
                             {**base, "MethodType": MethodType,
                              "apply_rotary_pos_emb": encoder.apply_rotary_pos_emb})
+    lookahead = definitions(root / "inference/streaming/block640_lookahead160_encoder.py",
+                            ["enable_block640_lookahead160_encoder"],
+                            {**base, "MethodType": MethodType,
+                             "apply_rotary_pos_emb": encoder.apply_rotary_pos_emb})
+    streaming.enable_block640_lookahead160_encoder = lookahead.enable_block640_lookahead160_encoder
     return encoder, adaptor, streaming
 
 
@@ -99,7 +104,7 @@ def load_audio_encoder(root, model_dir):
         str(model_dir / "audio_encoder.pt"), encoder, remove_prefix="audio_encoder.")
     counts["adaptor"] = adaptor.load_pretrained_module(
         str(model_dir / "audio_adaptor.pt"), projector, remove_prefix="audio_adaptor.")
-    streaming.enable_true_streaming_encoder(encoder, chunk_ms=640)
+    streaming.enable_block640_lookahead160_encoder(encoder, chunk_ms=640, lookahead_ms=160)
     streaming.enable_true_streaming_adaptor(projector, encoder.streaming_chunk_frames)
 
     class AudioEncoder(nn.Module):

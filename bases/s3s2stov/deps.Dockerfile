@@ -63,8 +63,8 @@ RUN git init /opt/s3 \
 
 RUN python3 -m pip install --no-cache-dir --root-user-action=ignore more-itertools \
     && python3 -m pip install --no-cache-dir --root-user-action=ignore --no-deps "openai-whisper==20250625"
-COPY wrapper/caps/s3_ov_source.py /opt/s3_adapter/s3_ov_source.py
-RUN PYTHONPATH=/opt/s3_adapter python3 -c "from s3_ov_source import neural_definitions, definitions; e, a, s = neural_definitions('/opt/s3'); assert e.SenseVoiceEncoder and a.Transformer and s.enable_true_streaming_encoder; import whisper; print('original neural definitions and calibrated frontend dependencies loaded')"
+COPY bases/s3s2stov/probe_export.py /opt/s3_adapter/export_causal.py
+RUN python3 -m py_compile /opt/s3_adapter/export_causal.py
 
 LABEL org.opencontainers.image.title="S3 OpenVINO graph export dependencies" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \
