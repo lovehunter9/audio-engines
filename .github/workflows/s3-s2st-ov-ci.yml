@@ -1,0 +1,56 @@
+name: s3-s2st-ov-ci
+
+on:
+  push:
+    tags: ['v*', 's3-s2st-ov-*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/s3s2stov/**'
+      - '.github/workflows/s3-s2st-ov-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: beclab
+      image_tag:
+        description: Explicit image tag
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-s2st-ov-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: s3s2stov
+      repo: audio-s3-s2st-ov
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || (startsWith(github.ref, 'refs/tags/s3-s2st-ov-') && github.ref_name) || '' }}
+    secrets: inherit
+
+  source-smoke:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/s3-s2st-ov-') || (github.event_name == 'workflow_dispatch' && inputs.image_tag != '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASS }}
+      - name: Verify original controller and acoustic definitions
+        env:
+          IMAGE: docker.io/${{ inputs.namespace || github.repository_owner }}/audio-s3-s2st-ov:${{ inputs.image_tag || github.ref_name }}
+        run: |
+          docker run --rm --entrypoint audio-python "$IMAGE" -c "from pathlib import Path; from wrapper.caps.s3_ov_engine import _record_functions; from wrapper.caps.s3_ov_source import neural_definitions; from wrapper.caps.s3_ov_pcm_graph import _fm_author; root=Path('/opt/s3'); _record_functions(root); neural_definitions(root); _fm_author(root); print('Official controller, block640/lookahead160 encoder and acoustic definitions load without CUDA scheduler')"

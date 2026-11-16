@@ -1,61 +1,85 @@
-# audio-simuls2st deps: SimulS2ST-Omni speech-to-speech, in-process, CUDA only.
-#
-# Upstream pins torch 2.6.0+cu124 and transformers 4.52.3. That wheel stops at sm_90, so a
-# Blackwell GPU (sm_120) loads the weights and then fails with "no kernel image". This image
-# uses the same PyTorch 2.8 CUDA 12.8 base as the other CUDA engines. The streaming agent lives
-# in the upstream repo, which has no PyPI package, so the source is cloned at a pinned commit and
-# put on PYTHONPATH. Weights stay out of the image: llm-init snapshots HA-SA-ki/SimulS2ST-Omni.
-#
-# One process loads the thinker, the talker, VoiceBox and DualCodec. Text is the transcript of
-# that same pass, not a separate model. pyworld needs a compiler; the runtime image has none.
-#
-# amd64 only. The workflow does not build arm64.
-FROM docker.io/pytorch/pytorch:2.8.0-cuda12.8-cudnn9-runtime
+ARG TARGETARCH
+FROM docker.io/nvidia/cuda:12.8.1-base-ubuntu24.04 AS amd64
+FROM docker.io/nvidia/cuda:12.9.1-base-ubuntu24.04 AS arm64
 
+FROM ${TARGETARCH} AS build
+ARG TARGETARCH
+ARG SIMUL_SHA=c7e0b260aa21473d30ffeaa1768c624d4f9bfa3c
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore
+COPY bases/runtime/strip_unused_cuda.sh /tmp/strip_unused_cuda.sh
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ffmpeg libsndfile1 git build-essential python3-dev; \
-    rm -rf /var/lib/apt/lists/*
-
-# Match the base torch. A bare `pip install torchaudio` would replace it.
-RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-
-ARG SIMUL_SHA=c7e0b260aa21473d30ffeaa1768c624d4f9bfa3c
-RUN set -eux; \
-    git clone https://github.com/hasaki321/SimulS2ST-Omni.git /opt/simuls2st; \
-    git -C /opt/simuls2st checkout "$SIMUL_SHA"; \
-    git -C /opt/simuls2st submodule update --init external/SimulEval; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        -e /opt/simuls2st/external/SimulEval \
+    apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-dev git build-essential binutils ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    if [ "$TARGETARCH" = arm64 ]; then idx=cu129; else idx=cu128; fi; \
+    python3 -m pip install --no-cache-dir \
+        torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 \
+        --index-url "https://download.pytorch.org/whl/$idx"; \
+    printf '%s\n' 'torch==2.8.0' 'torchvision==0.23.0' 'torchaudio==2.8.0' \
+        'numpy==1.26.4' > /tmp/simuls-constraints.txt; \
+    git init /opt/simuls2st; \
+    git -C /opt/simuls2st remote add origin https://github.com/hasaki321/SimulS2ST-Omni.git; \
+    git -C /opt/simuls2st fetch --depth 1 origin "$SIMUL_SHA"; \
+    git -C /opt/simuls2st checkout --detach FETCH_HEAD; \
+    test "$(git -C /opt/simuls2st rev-parse HEAD)" = "$SIMUL_SHA"; \
+    git -C /opt/simuls2st submodule update --init --depth 1 external/SimulEval; \
+    python3 -m pip install --no-cache-dir -c /tmp/simuls-constraints.txt \
+        /opt/simuls2st/external/SimulEval \
         "transformers==4.52.3" "peft==0.18.1" "qwen-omni-utils==0.0.8" \
         "accelerate==1.12.0" "numpy==1.26.4" "safetensors==0.7.0" \
         "soundfile==0.13.1" "sentencepiece==0.2.1" "einops==0.8.1" \
         "scipy==1.15.3" "librosa==0.11.0" \
         "descript-audiotools==0.7.2" "descript-audio-codec==1.0.0" \
         "easydict==1.13" "pyworld==0.3.5" "json5>=0.9.0" \
-        "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets \
-        "numpy==1.26.4"; \
-    python3 -m pip install --no-cache-dir --root-user-action=ignore \
-        torch==2.8.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128; \
-    python3 -c "\
-import torch, torchaudio, transformers, peft; \
-assert torch.__version__.startswith('2.8.'), torch.__version__; \
-assert torch.version.cuda.startswith('12.8'), torch.version.cuda; \
-print('torch', torch.__version__, 'cuda', torch.version.cuda, \
-      'torchaudio', torchaudio.__version__, 'transformers', transformers.__version__, \
-      'peft', peft.__version__)"; \
-    ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+        "ruamel.yaml==0.18.16" "six==1.17.0" \
+        "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart websockets; \
+    printf '%s\n' "$SIMUL_SHA" > /opt/simuls2st/COMMIT; \
+    rm -rf /opt/simuls2st/.git; \
+    rm -f /opt/simuls2st/external/SimulEval/.git; \
+    sh /tmp/strip_unused_cuda.sh; \
+    rm -f /tmp/strip_unused_cuda.sh
 
-ENV SIMULS2ST_ROOT=/opt/simuls2st \
-    PYTHONPATH=/opt/simuls2st
+RUN python3 -m pip install --no-cache-dir "setuptools==80.10.2" \
+    && find /usr/local/lib/python3.12 -type d \( -name __pycache__ -o -name tests \) -prune -exec rm -rf '{}' +
 
-# Import the agent the chart process loads. No weights: from_pretrained stays inside _load.
-RUN python3 -c "\
-from src.agents.simuleval_omni_talker_s2st_agent import OmniTalkerStreamingS2STAgent; \
-import src.voicebox.melspec, src.voicebox.tokenizer, src.voicebox.voicebox_model; \
-print('agent', OmniTalkerStreamingS2STAgent.__name__)"
+COPY bases/runtime/split_layers.py /opt/split_runtime.py
+RUN python3 /opt/split_runtime.py /usr/local/lib/python3.12
 
+FROM ${TARGETARCH} AS release
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
+    SIMULS2ST_ROOT=/opt/simuls2st
+COPY --from=build /opt/runtime-parts/00/ /
+COPY --from=build /opt/runtime-parts/01/ /
+COPY --from=build /opt/runtime-parts/02/ /
+COPY --from=build /opt/runtime-parts/03/ /
+COPY --from=build /opt/runtime-parts/04/ /
+COPY --from=build /opt/runtime-parts/05/ /
+COPY --from=build /opt/runtime-parts/06/ /
+COPY --from=build /opt/runtime-parts/07/ /
+COPY --from=build /opt/runtime-parts/08/ /
+COPY --from=build /opt/runtime-parts/09/ /
+COPY --from=build /opt/runtime-parts/10/ /
+COPY --from=build /opt/runtime-parts/11/ /
+COPY --from=build /opt/runtime-parts/12/ /
+COPY --from=build /opt/runtime-parts/13/ /
+COPY --from=build /opt/runtime-parts/14/ /
+COPY --from=build /opt/runtime-parts/15/ /
+COPY --from=build /opt/runtime-layout.json /opt/runtime-layout.json
+COPY --from=build /opt/cuda-stubs/ /usr/local/lib/
+COPY --from=build /opt/simuls2st /opt/simuls2st
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends python3 ffmpeg libsndfile1 ca-certificates; \
+    rm -rf /var/lib/apt/lists/*; \
+    ln -sf "$(command -v python3)" /usr/local/bin/python; \
+    ln -sf "$(command -v python3)" /usr/local/bin/audio-python; \
+    python3 -c "import pathlib,site; p=pathlib.Path(site.getsitepackages()[0]); p.mkdir(parents=True,exist_ok=True); p.joinpath('simuls2st.pth').write_text('/opt/simuls2st\\n')"; \
+    ldconfig
+COPY bases/simuls2st/probe_runtime.py /opt/probe_simuls2st_runtime.py
+RUN env -u PYTHONPATH python3 /opt/probe_simuls2st_runtime.py --arch "$TARGETARCH"
 LABEL org.opencontainers.image.title="audio-simuls2st-deps" \
       org.opencontainers.image.source="https://github.com/hasaki321/SimulS2ST-Omni" \
       org.opencontainers.image.revision="c7e0b260aa21473d30ffeaa1768c624d4f9bfa3c"
