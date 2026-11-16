@@ -26,6 +26,7 @@ def serve(config_path):
     def post_init(self):
         original_post_init(self)
         self.worker_cls = "wrapper.caps.s3_cuda_worker.NativeWorker"
+        self.distributed_executor_backend = "uni"
 
     AsyncEngineArgs.__post_init__ = post_init
     backend_type = module.StreamingS2STBackend
