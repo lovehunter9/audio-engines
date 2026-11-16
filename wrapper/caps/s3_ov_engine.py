@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from .s3_native import OfficialEngine
-from .s3_ov_source import definitions, frontend_definitions
+from .s3_ov_source import definitions
 
 
 def _record_functions(root):
@@ -39,7 +39,8 @@ def _record_functions(root):
 class AudioEncoder:
     def __init__(self, root, compiled, pcm, stream):
         self.compiled, self.pcm, self._stream = compiled, pcm, stream
-        self.frontend, self.source_sha256 = frontend_definitions(root)
+        from .s3_ov_features import WhisperFeatures
+        self.frontend = WhisperFeatures(root, Path(root)/"cache/openvino/frontend")
         self.true_streaming = True
         self.adaptor = SimpleNamespace(streaming_chunk_size=8)
         self.wave = None
@@ -52,8 +53,8 @@ class AudioEncoder:
             if wait > 0:
                 time.sleep(wait)
         self.pcm.prefix(self.wave, len(wave))
-        features, lengths = self.frontend(torch.from_numpy(wave.copy())[None], torch.tensor([len(wave)]))
-        result = self.compiled([features.numpy(), lengths.numpy()])
+        features, lengths = self.frontend(wave)
+        result = self.compiled([features, lengths])
         embeds = np.asarray(result[0]).copy()
         length = int(np.asarray(result[1]).reshape(-1)[0])
         return torch.from_numpy(embeds[0, :length]).to(torch.bfloat16).contiguous()
@@ -247,6 +248,8 @@ class Backend:
 
 class OpenVINOEngine(OfficialEngine):
     def _start(self):
+        import torch
+        torch.set_num_threads(4)
         from .s3_ov_graphs import export_audio_encoder
         from .s3_ov_llm import Thinker
         from .s3_ov_talker import Talker

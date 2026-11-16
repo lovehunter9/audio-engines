@@ -46,11 +46,11 @@ class SourceSpeaker:
     """Uncropped author kaldi features; original CAMPPlus graph on GPU only."""
 
     def __init__(self, source_root):
-        from torchaudio.compliance import kaldi
+        from .s3_ov_features import KaldiFeatures
 
         from .s3_ov_pcm_graph import _asset
 
-        self.kaldi = kaldi
+        self.features = KaldiFeatures(Path(source_root)/"cache/openvino/speaker-features")
         path, self.evidence = _asset(Path(source_root), "speaker/campplus.onnx")
         self.compiled = compile_gpu(path)
         if len(self.compiled.inputs) != 1 or len(self.compiled.outputs) != 1:
@@ -63,9 +63,8 @@ class SourceSpeaker:
         wave = torch.as_tensor(np.asarray(wave, dtype=np.float32).copy()).reshape(1, -1)
         if wave.shape[1] < 400:
             raise ValueError("insufficient source prefix for speaker embedding")
-        feat = self.kaldi.fbank(wave, num_mel_bins=80, dither=0, sample_frequency=16000)
-        feat = feat - feat.mean(dim=0, keepdim=True)
-        output = self.compiled([feat.unsqueeze(0).numpy()])[0]
+        feat = self.features(wave.numpy())
+        output = self.compiled([feat])[0]
         x = np.asarray(output, dtype=np.float32).reshape(1, -1).copy()
         if not np.isfinite(x).all() or np.linalg.norm(x) <= 0:
             raise RuntimeError("Invalid original CAMPPlus output")

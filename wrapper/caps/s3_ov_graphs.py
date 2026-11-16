@@ -1,6 +1,8 @@
 """Strict OpenVINO GPU compilation for original S3 neural modules."""
 import gc
 import json
+import logging
+import time
 from pathlib import Path
 
 
@@ -22,9 +24,13 @@ def export_module(module, example, shapes, target, *, source, precision="f32"):
     target.mkdir(parents=True, exist_ok=True)
     graph = target / "model.xml"
     if not graph.exists():
+        started = time.monotonic()
+        logging.getLogger("s3-openvino").info("Tracing original graph %s", target)
         with torch.inference_mode():
-            converted = ov.convert_model(module, example_input=example,
-                                         input=[ov.PartialShape(shape) for shape in shapes])
+            traced = torch.jit.trace(module, example, check_trace=False, strict=False)
+            logging.getLogger("s3-openvino").info("Converting original graph %s after %.2fs", target, time.monotonic()-started)
+            converted = ov.convert_model(traced, input=[ov.PartialShape(shape) for shape in shapes])
+        del traced
         ov.save_model(converted, str(graph), compress_to_fp16=False)
         (target / "source.json").write_text(json.dumps(source, indent=2))
         del converted
