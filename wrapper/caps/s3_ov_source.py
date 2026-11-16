@@ -53,6 +53,29 @@ def definitions(path, names, namespace):
     return module
 
 
+def _gpu_fsmn_windows(padded, context, step):
+    import torch
+    count = 1+(padded.shape[-1]-context)//step
+    indices = torch.arange(count, device=padded.device)[:, None]*step+torch.arange(context, device=padded.device)[None, :]
+    selected = torch.index_select(padded, -1, indices.reshape(-1))
+    return selected.reshape(padded.shape[0], padded.shape[1], count, context)
+
+
+def _adapt_fsmn_export(module):
+    import inspect
+    import textwrap
+    original = module._block_streaming_fsmn
+    source = textwrap.dedent(inspect.getsource(original))
+    needle = "padded.unfold(-1, context, chunk_frames)"
+    if source.count(needle) != 1:
+        raise RuntimeError("The pinned block FSMN window operation changed")
+    source = source.replace(needle, "_gpu_fsmn_windows(padded, context, chunk_frames)")
+    module.__dict__["_gpu_fsmn_windows"] = _gpu_fsmn_windows
+    scope = {}
+    exec(compile(source, module.__file__, "exec"), module.__dict__, scope)
+    module._block_streaming_fsmn = scope["_block_streaming_fsmn"]
+
+
 def neural_definitions(root):
     import logging
     import math
@@ -84,6 +107,7 @@ def neural_definitions(root):
                             ["enable_block640_lookahead160_encoder"],
                             {**base, "MethodType": MethodType,
                              "apply_rotary_pos_emb": encoder.apply_rotary_pos_emb})
+    _adapt_fsmn_export(lookahead)
     streaming.enable_block640_lookahead160_encoder = lookahead.enable_block640_lookahead160_encoder
     return encoder, adaptor, streaming
 
@@ -121,7 +145,8 @@ def load_audio_encoder(root, model_dir):
         manifest = Path(root) / ".model-installed"
     if not manifest.is_file():
         raise RuntimeError("The verified S3 release manifest is missing")
-    return AudioEncoder().eval(), {"weight_loading": {key: list(value) for key, value in counts.items()},
+    return AudioEncoder().eval(), {"export_adapter_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "window_export": "exact_last_axis_index_select", "weight_loading": {key: list(value) for key, value in counts.items()},
         "release_manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
         "original_source_sha256": {"encoder": original._source_sha256,
                                    "adaptor": adaptor._source_sha256,
