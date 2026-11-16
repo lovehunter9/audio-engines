@@ -3,10 +3,13 @@ import gc
 import hashlib
 import json
 import logging
+from collections import OrderedDict
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 
 import numpy as np
+
+from .ov_gpu_graph import compile_gpu
 
 log = logging.getLogger("seamless-openvino")
 
@@ -16,14 +19,14 @@ def _numpy(value):
 
 
 class Graph:
-    def __init__(self, module, examples, shapes, directory):
+    def __init__(self, module, examples, shapes, directory, *, static_inputs=False):
         import torch
         import openvino as ov
 
         directory.mkdir(parents=True, exist_ok=True)
         identity = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
         graph, marker = directory/"model.xml", directory/"source.json"
-        if not graph.exists():
+        if not graph.exists() or not marker.exists() or json.loads(marker.read_text())["adapter"] != identity:
             log.info("Tracing official Seamless graph %s", directory.name)
             with torch.inference_mode():
                 traced = torch.jit.trace(module.eval(), examples, check_trace=False, strict=False)
@@ -32,28 +35,33 @@ class Graph:
             marker.write_text(json.dumps({"adapter": identity}))
             del traced, model
             gc.collect()
-        elif json.loads(marker.read_text())["adapter"] != identity:
-            raise RuntimeError("Seamless graph belongs to a different adapter revision")
-        core = ov.Core()
-        log.info("Compiling official Seamless graph %s for GPU", directory.name)
-        self.compiled = core.compile_model(str(graph), "GPU", {"INFERENCE_PRECISION_HINT": "f32"})
-        devices = list(self.compiled.get_property("EXECUTION_DEVICES"))
-        if not devices or any(not str(device).startswith("GPU") for device in devices):
-            raise RuntimeError("All Seamless neural graphs must execute on OpenVINO GPU")
-        self.requests = [self.compiled.create_infer_request() for _ in range(2)]
-        self.turn = 0
+        self.graph, self.static_inputs = graph, static_inputs
+        self.entries = OrderedDict()
+        if not static_inputs:
+            self._entry(None)
+
+    def _entry(self, shapes):
+        if shapes not in self.entries:
+            compiled = compile_gpu(self.graph, input_shapes=None if shapes is None else dict(enumerate(shapes)))
+            self.entries[shapes] = (compiled, [compiled.create_infer_request() for _ in range(2)], 0)
+        compiled, requests, turn = self.entries[shapes]
+        self.entries[shapes] = (compiled, requests, turn + 1)
+        self.entries.move_to_end(shapes)
+        if len(self.entries) > 8:
+            self.entries.popitem(last=False)
+        return compiled, requests[turn % 2]
 
     def infer(self, inputs, *, retain=0):
         import openvino as ov
-        request = self.requests[self.turn % 2]
-        self.turn += 1
-        if len(inputs) != len(self.compiled.inputs):
+        shapes = tuple(tuple(value.shape) for value in inputs) if self.static_inputs else None
+        compiled, request = self._entry(shapes)
+        if len(inputs) != len(compiled.inputs):
             raise RuntimeError("Official Seamless graph input signature changed")
         for index, value in enumerate(inputs):
             tensor = value if isinstance(value, ov.Tensor) else ov.Tensor(np.ascontiguousarray(_numpy(value)))
             request.set_input_tensor(index, tensor)
         request.infer()
-        count = len(self.compiled.outputs)
+        count = len(compiled.outputs)
         copied = [np.asarray(request.get_output_tensor(i).data).copy() for i in range(count-retain)]
         return copied+[request.get_output_tensor(i) for i in range(count-retain, count)]
 
@@ -165,7 +173,10 @@ def _hard_upsampling(module):
     import torch
     def forward(self, seqs, durations):
         lengths = durations.sum(dim=1)
-        return torch.repeat_interleave(seqs[0], durations[0], dim=0)[None], lengths
+        ends = durations[0].cumsum(0)
+        positions = torch.arange(lengths[0], device=durations.device)
+        indices = (positions[:, None] >= ends[None, :]).sum(-1)
+        return seqs[:, indices], lengths
     module.forward = MethodType(forward, module)
 
 
@@ -247,7 +258,7 @@ def _vocoder(agent, root):
             return self.generator({"code": units, "lang": language, "spkr": speaker}, False)
 
     graph = Graph(Vocoder(), (torch.ones(1, 50, dtype=torch.int64), torch.zeros(1, 1, dtype=torch.int64),
-        torch.zeros(1, 1, dtype=torch.int64)), [[1, -1], [1, 1], [1, 1]], root/"vocoder")
+        torch.zeros(1, 1, dtype=torch.int64)), [[1, -1], [1, 1], [1, 1]], root/"vocoder", static_inputs=True)
     def vocoder(units, language, speaker, dur_prediction=False):
         if dur_prediction:
             raise ValueError("Official Seamless streaming disables vocoder duration prediction")
