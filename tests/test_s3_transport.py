@@ -25,8 +25,10 @@ class Core:
     def post_step(self, executed):
         self.events.append(('post', executed))
 
-    def update_request_with_data(self, data):
-        self.events.append(('data', data))
+    def update_request_with_data(self, request_id, data):
+        if request_id != data.request_id:
+            raise RuntimeError("External data was routed to a different request")
+        self.events.append(('data', request_id, data.external_token_ids))
 
 
 class Native:
@@ -70,13 +72,13 @@ class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
         client = AsyncNativeClient(native, lambda: None)
         try:
             self.assertEqual(await client.collective_rpc_async('mode', args=('text',)), ['text'])
-            await client.update_request_with_data_async('embedding')
+            await client.update_request_with_data_async(SimpleNamespace(request_id='one', external_token_ids=[42]))
             await client.add_request_async(SimpleNamespace(request_id='one'))
             self.assertEqual(await asyncio.wait_for(client.get_output_async(), 2), 'one')
             await client.add_request_async(SimpleNamespace(request_id='two'))
             self.assertEqual(await asyncio.wait_for(client.get_output_async(), 2), 'two')
             events = native.engine_core.events
-            self.assertEqual(events[:3], [('rpc', 'mode'), ('data', 'embedding'), ('add', 'one')])
+            self.assertEqual(events[:3], [('rpc', 'mode'), ('data', 'one', [42]), ('add', 'one')])
             self.assertEqual(sum(event == ('post', True) for event in events), 2)
         finally:
             client.shutdown()
@@ -91,7 +93,7 @@ class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeError, 'native executor failed'):
             await asyncio.wait_for(client.get_output_async(), 2)
         with self.assertRaisesRegex(RuntimeError, 'no longer running'):
-            await client.update_request_with_data_async('later')
+            await client.update_request_with_data_async(SimpleNamespace(request_id='later'))
 
 
 class DeviceTransportTests(unittest.TestCase):

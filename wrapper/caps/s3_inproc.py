@@ -87,7 +87,7 @@ class AsyncNativeClient:
         await self._call(self.native.add_request, request)
 
     async def update_request_with_data_async(self, external_data):
-        await self._call(self.native.engine_core.update_request_with_data, external_data)
+        await self._call(self.native.engine_core.update_request_with_data, external_data.request_id, external_data)
 
     async def abort_requests_async(self, request_ids):
         if request_ids and not self.resources.engine_dead:
