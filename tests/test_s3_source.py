@@ -20,7 +20,19 @@ class SourceLayoutTests(unittest.TestCase):
             _stage_source(source, target)
             self.assertEqual((target/neural.relative_to(source)).read_text(), neural.read_text())
             self.assertFalse((target/"models/weights.bin").exists())
-            self.assertEqual((target/".source-layout").read_text().strip(), "revision:2")
+            self.assertEqual((target/".source-layout").read_text().strip(), "revision:3:native")
+
+    def test_compatibility_patch_change_refreshes_cached_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source, target = Path(temporary)/"source", Path(temporary)/"target"
+            source.mkdir()
+            (source/"COMMIT").write_text("revision\n")
+            (source/"module.py").write_text("original")
+            _stage_source(source, target)
+            (source/"PATCHES.json").write_text('[{"patch": "capability-guard"}]')
+            (source/"module.py").write_text("guarded optional registration")
+            _stage_source(source, target)
+            self.assertEqual((target/"module.py").read_text(), "guarded optional registration")
 
     def test_different_original_revision_is_rejected(self):
         with tempfile.TemporaryDirectory() as temporary:

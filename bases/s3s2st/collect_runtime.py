@@ -138,8 +138,17 @@ for directory in (python / 'nvidia').iterdir():
         removed_cuda_packages.append(directory.name)
         shutil.rmtree(directory)
 shutil.rmtree(python / 'nvidia_cutlass_dsl', ignore_errors=True)
+(python / 'nvidia_cutlass_dsl_packages.pth').unlink(missing_ok=True)
 source = Path('/opt/s3')
-subprocess.run(['git', '-C', str(source), 'diff', '--exit-code', 'HEAD'], check=True)
+patches = json.loads((source / 'PATCHES.json').read_text())
+changed = subprocess.check_output(['git', '-C', str(source), 'diff', '--name-only', 'HEAD'], text=True).splitlines()
+if set(changed) != {patch['path'] for patch in patches}:
+    raise RuntimeError('Unexpected modification to the pinned original source')
+for patch in patches:
+    original = subprocess.check_output(['git', '-C', str(source), 'show', 'HEAD:' + patch['path']])
+    updated = (source / patch['path']).read_bytes()
+    if hashlib.sha256(original).hexdigest() != patch['before_sha256'] or hashlib.sha256(updated).hexdigest() != patch['after_sha256']:
+        raise RuntimeError('The declared original-source compatibility patch changed')
 for path in source.rglob('*.so'):
     if path.is_symlink():
         data = path.resolve()
@@ -156,7 +165,7 @@ packages = sorted([{'name':p.name,'bytes':size(p)} for p in python.iterdir() if 
 report = {'site_bytes':size(python),'extra_libraries_bytes':size(libs),'source_bytes':size(source),'jit_toolchain_bytes':size(cuda),
           'largest_packages':packages[:35], 'preserved_external_libraries':collected,
           'original_source_revision':(source/'COMMIT').read_text().strip(),
-          'tracked_source_unmodified':True, 'retained_cuda_packages':sorted(required_cuda_packages),
+          'tracked_source_unmodified':False, 'compatibility_patches':patches, 'retained_cuda_packages':sorted(required_cuda_packages),
           'removed_cuda_packages':removed_cuda_packages}
 (root/'MANIFEST.json').write_text(json.dumps(report, indent=2))
 print(json.dumps(report, indent=2))

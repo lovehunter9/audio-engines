@@ -1,5 +1,6 @@
 """Product file and process boundaries around the unchanged official S3 runner."""
 import atexit
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -18,7 +19,10 @@ def _stage_source(source, root):
     layout = root / ".source-layout"
     if marker.exists() and marker.read_text().strip() != revision:
         raise RuntimeError("The application directory contains a different official S3 source revision")
-    if not layout.exists() or layout.read_text().strip() != revision + ":2":
+    patches = source / "PATCHES.json"
+    identity = hashlib.sha256(patches.read_bytes()).hexdigest() if patches.exists() else "native"
+    layout_id = revision + ":3:" + identity
+    if not layout.exists() or layout.read_text().strip() != layout_id:
         root.mkdir(parents=True, exist_ok=True)
 
         def ignored(directory, names):
@@ -29,7 +33,7 @@ def _stage_source(source, root):
 
         shutil.copytree(source, root, dirs_exist_ok=True, ignore=ignored)
         marker.write_text(revision + "\n")
-        layout.write_text(revision + ":2\n")
+        layout.write_text(layout_id + "\n")
 
 
 class OfficialEngine:
@@ -101,10 +105,10 @@ class OfficialEngine:
         worker_config = service / "worker.json"
         worker_config.write_text(json.dumps({"command": command, "socket": self.socket_path,
                                              "ready": str(ready)}))
-        worker = Path(__file__).with_name("s3_native_worker.py")
+        config["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + ":" + config.get("PYTHONPATH", "")
         with self.log_path.open("a") as log:
             self.process = subprocess.Popen(
-                ["audio-python", str(worker), str(worker_config)], cwd=self.root, env=config,
+                ["audio-python", "-m", "wrapper.caps.s3_native_worker", str(worker_config)], cwd=self.root, env=config,
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
         atexit.register(self.close)

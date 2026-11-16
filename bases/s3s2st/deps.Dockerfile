@@ -42,8 +42,11 @@ RUN if [ "$TARGETARCH" = arm64 ]; then \
     else python3 -m pip install --no-cache-dir "torchcodec==0.8.1"; fi
 
 RUN python3 -m pip install --no-cache-dir -e '/opt/s3[inference]' \
-        fastapi uvicorn httpx python-multipart websockets "opencv-python-headless==4.11.0.86" "better-exceptions==0.3.3" \
+        fastapi uvicorn httpx python-multipart websockets "opencv-python-headless==4.11.0.86" "better-exceptions==0.3.3" "nvtx==0.2.13" "openai-whisper==20240930" \
     && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+
+COPY bases/s3s2st/apply_compat.py /opt/apply_s3_compat.py
+RUN python3 /opt/apply_s3_compat.py
 
 COPY bases/s3s2st/collect_kernels.py /opt/link_s3_kernels.py
 RUN python3 /opt/link_s3_kernels.py \
@@ -68,7 +71,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=build /opt/s3-runtime /opt/s3-runtime
 COPY --from=build /opt/s3 /opt/s3
 RUN printf '%s\n' /opt/s3-runtime/lib > /etc/ld.so.conf.d/s3-runtime.conf && ldconfig
-RUN env -u PYTHONPATH bash -c '. /opt/s3/env.sh; python3 -c "import torch, torchaudio, torchvision, vllm, triton, transformers, flashinfer, shutil; assert shutil.which(\"nvcc\"); assert torch.version.cuda; assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); print(torch.__version__, torch.version.cuda, vllm.__file__, triton.__version__, transformers.__version__); import tempfile, pathlib; p = pathlib.Path(tempfile.mkdtemp()) / \"roundtrip.wav\"; torchaudio.save(str(p), torch.zeros(1, 1600), 16000); a, r = torchaudio.load(str(p)); assert a.shape == (1, 1600) and r == 16000; p.unlink()"'
+RUN env -u PYTHONPATH bash -c '. /opt/s3/env.sh; python3 -c "import torch, torchaudio, torchvision, vllm, triton, transformers, flashinfer, shutil; assert shutil.which(\"nvcc\"); assert torch.version.cuda; assert vllm.__file__.startswith(\"/opt/s3/vendor/\"); print(torch.__version__, torch.version.cuda, vllm.__file__, triton.__version__, transformers.__version__); from vllm.engine.omnidrca2_engine import OmniDRCA2Engine; import whisper; assert "/wrapper/caps/" not in whisper.__file__; import tempfile, pathlib; p = pathlib.Path(tempfile.mkdtemp()) / \"roundtrip.wav\"; torchaudio.save(str(p), torch.zeros(1, 1600), 16000); a, r = torchaudio.load(str(p)); assert a.shape == (1, 1600) and r == 16000; p.unlink()"'
 LABEL org.opencontainers.image.title="audio-s3-s2st-deps" \
       org.opencontainers.image.source="https://github.com/QwenAudio/S3-S2ST" \
       org.opencontainers.image.revision="1ca52ea064ec2081f12675d853525d394571bf73" \
