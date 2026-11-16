@@ -99,7 +99,8 @@ class OfficialEngine:
                              "VLLM_CACHE_ROOT": "vllm", "CUDA_CACHE_PATH": "cuda", "TMPDIR": "tmp",
                              "TORCH_EXTENSIONS_DIR": "torch_extensions"}.items():
             config[name] = str(output / "cache" / folder)
-        config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2")
+        config.update(TORCHINDUCTOR_COMPILE_THREADS="1", MAX_JOBS="2",
+                      S3_NATIVE_OVERRIDE_DIR=str(self.root / "inference/streaming/vllm_overrides"))
         self.socket_path = str(service / "engine.sock")
         ready = service / "ready.json"
         worker_config = service / "worker.json"
