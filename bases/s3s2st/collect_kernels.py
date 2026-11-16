@@ -21,8 +21,13 @@ for original in sorted((source / "vllm_flash_attn").rglob("*.py")):
 if not support:
     raise RuntimeError("FlashAttention Python entry files are required beside its compiled kernels")
 records = []
+omitted = []
 for library in sorted(source.rglob("*.so")):
     relative = library.relative_to(source)
+    if relative.name.startswith(("_moe_C.", "_flashmla_C.", "_flashmla_extension_C.")):
+        omitted.append({"path": str(relative), "bytes": library.stat().st_size,
+                        "reason": "Dense single-device S3 uses neither expert dispatch nor MLA"})
+        continue
     destination = target / relative
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -39,5 +44,6 @@ Path("/opt/s3/KERNELS.json").write_text(json.dumps({
     "exact_reference_build": False,
     "libraries": records,
     "support_files": support,
+    "omitted_optional_libraries": omitted,
 }, indent=2) + "\n")
 print("Linked", len(records), "compiled dependencies; author Python source is unchanged")

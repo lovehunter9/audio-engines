@@ -63,7 +63,8 @@ for path in python.rglob('*'):
 seeds = list((python / 'torch').glob('_C*.so'))
 seeds.append(python / 'torch/lib/libtorch_global_deps.so')
 for package in ('torchaudio', 'torchvision', 'torchcodec', 'vllm'):
-    seeds.extend(p for p in (python / package).rglob('*.so*') if p.is_file())
+    seeds.extend(p for p in (python / package).rglob('*.so*') if p.is_file()
+                 and not (package == 'vllm' and p.name.startswith(('_moe_C.', '_flashmla_C.', '_flashmla_extension_C.'))))
 link_environment = dict(os.environ)
 link_paths = [str(python / 'torch/lib'), *[str(p) for p in (python / 'nvidia').glob('*/lib')],
               *[str(p) for location in locations for p in (location / 'nvidia').glob('*/lib')]]
