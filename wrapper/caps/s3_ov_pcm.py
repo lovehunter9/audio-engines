@@ -1,4 +1,5 @@
 """Author S3 PCM control with FM, BigVGAN and CAMPPlus on OpenVINO GPU."""
+from collections import OrderedDict
 import hashlib
 import inspect
 import json
@@ -52,9 +53,8 @@ class SourceSpeaker:
 
         self.features = KaldiFeatures(Path(source_root)/"cache/openvino/speaker-features")
         path, self.evidence = _asset(Path(source_root), "speaker/campplus.onnx")
-        self.compiled = compile_gpu(path)
-        if len(self.compiled.inputs) != 1 or len(self.compiled.outputs) != 1:
-            raise RuntimeError("Unexpected original CAMPPlus interface")
+        self.path = path
+        self.compiled_shapes = OrderedDict()
         self.model_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
 
     def extract(self, wave):
@@ -64,7 +64,17 @@ class SourceSpeaker:
         if wave.shape[1] < 400:
             raise ValueError("insufficient source prefix for speaker embedding")
         feat = self.features(wave.numpy())
-        output = self.compiled([feat])[0]
+        shape = tuple(feat.shape)
+        compiled = self.compiled_shapes.get(shape)
+        if compiled is None:
+            compiled = compile_gpu(self.path, input_shapes={0: list(shape)})
+            if len(compiled.inputs) != 1 or len(compiled.outputs) != 1:
+                raise RuntimeError("Unexpected original CAMPPlus interface")
+            self.compiled_shapes[shape] = compiled
+            if len(self.compiled_shapes) > 8:
+                self.compiled_shapes.popitem(last=False)
+        self.compiled_shapes.move_to_end(shape)
+        output = compiled([feat])[0]
         x = np.asarray(output, dtype=np.float32).reshape(1, -1).copy()
         if not np.isfinite(x).all() or np.linalg.norm(x) <= 0:
             raise RuntimeError("Invalid original CAMPPlus output")
