@@ -182,7 +182,7 @@ class OfficialEngine:
                     channel.write((json.dumps({"row": row}) + "\n").encode())
                     channel.flush()
                     response = json.loads(channel.readline())
-            if response.get("error"):
+            if "error" in response:
                 raise RuntimeError("Official S3 inference failed: " + response["error"])
             result = response["result"]
             live = result.get("live_pcm") or {}

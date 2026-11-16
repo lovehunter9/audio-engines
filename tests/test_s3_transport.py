@@ -1,5 +1,6 @@
 import asyncio
 from collections import deque
+from contextvars import ContextVar
 from types import SimpleNamespace
 import unittest
 
@@ -46,6 +47,24 @@ class Native:
 
 
 class AsyncTransportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_allocator_context_is_preserved_in_the_execution_thread(self):
+        marker = ContextVar("native_allocator")
+        marker.set("original allocator")
+        native = Native()
+        original = native.engine_core.step_fn
+        def step():
+            if marker.get() != "original allocator":
+                raise RuntimeError("Native execution lost its allocator")
+            return original()
+        native.engine_core.step_fn = step
+        client = AsyncNativeClient(native, lambda: None)
+        marker.set("different caller context")
+        try:
+            await client.add_request_async(SimpleNamespace(request_id="allocated"))
+            self.assertEqual(await asyncio.wait_for(client.get_output_async(), 2), "allocated")
+        finally:
+            client.shutdown()
+
     async def test_native_requests_outputs_and_external_data_keep_their_order(self):
         native = Native()
         client = AsyncNativeClient(native, lambda: None)

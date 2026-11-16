@@ -1,6 +1,7 @@
 """Async transport around the original in-process vLLM EngineCore."""
 import asyncio
 from concurrent.futures import Future
+from contextvars import copy_context
 import queue
 import threading
 from types import SimpleNamespace
@@ -17,7 +18,8 @@ class AsyncNativeClient:
         self.resources = SimpleNamespace(engine_dead=False)
         self.commands = queue.Queue()
         self.outputs = queue.Queue()
-        self.thread = threading.Thread(target=self._run, name="S3NativeCore", daemon=True)
+        context = copy_context()
+        self.thread = threading.Thread(target=lambda: context.run(self._run), name="S3NativeCore", daemon=True)
         self.thread.start()
 
     def _run(self):

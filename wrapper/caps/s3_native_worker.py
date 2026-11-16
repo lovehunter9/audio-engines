@@ -92,7 +92,7 @@ def serve(config_path):
                     response = {"result": result}
                 except Exception as error:
                     traceback.print_exc()
-                    response = {"error": str(error)}
+                    response = {"error": str(error) or repr(error)}
                 index += 1
                 channel.write((json.dumps(response, ensure_ascii=False) + "\n").encode())
                 channel.flush()
