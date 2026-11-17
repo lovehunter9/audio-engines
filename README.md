@@ -246,6 +246,8 @@ passes. For the same reason the build's final import check must go **through**
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
+| `simuls2st` | `beclab/audio-simuls2st` | `audio_s2s` | SimulS2ST-Omni simultaneous speech-to-speech (CUDA, amd64/arm64, English and Chinese) | in progress |
+| `simuls2stov` | `beclab/audio-simuls2st-ov` | `audio_s2s` | SimulS2ST-Omni on OpenVINO GPU (amd64, iGPU and Arc); same HTTP as `simuls2st` | in progress |
 
 `stt` means different engines on different bases (`qwen-asr` vs CTranslate2 vs
 OpenVINO GenAI), which is why routing is keyed on `AUDIO_BASE` and not on the
@@ -669,11 +671,23 @@ premade. `flash_attn` and `pynini` are not installed.
 
 **`mingov`.** The same checkpoint on OpenVINO, amd64 only. VAE decode (with ISTFT), the DiT step, Qwen2 and campplus compile for the Intel GPU. A graph that misses the GPU stops the load. FP32 on both Intel modes.
 
-**`audio_llm` and `audio_s2s` are reserved, not served.** No base implements them:
-the open models that do are, as of 2026-08, either research-licensed or too heavy
-to share a card with the rest of these. The capability names stay declared in
-llm-init and the gateway so nothing downstream has to change when a base for them
-does land.
+**`simuls2stov`.** The same checkpoint on OpenVINO, amd64 only. `intel` and
+`intel-gpu` both compile for device `GPU`. The thinker uses FP16; the talker,
+VoiceBox estimator and Vocos convolutional backbone use FP32 inference. The
+Vocos ISTFT and audio encoders stay on CPU. The official chunked decoding loop
+is preserved, including its upstream speech-boundary artifacts; the wrapper
+adds no waveform trimming or prompt-frame correction.
+
+**`simuls2st`.** SimulS2ST-Omni v1 (`c7e0b260`), CUDA amd64/arm64. One load runs the thinker,
+the talker, VoiceBox and DualCodec. Weights stay out of the image: `offline/` is the
+Qwen2.5-Omni base, `simuls2st_adapter/` is the LoRA, and `voicebox/`, `dualcodec/`,
+`w2v/` are the waveform path. `POST /v1/audio/translations` runs the official streaming
+speech agent over the whole utterance and returns 24 kHz audio plus the text.
+`WS /v1/audio/translations/stream` takes little-endian 16 kHz PCM and sends 24 kHz PCM
+with `{"text","finished"}`. One side of the pair is Chinese, the other English.
+
+**`audio_llm` stays a reserved base name.** Nothing here serves it. `audio_s2s` is the
+capability `simuls2st` serves; there is still no base with that name.
 
 ## Build
 

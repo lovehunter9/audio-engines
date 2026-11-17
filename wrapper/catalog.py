@@ -110,7 +110,15 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
-    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
+    # SimulS2ST-Omni: simultaneous speech to speech. English and Chinese only.
+    "simuls2st": [
+        (("audio_s2s",), "simuls2st"),
+    ],
+    # Intel iGPU and Arc. Same HTTP. Thinker, talker, VoiceBox and Vocos compile for the GPU.
+    "simuls2stov": [
+        (("audio_s2s",), "simuls2st"),
+    ],
+    # audio_llm stays reserved until a base implements it.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.
@@ -135,6 +143,7 @@ FAMILIES = {
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
+    "simuls2st": "simuls2st-omni",
 }
 
 # (module, capability) -> [(method, path, description, takes async=1)] that capability mounts.
@@ -417,6 +426,13 @@ for _el_mod in ("firered", "breeze"):
          "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
     )
 
+_MOUNTS[("simuls2st", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations",
+     "Simultaneous speech-to-speech translation (English <-> Chinese, 24 kHz audio plus text)", True),
+    ("WS", "/v1/audio/translations/stream",
+     "Streaming speech-to-speech translation (16 kHz pcm in, 24 kHz pcm and text out)", False),
+]
+
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])
 _MOUNTS[("tts_ov", "tts_clone")] = list(_MOUNTS[("tts", "tts_clone")])
@@ -439,6 +455,7 @@ _OPERATION_IDS = {
     ("GET", "/v1/models"): "model.list",
     ("POST", "/v1/audio/transcriptions"): "audio.transcribe",
     ("POST", "/v1/audio/translations"): "audio.translate",
+    ("WS", "/v1/audio/translations/stream"): "audio.translate.stream",
     ("WS", "/v1/audio/stream"): "audio.transcribe.stream",
     ("POST", "/v1/audio/align"): "audio.align",
     ("POST", "/v1/audio/vad"): "audio.vad",

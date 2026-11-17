@@ -18,6 +18,9 @@ for f in "$dir"/probe_*.py "$dir"/collect_*.py \
     [ -f "$f" ] || continue
     hash_inputs="$hash_inputs $f"
 done
+if [ "$BASE" = simuls2st ]; then
+    hash_inputs="$hash_inputs $root/bases/runtime/split_layers.py"
+fi
 if [ -f "$dir/vendor.Dockerfile" ]; then
     hash_inputs="$hash_inputs $dir/vendor.Dockerfile"
 fi
