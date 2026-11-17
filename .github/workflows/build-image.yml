@@ -22,6 +22,11 @@ on:
         required: false
         default: ''
         type: string
+      deps_output:
+        description: 'Optional dependency image output encoding'
+        required: false
+        default: ''
+        type: string
       slices:
         description: 'Arch slices to build, as JSON [{arch, platform, runner}]. Default builds both.'
         required: false
@@ -262,6 +267,7 @@ jobs:
         with:
           context: .
           file: bases/${{ inputs.base }}/deps.Dockerfile
+          outputs: ${{ inputs.deps_output }}
           platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.deps.outputs.base_image }}

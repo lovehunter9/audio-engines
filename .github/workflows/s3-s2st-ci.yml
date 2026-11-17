@@ -1,0 +1,42 @@
+name: s3-s2st-ci
+
+on:
+  push:
+    tags: ['v*', 's3-s2st-*', '!s3-s2st-ov-*']
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/s3s2st/**'
+      - 'bases/runtime/**'
+      - '.github/workflows/s3-s2st-ci.yml'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: beclab
+      image_tag:
+        description: Explicit image tag
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: s3-s2st-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: s3s2st
+      deps_output: type=image,compression=zstd,compression-level=19,force-compression=true
+      repo: audio-s3-s2st
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"},{"arch":"arm64","platform":"linux/arm64","runner":"ubuntu-24.04-arm"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || (startsWith(github.ref, 'refs/tags/s3-s2st-') && github.ref_name) || '' }}
+    secrets: inherit
