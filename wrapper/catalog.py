@@ -111,6 +111,7 @@ BASES = {
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
     # SimulS2ST-Omni: simultaneous speech to speech. English and Chinese only.
+    "s3s2st": [(("audio_s2s",), "s3_s2st")],
     "simuls2st": [
         (("audio_s2s",), "simuls2st"),
     ],
@@ -143,6 +144,7 @@ FAMILIES = {
     "firered": "fireredtts3-instruct",
     "breeze": "breeze-tts-2",
     "ming": "ming-tts",
+    "s3_s2st": "s3-s2st",
     "simuls2st": "simuls2st-omni",
 }
 
@@ -431,6 +433,11 @@ _MOUNTS[("simuls2st", "audio_s2s")] = [
      "Simultaneous speech-to-speech translation (English <-> Chinese, 24 kHz audio plus text)", True),
     ("WS", "/v1/audio/translations/stream",
      "Streaming speech-to-speech translation (16 kHz pcm in, 24 kHz pcm and text out)", False),
+]
+
+_MOUNTS[("s3_s2st", "audio_s2s")] = [
+    ("POST", "/v1/audio/translations", "Official S3 Chinese/English speech translation with 24 kHz audio", True),
+    ("WS", "/v1/audio/translations/stream", "Official causal source prefixes, 16 kHz PCM input and 24 kHz PCM output", False),
 ]
 
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
