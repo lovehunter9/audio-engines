@@ -1,6 +1,7 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from wrapper.s2st.bounded_wait import Deadline, patch_bridge
 
@@ -64,18 +65,20 @@ async def close(bridge, task):
     await task
 
 
-async def main():
+async def exercise(expired, timer_started, yield_control):
     bridge = Bridge()
     task = asyncio.create_task(bridge._translate_worker())
     await source(bridge, "first ")
     first_task = bridge._idle_task
-    await asyncio.sleep(0.03)
+    await asyncio.wait_for(timer_started.wait(), 1)
     await source(bridge, "second")
     assert bridge._idle_task is first_task
+    expired.set()
     await asyncio.wait_for(bridge.visible.wait(), 1)
     assert bridge._translation.engine.flushed == ["first second"]
     assert len([event for event in bridge.events if event["type"] == "wait_deadline"]) == 1
     await close(bridge, task)
+    expired.clear()
 
     bridge = Bridge()
     task = asyncio.create_task(bridge._translate_worker())
@@ -89,7 +92,7 @@ async def main():
     await source(bridge, "reset", reset=True)
     assert bridge._translation.engine.flushed == ["done", "tail reset"]
     await close(bridge, task)
-    await asyncio.sleep(0.1)
+    await yield_control(0)
     assert bridge._translation_queue.empty()
 
     bridge = Bridge()
@@ -99,11 +102,25 @@ async def main():
     assert bridge._idle_task is None and bridge._translation.engine.pending_source == "last tail"
     await bridge._translation.flush()
     assert bridge._translation.engine.flushed == ["last tail"]
-    await asyncio.sleep(0.1)
+    await yield_control(0)
     assert bridge._translation_queue.empty()
     print(
         "Pending deadline, non-resetting ASR timer, stale token, native reset flush, EOS drain, and task cleanup passed."
     )
+
+
+async def main():
+    expired = asyncio.Event()
+    timer_started = asyncio.Event()
+    yield_control = asyncio.sleep
+
+    async def controlled_sleep(delay):
+        assert 0 <= delay <= 0.08
+        timer_started.set()
+        await expired.wait()
+
+    with patch("wrapper.s2st.bounded_wait.asyncio.sleep", controlled_sleep):
+        await exercise(expired, timer_started, yield_control)
 
 
 class BoundedWaitTests(unittest.IsolatedAsyncioTestCase):
