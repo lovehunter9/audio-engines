@@ -8,3 +8,9 @@ expected = '885e901df3703a565040b13a3eb3a7c816c4649711b77f88a86351f448433ed6'
 if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
     raise RuntimeError('Pinned official Tencent CLI source changed')
 subprocess.run(['patch', '-p1', '--batch', '--forward', '-i', str(Path(__file__).with_name('native-io.patch').resolve())], cwd=root, check=True)
+
+if len(sys.argv) > 2 and sys.argv[2] == "--shared-entry":
+    patched = source.read_text()
+    if patched.count("std::cin") != 3:
+        raise RuntimeError("Pinned PCM transport changed")
+    (root / "shared-cli.cpp").write_text(patched.replace("std::cin", "audio_s2st_input()"))

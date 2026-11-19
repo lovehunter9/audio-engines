@@ -112,14 +112,16 @@ def build_app(supports):
                     (
                         python,
                         "-m",
-                        "wrapper.s2st.ming_worker",
+                        "wrapper.s2st.tencent_worker",
                         "--model",
                         str(speech),
+                        "--translation-model",
+                        str(model),
                         "--cache",
                         str(cache / "ming"),
                         "--compile-flow",
                     ),
-                    "http://127.0.0.1:18091/health",
+                    "http://127.0.0.1:18091/internal/tencent/health",
                     environment=environment,
                     timeout=1800,
                 )
@@ -129,7 +131,7 @@ def build_app(supports):
             await warm.feed(bytes(51200))
             await warm.finish()
             with tempfile.TemporaryDirectory(prefix="warmup-", dir=cache) as directory:
-                producer = Tencent(model, Path(directory) / "native", binary=binary)
+                producer = Tencent(model, Path(directory) / "native", binary=binary, native_url="http://127.0.0.1:18091/internal/tencent")
 
                 async def discard(pcm):
                     pass
@@ -186,11 +188,24 @@ def build_app(supports):
             raise HTTPException(429, "one active speech translation session is supported")
 
     async def session(source, emit, *, streaming=False):
+        terminal = None
+
+        async def deliver(event):
+            nonlocal terminal
+            if event["type"] == "done":
+                terminal = event
+            else:
+                await emit(event)
+
         async with exclusive:
             workers.assert_alive()
             with tempfile.TemporaryDirectory(prefix="session-", dir=cache) as directory:
-                producer = Tencent(model, Path(directory) / "native", binary=binary)
-                await run_pipeline(source, producer, emit, speech_url, streaming=streaming)
+                producer = Tencent(model, Path(directory) / "native", binary=binary, native_url="http://127.0.0.1:18091/internal/tencent")
+                await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
+        # A terminal acknowledgement means native cleanup and the session lock are released.
+        if terminal is None:
+            raise RuntimeError("S2ST ended without its completion record")
+        await emit(terminal)
 
     @app.post("/v1/audio/speech-translations")
     async def translate(

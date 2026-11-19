@@ -22,7 +22,7 @@ class Runtime:
 
 
 class Producer:
-    def __init__(self, model, directory, binary=None):
+    def __init__(self, model, directory, binary=None, native_url=None):
         self.directory = Path(directory)
 
 
@@ -147,6 +147,43 @@ class ApiTests(unittest.TestCase):
         rows = [json.loads(line) for line in response.text.splitlines()]
         self.assertEqual([r["type"] for r in rows], ["translation_delta", "audio", "done"])
         self.assertEqual(rows[-1]["source_samples"], 160)
+
+    def test_terminal_ack_waits_for_cleanup_and_next_session_is_available(self):
+        original = server.run_pipeline
+        released = []
+
+        async def delayed_cleanup(*args, **kwargs):
+            await original(*args, **kwargs)
+            await asyncio.sleep(0.02)
+            released.append(True)
+
+        with patch.object(server, "run_pipeline", delayed_cleanup):
+            for attempt in range(2):
+                with self.client.websocket_connect("/v1/audio/speech-translations/stream") as socket:
+                    socket.send_json({"direction": "zh2en"})
+                    self.assertEqual(socket.receive_json()["type"], "ready")
+                    socket.send_bytes(b"\1\0" * 160)
+                    socket.receive_json()
+                    socket.receive_json()
+                    socket.send_json({"type": "end"})
+                    self.assertEqual(socket.receive_json()["type"], "done")
+                    self.assertEqual(len(released), attempt + 1)
+
+    def test_cleanup_failure_never_publishes_a_success_ack(self):
+        original = server.run_pipeline
+
+        async def failed_cleanup(*args, **kwargs):
+            await original(*args, **kwargs)
+            raise RuntimeError("native cleanup failed")
+
+        with patch.object(server, "run_pipeline", failed_cleanup):
+            response = self.client.post(
+                "/v1/audio/speech-translations", files={"file": ("source.wav", wav())},
+                data={"direction": "zh2en", "stream": "true"},
+            )
+        rows = [json.loads(line) for line in response.text.splitlines()]
+        self.assertEqual(rows[-1], {"type": "error", "message": "native cleanup failed"})
+        self.assertFalse(any(row["type"] == "done" for row in rows))
 
     def test_live_pcm_produces_audio_before_end(self):
         with self.client.websocket_connect("/v1/audio/speech-translations/stream") as socket:

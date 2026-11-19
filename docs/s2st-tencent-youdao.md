@@ -61,3 +61,9 @@ Non-streaming WAV requests establish HTTP headers before model work, then return
 ## Dependency repair packaging
 
 The incremental CUDA dependency image reuses the immutable AMD64/ARM64 parent `deps-7bc3825f4572`, preserving the verified native binaries and neural stack byte-for-byte. Only `imageio-ffmpeg==0.8.1`, already used by the working host, is added for the official `TempoStream` transport. The image build actually converts PCM through that transport; an import-only probe cannot detect this lazy dependency. `bases/s2st-tencent/vendor.Dockerfile` retains the complete source-build recipe for bootstrapping a replacement parent. No model weights, decoding parameters or shared MING code change in this repair.
+
+## Olares same-process native entry
+
+The first installed two-process candidate exposed alternating roughly ten-second GPU waits in realtime input, and an early terminal-ack race. The new native entry compiles only the pinned official CLI translation unit against the unchanged published native libraries. Its PCM stream is a private FIFO instead of process stdin; model arguments, encoder, decoder, sampler, prompt, turn sizes and MING's seven trusted files are unchanged. Two original 40-second recordings in opposite directions match the standalone entry's complete token IDs, UTF-8 bytes, consumed samples, turns, EOG and context positions. This is an inference equivalence check, not a measured realtime performance result.
+
+MING and the native entry run in the same GPU PID. The public server and loopback control plane do not disable the Olares preload or change its scheduling policy. Native sessions are serialized, owned by their cache directory, and drained before terminal success is acknowledged. A failed cleanup is an explicit request failure. The new packaging adds only a small compiled entry; no CUDA kernel or neural dependency rebuild is required. Actual installed realtime revalidation is still required.
