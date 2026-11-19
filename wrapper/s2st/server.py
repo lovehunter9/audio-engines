@@ -316,10 +316,11 @@ def build_app(supports):
     async def translate_stream(socket: WebSocket):
         await socket.accept()
         task = None
+        source = None
         try:
             available()
             init = await asyncio.wait_for(socket.receive_json(), 30)
-            source = Input(Stream(init["direction"]))
+            source = Input(Stream(init["direction"]), spool_directory=cache)
 
             async def emit(event):
                 await socket.send_json(event)
@@ -359,6 +360,8 @@ def build_app(supports):
                 if task is not None:
                     task.cancel()
                     await asyncio.gather(task, return_exceptions=True)
+                if source is not None:
+                    source.close()
                 try:
                     await socket.close()
                 except Exception:

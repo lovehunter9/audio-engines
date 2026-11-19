@@ -52,6 +52,36 @@ class InputTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(source.samples, 1)
         self.assertEqual(await anext(source), b"00")
 
+    async def test_burst_upload_drains_before_slow_inference_and_preserves_pcm(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Input(Stream("zh2en"), capacity=1, spool_directory=folder)
+            payload = bytes(range(256)) * 40960
+
+            async def upload():
+                # No consumer runs until the whole valid ten-MiB burst finishes.
+                for offset in range(0, len(payload), 5120):
+                    await source.feed(payload[offset:offset + 5120])
+                await source.finish()
+
+            await asyncio.wait_for(upload(), 5)
+            actual = b"".join([chunk async for chunk in source])
+            self.assertEqual(actual, payload)
+            self.assertEqual(source.samples, len(payload) // 2)
+            self.assertEqual(source.digest.hexdigest(), hashlib.sha256(payload).hexdigest())
+            self.assertIsNone(source._spool)
+
+    async def test_spooled_upload_limits_and_disconnect_cleanup(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Input(Stream("en2zh"), spool_directory=folder, max_samples=2)
+            await source.feed(b"1234")
+            with self.assertRaisesRegex(ValueError, "duration limit"):
+                await source.feed(b"56")
+            self.assertEqual(source.samples, 2)
+            descriptor = source._spool
+            source.close()
+            source.close()
+            self.assertTrue(descriptor.closed)
+
     def test_reject_unimplemented_language_and_audio_formats(self):
         with self.assertRaises(ValueError):
             Stream("fr2en")

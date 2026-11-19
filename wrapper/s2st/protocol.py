@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import dataclass
 import hashlib
+import tempfile
 
 
 @dataclass(frozen=True)
@@ -16,8 +17,9 @@ class Stream:
 
 
 class Input:
-    def __init__(self, stream, capacity=16, max_frame_bytes=51200):
-        if capacity < 1 or max_frame_bytes < 2:
+    def __init__(self, stream, capacity=16, max_frame_bytes=51200,
+                 spool_directory=None, max_samples=900 * 16000):
+        if capacity < 1 or max_frame_bytes < 2 or max_samples < 1:
             raise ValueError("invalid stream limits")
         self.stream = stream
         self.queue = asyncio.Queue(maxsize=capacity)
@@ -27,6 +29,10 @@ class Input:
         self.samples = 0
         self.digest = hashlib.sha256()
         self.lock = asyncio.Lock()
+        self.max_samples = max_samples
+        self._spool = tempfile.TemporaryFile(dir=spool_directory) if spool_directory is not None else None
+        self._written = self._read = 0
+        self._available = asyncio.Event()
 
     async def feed(self, data):
         if not isinstance(data, bytes) or not data or len(data) % 2:
@@ -36,7 +42,17 @@ class Input:
         async with self.lock:
             if self.finished:
                 raise ValueError("audio after end of input")
-            await self.queue.put(data)
+            if self.samples + len(data) // 2 > self.max_samples:
+                raise ValueError("session exceeds the input duration limit")
+            if self._spool is None:
+                await self.queue.put(data)
+            else:
+                # Drain valid uploads independently of GPU speed. A bounded disk
+                # spool avoids a full TCP receive window timing out in the mesh.
+                self._spool.seek(self._written)
+                self._spool.write(data)
+                self._written += len(data)
+                self._available.set()
             self.samples += len(data) // 2
             self.digest.update(data)
 
@@ -44,8 +60,10 @@ class Input:
         async with self.lock:
             if self.finished:
                 raise ValueError("duplicate end of input")
-            await self.queue.put(None)
+            if self._spool is None:
+                await self.queue.put(None)
             self.finished = True
+            self._available.set()
 
     def __aiter__(self):
         return self
@@ -53,9 +71,29 @@ class Input:
     async def __anext__(self):
         if self.exhausted:
             raise StopAsyncIteration
+        if self._spool is not None:
+            await self._available.wait()
+            async with self.lock:
+                if self._read == self._written and self.finished:
+                    self.exhausted = True
+                    self.close()
+                    raise StopAsyncIteration
+                self._spool.seek(self._read)
+                data = self._spool.read(min(self.max_frame_bytes, self._written - self._read))
+                self._read += len(data)
+                if self._read == self._written and not self.finished:
+                    self._available.clear()
+                return data
         data = await self.queue.get()
         self.queue.task_done()
         if data is None:
             self.exhausted = True
             raise StopAsyncIteration
         return data
+
+    def close(self):
+        self.finished = self.exhausted = True
+        self._available.set()
+        if self._spool is not None:
+            self._spool.close()
+            self._spool = None
