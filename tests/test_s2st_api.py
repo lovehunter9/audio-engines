@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import json
@@ -91,6 +92,50 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(reader.getframerate(), 24000)
             self.assertEqual(reader.readframes(reader.getnframes()), b"\2\0" * 8)
         self.assertEqual(result["source_samples"], 160)
+
+    def test_nonstream_headers_precede_model_work(self):
+        from fastapi import UploadFile
+
+        async def exercise():
+            messages = []
+            original = server.run_pipeline
+
+            async def checked(*args, **kwargs):
+                self.assertEqual(messages[0]["type"], "http.response.start")
+                await original(*args, **kwargs)
+
+            endpoint = next(
+                route.endpoint
+                for route in self.client.app.routes
+                if getattr(route, "path", None) == "/v1/audio/speech-translations"
+            )
+            response = await endpoint(UploadFile(file=io.BytesIO(wav())), "en2zh", False)
+
+            async def send(message):
+                messages.append(message)
+
+            async def receive():
+                raise AssertionError("ASGI 2.4 response must not wait for more request data")
+
+            with patch.object(server, "run_pipeline", checked):
+                await response({"type": "http", "asgi": {"spec_version": "2.4"}}, receive, send)
+            body = b"".join(message.get("body", b"") for message in messages)
+            self.assertEqual(json.loads(body)["type"], "done")
+
+        asyncio.run(exercise())
+
+    def test_nonstream_model_failure_is_an_explicit_error_record(self):
+        async def failed(*args, **kwargs):
+            raise RuntimeError("native synthesis failed")
+
+        with patch.object(server, "run_pipeline", failed):
+            response = self.client.post(
+                "/v1/audio/speech-translations",
+                files={"file": ("source.wav", wav(), "audio/wav")},
+                data={"direction": "en2zh"},
+            )
+        self.assertEqual(response.json(), {"type": "error", "message": "native synthesis failed"})
+        self.assertNotIn("audio_base64", response.json())
 
     def test_http_stream_keeps_all_events_and_terminal_ack(self):
         response = self.client.post(

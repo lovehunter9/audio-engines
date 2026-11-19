@@ -269,23 +269,33 @@ def build_app(supports):
             elif event["type"] == "done":
                 final = event
 
-        feeder = asyncio.create_task(consume_file(source, pcm))
-        try:
-            await session(source, collect)
-            await feeder
-        finally:
-            feeder.cancel()
-            await asyncio.gather(feeder, return_exceptions=True)
-        output = io.BytesIO()
-        with wave.open(output, "wb") as writer:
-            writer.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
-            writer.writeframes(audio)
-        return dict(
-            final,
-            audio_base64=base64.b64encode(output.getvalue()).decode(),
-            audio_format="wav",
-            sample_rate=24000,
-        )
+        async def complete_response():
+            # Establish headers before inference so Common's header timeout does not cap WAV length.
+            feeder = asyncio.create_task(consume_file(source, pcm))
+            try:
+                await session(source, collect)
+                await feeder
+                output = io.BytesIO()
+                with wave.open(output, "wb") as writer:
+                    writer.setparams((1, 2, 24000, 0, "NONE", "not compressed"))
+                    writer.writeframes(audio)
+                yield json.dumps(
+                    dict(
+                        final,
+                        audio_base64=base64.b64encode(output.getvalue()).decode(),
+                        audio_format="wav",
+                        sample_rate=24000,
+                    ),
+                    ensure_ascii=False,
+                )
+            except Exception as exc:
+                yield json.dumps({"type": "error", "message": str(exc)})
+            finally:
+                with CancelScope(shield=True):
+                    feeder.cancel()
+                    await asyncio.gather(feeder, return_exceptions=True)
+
+        return StreamingResponse(complete_response(), media_type="application/json")
 
     @app.websocket("/v1/audio/speech-translations/stream")
     async def translate_stream(socket: WebSocket):
