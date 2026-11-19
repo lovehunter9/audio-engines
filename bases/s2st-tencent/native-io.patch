@@ -1,0 +1,134 @@
+--- a/tools/mtmd/mtmd-cli.cpp
++++ b/tools/mtmd/mtmd-cli.cpp
+@@ -14,6 +14,12 @@
+ #include <limits.h>
+ #include <cinttypes>
+ #include <clocale>
++#include <iostream>
++#include <chrono>
++#include <thread>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ 
+ #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
+ #include <signal.h>
+@@ -396,18 +402,18 @@
+         return 1;
+     }
+ 
+-    auto res = mtmd_helper_bitmap_init_from_file(ctx.ctx_vision.get(), fname.c_str(), false, ctx.init_opt);
+-    if (!res.bitmap) {
+-        return 1;  // error is already printed by libmtmd
+-    }
++    const bool stdin_pcm = fname == "pcm16:stdin";
++    auto res = stdin_pcm ? mtmd_helper_bitmap_wrapper{} : mtmd_helper_bitmap_init_from_file(ctx.ctx_vision.get(), fname.c_str(), false, ctx.init_opt);
++    if (!stdin_pcm && !res.bitmap) return 1;
+     mtmd::bitmap bmp(res.bitmap);
+-    if (!mtmd_bitmap_is_audio(bmp.ptr.get())) {
+-        LOG_ERR("%s: %s is not an audio file\n", __func__, fname.c_str());
++    if (!stdin_pcm && !mtmd_bitmap_is_audio(bmp.ptr.get())) {
++        LOG_ERR("%s: input is not audio\n", __func__);
+         return 1;
+     }
+-    const float * all    = (const float *) bmp.data();
+-    const size_t  n_all  = bmp.n_bytes() / sizeof(float);
+-    const int     rate   = mtmd_get_audio_sample_rate(ctx.ctx_vision.get());
++    const float * all = stdin_pcm ? nullptr : (const float *) bmp.data();
++    size_t n_all = stdin_pcm ? SIZE_MAX : bmp.n_bytes() / sizeof(float);
++    const int rate = mtmd_get_audio_sample_rate(ctx.ctx_vision.get());
++    if (stdin_pcm && rate != 16000) return 1;
+     const int     n_embd = llama_model_n_embd_inp(ctx.model);
+ 
+     // -p must carry the media marker; everything before it is the user prompt,
+@@ -457,16 +463,49 @@
+     int           n_emit  = 0;  // turns that produced content; the rest are WAIT
+     int           n_turn  = 0;  // turns actually fed; the last one is usually short
+     bool          done    = false;
++    const char * event_path = std::getenv("BENCHMARK_EVENTS_PATH");
++    FILE * event_file = event_path ? std::fopen(event_path, "w") : nullptr;
++    const char * pace_value = std::getenv("BENCHMARK_REALTIME_INPUT");
++    const bool pace_input = pace_value && std::strcmp(pace_value, "1") == 0;
++    auto emit_event = [&](const char * kind, int token, const std::string & piece) {
++        if (!event_file) return;
++        std::fprintf(event_file, "%lld\t%s\t%d\t%.6f\t%d\t",
++                     (long long) (ggml_time_us() - t_start), kind, n_turn,
++                     (double) off / rate, token);
++        for (unsigned char c : piece) std::fprintf(event_file, "%02x", c);
++        std::fputc('\n', event_file);
++        std::fflush(event_file);
++    };
++    emit_event("begin", 0, "");
+ 
+     for (int turn = 0; !done && off < n_all && !g_is_interrupted; turn++) {
+         const size_t want    = (size_t) rate * (turn == 0 ? first_ms : step_ms) / 1000;
+-        const size_t n_chunk = std::min(want, n_all - off);
+-        if (n_chunk == 0) {
+-            break;
++        size_t n_chunk = std::min(want, n_all - off);
++        std::vector<float> incoming;
++        if (stdin_pcm) {
++            std::vector<unsigned char> bytes(want * 2);
++            std::cin.read(reinterpret_cast<char *>(bytes.data()), bytes.size());
++            const size_t count = std::cin.gcount();
++            if (count % 2) { LOG_ERR("Incomplete PCM16 sample\n"); return 1; }
++            if (std::cin.bad()) return 1;
++            n_chunk = count / 2;
++            incoming.resize(n_chunk);
++            for (size_t i = 0; i < n_chunk; ++i) {
++                const uint16_t bits = uint16_t(bytes[i * 2]) | (uint16_t(bytes[i * 2 + 1]) << 8);
++                incoming[i] = static_cast<int16_t>(bits) / 32768.0f;
++            }
++            if (count < want * 2) n_all = off + n_chunk;
++        }
++        if (n_chunk == 0) break;
++        if (pace_input) {
++            const int64_t due = t_start + (int64_t) ((off + n_chunk) * 1000000 / rate);
++            const int64_t wait_us = due - ggml_time_us();
++            if (wait_us > 0) std::this_thread::sleep_for(std::chrono::microseconds(wait_us));
+         }
+         n_turn++;
+-        mtmd::bitmap turn_bmp(mtmd_bitmap_init_from_audio(n_chunk, all + off));
++        mtmd::bitmap turn_bmp(mtmd_bitmap_init_from_audio(n_chunk, stdin_pcm ? incoming.data() : all + off));
+         off += n_chunk;
++        emit_event("audio", 0, "");
+ 
+         // one turn = one mel = one encoder call, exactly what the reference does
+         mtmd::input_chunks           chunks(mtmd_input_chunks_init());
+@@ -538,9 +577,12 @@
+                 // one line per turn so the two branches stay separable
+                 LOG("\n");
+                 done = (tok == llama_vocab_eos(ctx.vocab));
++                emit_event("eog", tok, "");
+             } else if (tok == t_tgt || !llama_vocab_is_control(ctx.vocab, tok)) {
+-                LOG("%s", common_token_to_piece(ctx.lctx, tok).c_str());
++                const std::string piece = common_token_to_piece(ctx.lctx, tok);
++                LOG("%s", piece.c_str());
+                 fflush(stdout);
++                emit_event("token", tok, piece);
+                 emitted = true;
+             }
+             if (decode_tokens(std::vector<llama_token>{ tok })) {
+@@ -555,7 +597,21 @@
+             }
+         }
+         n_emit += emitted ? 1 : 0;
+-    }
++        emit_event("turn_end", 0, "");
++        emit_event("context", ctx.n_past, "");
++    }
++    if (stdin_pcm) n_all = off;
++    emit_event("finished", done ? 1 : 0, "");
++    const char * release_path = std::getenv("BENCHMARK_HOLD_EXIT");
++    if (release_path && event_file) {
++        emit_event("resident_wait", 0, "");
++        while (!g_is_interrupted) {
++            FILE * release = std::fopen(release_path, "r");
++            if (release) { std::fclose(release); break; }
++            std::this_thread::sleep_for(std::chrono::milliseconds(10));
++        }
++    }
++    if (event_file) std::fclose(event_file);
+ 
+     const double t_total = (ggml_time_us() - t_start) / 1e6;
+     LOG("\n\n%s: %d tokens, %d/%d turns emitted, %.2f s audio in %.2f s (%.2fx realtime)\n", __func__, n_gen, n_emit,

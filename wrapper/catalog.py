@@ -3,6 +3,7 @@ from . import tasks
 
 # base -> ordered [(caps served together, module)]; first match wins, one instance = one model.
 BASES = {
+    "s2st-tencent": [(("audio_s2s",), "s2st")],
     "qwen": [
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
@@ -110,11 +111,12 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
-    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
+    # audio_llm remains reserved.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.
 FAMILIES = {
+    "s2st": "speech-to-speech-translation",
     "stt_stream": "qwen3-asr",
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
@@ -193,6 +195,10 @@ _MOUNTS = {
     ],
     ("diar_nemotron", "diar_stream"): [
         ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
+    ],
+    ("s2st", "audio_s2s"): [
+        ("POST", "/v1/audio/speech-translations", "Complete audio to translated text and speech; stream=true returns NDJSON", False),
+        ("WS", "/v1/audio/speech-translations/stream", "Live PCM16 input to incremental translated text and PCM24k output", False),
     ],
     ("tts", "tts"): [
         ("POST", "/v1/audio/speech",

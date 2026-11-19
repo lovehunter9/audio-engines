@@ -244,6 +244,7 @@ passes. For the same reason the build's final import check must go **through**
 | `breeze` | `beclab/audio-breeze` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 in-process (OpenAI and ElevenLabs) | in progress |
 | `breezeov` | `beclab/audio-breeze-ov` | `tts`, `tts_clone`, `tts_design` | Breeze TTS 2 → OpenVINO GPU (amd64) | in progress |
 | `fireredov` | `beclab/audio-firered-ov` | `tts`, `tts_clone`, `tts_design` | FireRedTTS3-Instruct → OpenVINO GPU (amd64) | in progress |
+| `s2st-tencent` | `beclab/audio-s2st-tencent` | `audio_s2s` | Official Hy-SimulMT Q4_K_M CUDA with shared native MING; AMD64 + ARM64 | experimental |
 | `ming` | `beclab/audio-ming` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B in-process (OpenAI speech first; Turn is shared with a later EL surface) | in progress |
 | `mingov` | `beclab/audio-ming-ov` | `tts`, `tts_clone`, `tts_design` | Ming-3.0-tts-0.5B on OpenVINO GPU (amd64); same HTTP as `ming` | in progress |
 
