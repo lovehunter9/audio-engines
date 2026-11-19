@@ -56,3 +56,8 @@ Both checkpoint revisions are fixed: Tencent GGUF `8d4e9381419ac17d17e29359a2971
 The local PTL chart is experimental version 0.1.0 and uses llm-init v1.7.26 with Common Hugging Face storage and Common run state. Existing chart versions and other applications are unchanged. The report's primary total S2ST RTF includes each session's model initialization; steady-pipeline and pure translation RTF are secondary fields, not substitutes.
 
 Non-streaming WAV requests establish HTTP headers before model work, then return a single complete JSON body with `type: done` and the complete WAV. This avoids the Common proxy response-header deadline for recordings whose processing exceeds 60 seconds. A failure after headers returns an explicit `type: error` record without audio; callers must verify the terminal type. Streaming NDJSON and WebSocket delivery are unchanged.
+
+
+## Dependency repair packaging
+
+The incremental CUDA dependency image reuses the immutable AMD64/ARM64 parent `deps-7bc3825f4572`, preserving the verified native binaries and neural stack byte-for-byte. Only `imageio-ffmpeg==0.8.1`, already used by the working host, is added for the official `TempoStream` transport. The image build actually converts PCM through that transport; an import-only probe cannot detect this lazy dependency. `bases/s2st-tencent/vendor.Dockerfile` retains the complete source-build recipe for bootstrapping a replacement parent. No model weights, decoding parameters or shared MING code change in this repair.
