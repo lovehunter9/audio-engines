@@ -34,4 +34,6 @@ COPY --from=python /opt/upstream /opt/upstream
 COPY --from=native /native /opt/llama
 RUN python3 -c "import pathlib,sysconfig; p=pathlib.Path(sysconfig.get_paths()['purelib'])/'nvidia/cu13'; assert (p/'include/cuda.h').exists(); pathlib.Path('/opt/cuda-runtime').symlink_to(p)"
 RUN --mount=from=native,source=/usr/local/cuda/lib64/stubs,target=/ci-cuda-stubs,ro python3 -c "import glob,pathlib; paths=glob.glob('/usr/local/lib/python3.12/*-packages/nvidia/**/lib',recursive=True); pathlib.Path('/etc/ld.so.conf.d/s2st.conf').write_text('/opt/llama/lib\n'+'\n'.join(paths)+'\n')" && ldconfig && python3 -c "import torch,torchaudio,onnxruntime,ming_tts,simulinfer,importlib.util; assert torch.__version__=='2.13.0+cu130'; assert torchaudio.__version__=='2.11.0+cu130'; assert 'CUDAExecutionProvider' in onnxruntime.get_available_providers(); assert importlib.util.find_spec('vllm_omni') is None; print(torch.__version__,torchaudio.__version__,onnxruntime.__version__)" && LD_LIBRARY_PATH=/ci-cuda-stubs /opt/llama/bin/llama-mtmd-cli --version
+COPY bases/s2st-tencent/probe_runtime.py /opt/s2st-probe-runtime.py
+RUN python3 /opt/s2st-probe-runtime.py
 LABEL org.opencontainers.image.title="audio-s2st-tencent-deps"
