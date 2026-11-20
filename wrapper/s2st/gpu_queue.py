@@ -8,6 +8,23 @@ import time
 import uuid
 
 DEFAULT = None
+MING_PROTECTION_SECONDS = 20.0
+
+
+def ming_priority_age(path=None):
+    selected = path if path is not None else DEFAULT
+    if selected is None:
+        return None
+    try:
+        entries = json.loads(Path(selected).with_suffix(".json").read_text())
+    except FileNotFoundError:
+        return None
+    now = time.monotonic()
+    ages = [now - x["enqueued"] for x in entries
+            if x["label"] == "ming" and x["start"] is not None
+            and identity(x["pid"]) == x["start"]]
+    age = max(ages, default=0.0)
+    return age if age >= MING_PROTECTION_SECONDS else None
 
 
 def configure(path):

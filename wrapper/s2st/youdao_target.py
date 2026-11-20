@@ -3,6 +3,8 @@ import json
 import re
 import time
 
+from .gpu_queue import async_stage, ming_priority_age
+
 
 _CONTROL_PREFIX = re.compile(
     r"^<?\s*(?:W(?:A(?:I(?:T)?)?)?|T(?:R(?:A(?:N(?:S)?)?)?)?)?\s*>?\s*[:：]?\s*$", re.I
@@ -121,12 +123,17 @@ class CompletionStream:
                 self.client = httpx.AsyncClient(
                     timeout=self.native.timeout_seconds, trust_env=False
                 )
-            if self.stage is None:
-                return await self.generate(message, force)
-            async with self.stage("t3po"):
-                return await self.generate(message, force)
+            age = ming_priority_age() if self.stage is None else None
+            selected = self.stage or (async_stage if age is not None else None)
+            scheduling = dict(gpu_stage_serialized=selected is not None,
+                              ming_deadline_protected=age is not None,
+                              ming_stage_age_seconds=age)
+            if selected is None:
+                return await self.generate(message, force, scheduling)
+            async with selected("t3po"):
+                return await self.generate(message, force, scheduling)
 
-    async def generate(self, message, force):
+    async def generate(self, message, force, scheduling):
         started = time.monotonic()
         self.target.begin()
         body = self.payload(message, force)
@@ -141,7 +148,7 @@ class CompletionStream:
                     payload=body,
                     force=force,
                     started_monotonic_seconds=started,
-                    gpu_stage_serialized=self.stage is not None,
+                    **scheduling,
                 )
             )
         finish_reason = None

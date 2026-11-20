@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -65,7 +66,7 @@ class WordTailTests(unittest.TestCase):
 
 
 class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise_translation_scheduling(self, overlap):
+    async def exercise_translation_scheduling(self, overlap, protect=False):
         import httpx
         from wrapper.s2st import gpu_queue
         from wrapper.s2st.youdao_target import CompletionStream, TargetText
@@ -92,21 +93,52 @@ class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):
                 completion = CompletionStream(native, 'zh2en', target,
                     stage=None if overlap else gpu_queue.async_stage, observe=observe, client=client)
                 with gpu_queue.stage('ming'):
+                    if protect:
+                        path=Path(directory)/'queue.json'
+                        entries=json.loads(path.read_text())
+                        entries[0]['enqueued']=time.monotonic()-gpu_queue.MING_PROTECTION_SECONDS-1
+                        path.write_text(json.dumps(entries))
                     task = asyncio.create_task(completion('source'))
-                    if overlap:
+                    if overlap and not protect:
                         await asyncio.wait_for(entered.wait(), 2)
                     else:
                         await asyncio.sleep(.1)
                         self.assertFalse(entered.is_set())
                 self.assertEqual(await asyncio.wait_for(task, 2), 'Done.')
         request = next(e for e in observed if e['event']=='translation_request')
-        self.assertEqual(request['gpu_stage_serialized'], not overlap)
+        self.assertEqual(request['gpu_stage_serialized'], not overlap or protect)
+        self.assertEqual(request['ming_deadline_protected'], protect)
 
     async def test_default_translation_waits_for_ming(self):
         await self.exercise_translation_scheduling(False)
 
     async def test_opt_in_translation_can_run_while_ming_holds_its_stage(self):
         await self.exercise_translation_scheduling(True)
+
+    async def test_opt_in_translation_waits_when_ming_approaches_its_deadline(self):
+        await self.exercise_translation_scheduling(True,protect=True)
+
+    async def test_cancelled_protected_translation_does_not_remove_ming_owner(self):
+        from wrapper.s2st import gpu_queue
+        from wrapper.s2st.youdao_target import CompletionStream
+        with tempfile.TemporaryDirectory() as directory, patch.object(gpu_queue,'DEFAULT',Path(directory)/'queue'):
+            with gpu_queue.stage('ming'):
+                path=Path(directory)/'queue.json'
+                entries=json.loads(path.read_text())
+                entries[0]['enqueued']=time.monotonic()-gpu_queue.MING_PROTECTION_SECONDS-1
+                path.write_text(json.dumps(entries))
+                completion=CompletionStream(None,'en2zh',None,stage=None,client=object())
+                task=asyncio.create_task(completion('not sent before admission'))
+                for _ in range(100):
+                    if len(json.loads(path.read_text())) == 2:
+                        break
+                    await asyncio.sleep(.005)
+                self.assertEqual(len(json.loads(path.read_text())),2)
+                task.cancel()
+                await asyncio.gather(task,return_exceptions=True)
+                self.assertEqual([x['label'] for x in json.loads(path.read_text())],['ming'])
+                self.assertIsNotNone(gpu_queue.ming_priority_age())
+            self.assertEqual(path.read_text(),'[]')
 
     async def test_foreign_script_is_preserved_and_reported_without_inference_retry(self):
         import httpx

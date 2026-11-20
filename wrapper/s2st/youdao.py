@@ -203,6 +203,8 @@ class Youdao:
                     "Youdao did not deliver all final translated text to shared MING"
                 )
             consumed = 0
+            asr_protected_calls = 0
+            asr_queue_wait = 0.0
             observed_chunk_samples = set()
             if not observer.exists():
                 raise RuntimeError("ASR consumption observer is absent")
@@ -213,6 +215,8 @@ class Youdao:
                     if row.get("event", "").endswith("_failed"):
                         raise RuntimeError("An original ASR model call failed")
                     consumed += row.get("input_samples", 0)
+                    asr_protected_calls += bool(row.get("ming_deadline_protected"))
+                    asr_queue_wait += row.get("gpu_queue_wait_seconds", 0.0)
                     if row.get("input_samples", 0) > 0:
                         observed_chunk_samples.add(row["input_samples"])
             if consumed != audio.samples + padding_samples:
@@ -223,6 +227,8 @@ class Youdao:
                 raise RuntimeError("Youdao input producer stopped early")
             self.completion_metadata.update(
                 upstream_receive_queue=self.incoming.stats(),
+                asr_ming_protected_calls=asr_protected_calls,
+                asr_gpu_queue_wait_seconds=asr_queue_wait,
                 asr_model_consumed_samples=consumed,
                 asr_observed_chunk_samples=sorted(observed_chunk_samples),
                 asr_eos_padding_samples=padding_samples,
@@ -248,6 +254,7 @@ class Youdao:
                     if row.get("event") == "translation_quality_warning"
                 ],
                 translation_calls=len(requests),
+                translation_ming_protected_calls=sum(bool(row.get("ming_deadline_protected")) for row in requests),
                 translation_compute_seconds=sum(
                     row["finished_monotonic_seconds"] - row["started_monotonic_seconds"]
                     for row in responses

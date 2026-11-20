@@ -132,6 +132,7 @@ def main():
     else:
         raise TimeoutError("Native T3PO initialization")
     from .r2t2_worker import serve
+    from .gpu_queue import MING_PROTECTION_SECONDS
 
     ready = threading.Event()
     errors = []
@@ -170,7 +171,8 @@ def main():
             raise HTTPException(503, "ASR loading and language warmup")
         return dict(status="ready", gpu_pid=os.getpid(), asr_chunk_ms=options.asr_chunk_ms,
                     asr_chunk_ms_zh=options.asr_chunk_ms_zh or options.asr_chunk_ms,
-                    overlap_asr=options.overlap_asr)
+                    overlap_asr=options.overlap_asr,
+                    ming_deadline_protection_seconds=MING_PROTECTION_SECONDS)
 
     stop = threading.Event()
 
