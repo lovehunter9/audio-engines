@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--compile-flow", action="store_true")
     parser.add_argument("--asr-chunk-ms", type=int, default=2000)
     parser.add_argument("--asr-chunk-ms-zh", type=int)
+    parser.add_argument("--overlap-asr", action="store_true")
     parser.add_argument("--port", type=int, default=18091)
     options = parser.parse_args()
     if options.asr_chunk_ms not in (800, 1600, 2000, 4000):
@@ -126,6 +127,7 @@ def main():
                     context=4096,
                     chunk_ms=options.asr_chunk_ms,
                     chinese_chunk_ms=options.asr_chunk_ms_zh,
+                    overlap_asr=options.overlap_asr,
                 ),
                 ready,
             )
@@ -147,7 +149,8 @@ def main():
         if not ready.is_set():
             raise HTTPException(503, "ASR loading and language warmup")
         return dict(status="ready", gpu_pid=os.getpid(), asr_chunk_ms=options.asr_chunk_ms,
-                    asr_chunk_ms_zh=options.asr_chunk_ms_zh or options.asr_chunk_ms)
+                    asr_chunk_ms_zh=options.asr_chunk_ms_zh or options.asr_chunk_ms,
+                    overlap_asr=options.overlap_asr)
 
     stop = threading.Event()
 

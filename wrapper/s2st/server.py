@@ -53,6 +53,7 @@ def build_app(supports):
     asr_chunk_ms_zh = args.count("--asr-chunk-ms-zh", asr_chunk_ms) if family == "youdao" else None
     if family == "youdao" and asr_chunk_ms_zh not in (800, 1600, 2000, 4000):
         raise ValueError("Unsupported Chinese ASR delivery increment")
+    overlap_asr = args.switch("--overlap-asr", False) if family == "youdao" else False
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -219,6 +220,7 @@ def build_app(supports):
                             "--asr-chunk-ms-zh",
                             str(asr_chunk_ms_zh),
                             "--compile-flow",
+                            *(("--overlap-asr",) if overlap_asr else ()),
                         ),
                         "http://127.0.0.1:18091/internal/youdao/health",
                         environment=environment,

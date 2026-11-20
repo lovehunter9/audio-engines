@@ -1,9 +1,14 @@
 import asyncio
+from contextlib import nullcontext
 import json
 from pathlib import Path
 import sys
 import time
 from .gpu_queue import stage
+
+
+def recognition_stage(overlap=False):
+    return nullcontext(0.0) if overlap else stage("r2t2")
 
 
 def embed_sanic_entry(code):
@@ -197,7 +202,7 @@ def serve(args, ready):
             before_buffer = len(state.buffer) if state is not None else None
             before_tail = state.last_fixed_text[-100:] if state is not None else None
             try:
-                with stage("r2t2") as gpu_wait:
+                with recognition_stage(getattr(args, "overlap_asr", False)) as gpu_wait:
                     result = _original(self, *positional, **keywords)
             except BaseException as exc:
                 record(
@@ -212,6 +217,7 @@ def serve(args, ready):
                 input_samples=incoming,
                 elapsed_seconds=time.monotonic() - started,
                 gpu_queue_wait_seconds=gpu_wait,
+                overlap_asr=bool(getattr(args, "overlap_asr", False)),
                 max_new_tokens=budget,
                 input_buffer_samples=before_buffer,
                 finalized_tail_before=before_tail if _name.startswith("finish") else None,
