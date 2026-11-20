@@ -216,7 +216,7 @@ class Youdao:
                 )
             if len(original) // 2 != audio.samples or not audio.exhausted:
                 raise RuntimeError("Youdao input producer stopped early")
-            self.completion_metadata = dict(
+            self.completion_metadata.update(
                 asr_model_consumed_samples=consumed,
                 asr_observed_chunk_samples=sorted(observed_chunk_samples),
                 asr_eos_padding_samples=padding_samples,

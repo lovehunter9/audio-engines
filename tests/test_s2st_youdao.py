@@ -347,7 +347,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             async def consume(value):
                 delivered.append(value)
 
-            adapter = Youdao(root / "session", root)
+            adapter = Youdao(root / "session", root, source_chunk_ms=4000)
             with (
                 patch.dict(
                     sys.modules,
@@ -372,6 +372,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         adapter.completion_metadata["asr_model_consumed_samples"], 8160
                     )
+                    self.assertEqual(adapter.completion_metadata['translation_source_chunk_ms'], 4000)
+                    self.assertIn('initialization_loading_events', adapter.completion_metadata)
                     self.assertTrue(health_calls)
                     return result
                 finally:
