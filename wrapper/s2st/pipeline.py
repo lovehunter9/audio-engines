@@ -103,6 +103,11 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
                 delivered += len(base64.b64decode(event["data"]))
         elif event.get("event") == "tts_end" and player is not None:
             await player.complete(event["seq"], started)
+        elif event.get("event") == "tts_attempt_failed":
+            await emit({"type": "tts_diagnostic", **{
+                key: event.get(key) for key in
+                ("seq", "attempt", "error_type", "detail", "withheld_audio_bytes", "retry")
+            }})
         elif event.get("event") == "tts_error":
             raise RuntimeError("A complete MING phrase failed synthesis")
         elif event.get("event") == "tts_done":

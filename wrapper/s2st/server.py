@@ -54,6 +54,9 @@ def build_app(supports):
     if family == "youdao" and asr_chunk_ms_zh not in (800, 1600, 2000, 4000):
         raise ValueError("Unsupported Chinese ASR delivery increment")
     overlap_asr = args.switch("--overlap-asr", False) if family == "youdao" else False
+    translation_chunk_ms = args.count("--translation-chunk-ms", 0) if family == "youdao" else 0
+    if translation_chunk_ms not in (0, 2000, 4000):
+        raise ValueError("Unsupported translation source increment")
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -248,7 +251,8 @@ def build_app(supports):
                 await workers.start(
                     Worker(
                         "youdao-api",
-                        (python, "-m", "wrapper.s2st.youdao_api", "--root", str(cache)),
+                        (python, "-m", "wrapper.s2st.youdao_api", "--root", str(cache),
+                         "--translation-chunk-ms", str(translation_chunk_ms)),
                         "http://127.0.0.1:18093/api/v1/health",
                         environment=api_environment,
                         timeout=180,
@@ -325,7 +329,8 @@ def build_app(supports):
                         native_url="http://127.0.0.1:18091/internal/tencent",
                     )
                     if family == "tencent"
-                    else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode)
+                    else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode,
+                                source_chunk_ms=translation_chunk_ms)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.

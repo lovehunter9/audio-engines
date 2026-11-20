@@ -15,8 +15,12 @@ _ABBREVIATION = re.compile(r"(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|vs|e\.g|i\.e)|\b[A-Z])
 
 
 class SourceClauses:
-    def __init__(self, direction):
+    def __init__(self, direction, minimum_samples=0):
+        if minimum_samples not in (0, 32000, 64000):
+            raise ValueError("Unsupported translation source increment")
         self.direction = direction
+        self.minimum_samples = minimum_samples if direction == "en2zh" else 0
+        self.last_commit_samples = 0
         self.pending = ""
         self.received = ""
         self.committed = ""
@@ -27,6 +31,8 @@ class SourceClauses:
             self.since = samples
         self.pending += text
         self.received += text
+        if not final and samples - self.last_commit_samples < self.minimum_samples:
+            return []
         end = 0
         for match in re.finditer(r"[,，。！？!?；;.]", self.pending):
             index = match.end()
@@ -64,13 +70,16 @@ class SourceClauses:
             return []
         value, self.pending = self.pending[:end], self.pending[end:]
         self.committed += value
+        self.last_commit_samples = samples
         self.since = samples if self.pending else None
         if final and (self.pending or self.committed != self.received):
             raise RuntimeError("Source clause adapter changed source content")
         return [(value, complete)]
 
 
-def install():
+def install(english_chunk_ms=0):
+    if english_chunk_ms not in (0, 2000, 4000):
+        raise ValueError("Unsupported translation source increment")
     from inference import asr, server
     from .youdao_bounded_wait import SourceIncrement
     from inference.translation import TranslationEngine
@@ -106,7 +115,7 @@ def install():
                 )
             )
         if not hasattr(self, "_source_clauses"):
-            self._source_clauses = SourceClauses(self.direction)
+            self._source_clauses = SourceClauses(self.direction, english_chunk_ms * 16)
         for text, complete in self._source_clauses.feed(
             update.text,
             update.source_samples,

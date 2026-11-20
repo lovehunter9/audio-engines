@@ -15,20 +15,24 @@ class Youdao:
     separate_speech_events = True
 
     def __init__(
-        self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high"
+        self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high",
+        source_chunk_ms=0,
     ):
         if latency_mode not in ("high", "native"):
             raise ValueError(
                 "Only the validated official high/native translation policies are allowed"
             )
         self.latency_mode = latency_mode
+        if source_chunk_ms not in (0, 2000, 4000):
+            raise ValueError("Unsupported translation source increment")
         self.directory = Path(directory)
         self.root = Path(root)
         self.url = url
         self.socket = None
         self.feeder = None
         self.speech_text = ""
-        self.completion_metadata = {}
+        self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms}
+        self._close_lock = asyncio.Lock()
         self._eos_sent = False
 
     def speech_stage(self):
@@ -250,15 +254,19 @@ class Youdao:
             await self.close()
 
     async def close(self):
+        async with self._close_lock:
+            await self._close_owned()
+
+    async def _close_owned(self):
         if self.feeder is not None and not self.feeder.done():
             self.feeder.cancel()
         if self.feeder is not None:
             await asyncio.gather(self.feeder, return_exceptions=True)
         if self.socket is None:
             return
-        await self.socket.close()
-        await self.socket.wait_closed()
-        self.socket = None
+        socket, self.socket = self.socket, None
+        await socket.close()
+        await socket.wait_closed()
         # The author's ended event precedes its final ASR/socket cleanup.
         # Wait for actual session release before public success or another request.
         deadline = time.monotonic() + 60

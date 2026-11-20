@@ -36,6 +36,25 @@ class NativeServer:
             raise RuntimeError("Official T3PO server exited: " + str(self.code))
 
 
+def close_idle_http_connections(app):
+    class CloseConnections:
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            async def emit(message):
+                if message["type"] == "http.response.start":
+                    message = dict(message, headers=[
+                        (key, value) for key, value in message.get("headers", [])
+                        if key.lower() != b"connection"
+                    ] + [(b"connection", b"close")])
+                await send(message)
+
+            await self.app(scope, receive, emit)
+
+    app.add_middleware(CloseConnections)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", type=Path, required=True)
@@ -80,6 +99,7 @@ def main():
     from .ming_worker import build
 
     app = build(options)
+    close_idle_http_connections(app)
     from .config import YOUDAO_TRANSLATION
 
     command = [

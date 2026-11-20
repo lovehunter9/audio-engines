@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--translation-chunk-ms", type=int, default=0, choices=(0, 2000, 4000))
     options = parser.parse_args()
     from .gpu_queue import configure
 
@@ -32,7 +33,7 @@ def main():
     from .youdao_target import install as target
 
     bounded(8.0)
-    source()
+    source(options.translation_chunk_ms)
     target(options.root / "results/target-stream-observer.jsonl")
     from inference.server import main as official_main
 

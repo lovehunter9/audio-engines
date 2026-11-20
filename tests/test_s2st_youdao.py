@@ -101,6 +101,25 @@ class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SourceNumbersTests(unittest.TestCase):
+    def test_translation_cadence_preserves_recognized_words_and_final_short_tail(self):
+        guard = SourceClauses("en2zh", minimum_samples=64000)
+        self.assertEqual(guard.feed("Four years or bust, ", 32000), [])
+        self.assertEqual(guard.feed("four year colleges or bust. ", 64000),
+                         [("Four years or bust, four year colleges or bust.", True)])
+        self.assertEqual(guard.feed("Next sentence.", 96000), [])
+        self.assertEqual(guard.feed("", 96000, final=True), [(" Next sentence.", True)])
+        self.assertEqual(guard.received, guard.committed)
+
+    def test_translation_cadence_does_not_change_chinese_or_split_a_number(self):
+        guard = SourceClauses("zh2en", minimum_samples=64000)
+        self.assertEqual(guard.feed("他说，这是真实数据。", 32000), [("他说，这是真实数据。", True)])
+        guard = SourceClauses("en2zh", minimum_samples=64000)
+        self.assertEqual(guard.feed("The city has one point ", 32000), [])
+        first = guard.feed("four million ", 64000)
+        self.assertFalse(any(text.endswith("one point ") for text, _ in first))
+        parts = first + guard.feed("residents.", 96000, final=True)
+        self.assertEqual("".join(text for text, _ in parts), guard.received)
+
     def test_chinese_quantity_scale_cannot_be_sent_separately(self):
         guard = SourceClauses("zh2en")
         self.assertEqual(guard.feed("太阳的半径笼统地说是七十", 0), [])
