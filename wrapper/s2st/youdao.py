@@ -16,7 +16,7 @@ class Youdao:
 
     def __init__(
         self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high",
-        source_chunk_ms=0,
+        source_chunk_ms=0, overlap_translation=False,
     ):
         if latency_mode not in ("high", "native"):
             raise ValueError(
@@ -31,7 +31,8 @@ class Youdao:
         self.socket = None
         self.feeder = None
         self.speech_text = ""
-        self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms}
+        self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms,
+                                    "overlap_translation": bool(overlap_translation)}
         self._close_lock = asyncio.Lock()
         self._eos_sent = False
 

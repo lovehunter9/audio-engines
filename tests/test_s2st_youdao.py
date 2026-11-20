@@ -65,6 +65,49 @@ class WordTailTests(unittest.TestCase):
 
 
 class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise_translation_scheduling(self, overlap):
+        import httpx
+        from wrapper.s2st import gpu_queue
+        from wrapper.s2st.youdao_target import CompletionStream, TargetText
+
+        entered = asyncio.Event()
+        observed = []
+
+        async def handler(request):
+            entered.set()
+            body = 'data: ' + json.dumps({'choices': [{'delta': {'content': 'Done.'}, 'finish_reason': 'stop'}]})
+            return httpx.Response(200, text=body+'\n\ndata: [DONE]\n\n')
+
+        async def emit(event):
+            pass
+
+        async def observe(event):
+            observed.append(event)
+
+        native = SimpleNamespace(model='test', max_new_tokens=256, force_max_new_tokens=256,
+            logit_bias=None, repetition_penalty=None, api_key=None, url='http://test/v1/chat/completions')
+        with tempfile.TemporaryDirectory() as directory, patch.object(gpu_queue, 'DEFAULT', Path(directory)/'queue'):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+                target = TargetText('zh2en', emit, lambda parts, direction: ''.join(parts), lambda raw: (None, raw))
+                completion = CompletionStream(native, 'zh2en', target,
+                    stage=None if overlap else gpu_queue.async_stage, observe=observe, client=client)
+                with gpu_queue.stage('ming'):
+                    task = asyncio.create_task(completion('source'))
+                    if overlap:
+                        await asyncio.wait_for(entered.wait(), 2)
+                    else:
+                        await asyncio.sleep(.1)
+                        self.assertFalse(entered.is_set())
+                self.assertEqual(await asyncio.wait_for(task, 2), 'Done.')
+        request = next(e for e in observed if e['event']=='translation_request')
+        self.assertEqual(request['gpu_stage_serialized'], not overlap)
+
+    async def test_default_translation_waits_for_ming(self):
+        await self.exercise_translation_scheduling(False)
+
+    async def test_opt_in_translation_can_run_while_ming_holds_its_stage(self):
+        await self.exercise_translation_scheduling(True)
+
     async def test_foreign_script_is_preserved_and_reported_without_inference_retry(self):
         import httpx
         from wrapper.s2st.youdao_target import CompletionStream, TargetText

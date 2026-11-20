@@ -141,6 +141,7 @@ class CompletionStream:
                     payload=body,
                     force=force,
                     started_monotonic_seconds=started,
+                    gpu_stage_serialized=self.stage is not None,
                 )
             )
         finish_reason = None
@@ -204,7 +205,7 @@ class CompletionStream:
 
 
 
-def install(observer_path):
+def install(observer_path, overlap_translation=False):
     from inference import server
     from inference.prompts import parse_model_response
     from inference.translation import join_translation_segments
@@ -254,7 +255,8 @@ def install(observer_path):
                 self.direction, emit, join_translation_segments, parse_model_response
             )
             completion = CompletionStream(
-                native, self.direction, target, stage=async_stage, observe=observe
+                native, self.direction, target,
+                stage=None if overlap_translation else async_stage, observe=observe
             )
             self._target_completion_stream = completion
             self._translation.engine._complete = completion
