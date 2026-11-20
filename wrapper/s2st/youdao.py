@@ -9,6 +9,7 @@ import time
 import httpx
 
 from .gpu_queue import async_stage
+from .youdao_admission import SourceAdmission
 
 
 class Youdao:
@@ -16,13 +17,14 @@ class Youdao:
 
     def __init__(
         self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high",
-        source_chunk_ms=0, overlap_translation=False,
+        source_chunk_ms=0, overlap_translation=False, max_source_speed=0.0,
     ):
         if latency_mode not in ("high", "native"):
             raise ValueError(
                 "Only the validated official high/native translation policies are allowed"
             )
         self.latency_mode = latency_mode
+        self.max_source_speed = SourceAdmission.validate(max_source_speed)
         if source_chunk_ms not in (0, 2000, 4000):
             raise ValueError("Unsupported translation source increment")
         self.directory = Path(directory)
@@ -93,8 +95,11 @@ class Youdao:
 
             self.incoming = BoundedReceiver(self.socket)
 
+            admission = SourceAdmission(self.max_source_speed)
+
             async def feed():
                 async for pcm in audio:
+                    await admission.admit(len(pcm) // 2)
                     original.extend(pcm)
                     await self.socket.send(pcm)
                 self._eos_sent = True
@@ -227,6 +232,9 @@ class Youdao:
                 raise RuntimeError("Youdao input producer stopped early")
             self.completion_metadata.update(
                 upstream_receive_queue=self.incoming.stats(),
+                source_feed_max_speed=admission.max_speed,
+                source_feed_wait_seconds=admission.wait_seconds,
+                source_feed_admitted_samples=admission.samples,
                 asr_ming_protected_calls=asr_protected_calls,
                 asr_gpu_queue_wait_seconds=asr_queue_wait,
                 asr_model_consumed_samples=consumed,

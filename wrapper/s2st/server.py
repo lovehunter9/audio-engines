@@ -58,6 +58,14 @@ def build_app(supports):
     translation_chunk_ms = args.count("--translation-chunk-ms", 0) if family == "youdao" else 0
     if translation_chunk_ms not in (0, 2000, 4000):
         raise ValueError("Unsupported translation source increment")
+    raw_source_speed = args.text("--max-source-speed")
+    max_source_speed = 0.0
+    if args.given("--max-source-speed"):
+        if family != "youdao" or raw_source_speed is None:
+            raise ValueError("Maximum source speed is a numeric Youdao option")
+        from .youdao_admission import SourceAdmission
+
+        max_source_speed = SourceAdmission.validate(raw_source_speed)
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -333,7 +341,8 @@ def build_app(supports):
                     if family == "tencent"
                     else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode,
                                 source_chunk_ms=translation_chunk_ms,
-                                overlap_translation=overlap_translation)
+                                overlap_translation=overlap_translation,
+                                max_source_speed=max_source_speed)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.

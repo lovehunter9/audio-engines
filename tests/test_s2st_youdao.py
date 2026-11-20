@@ -305,7 +305,7 @@ class AsrFinalityTests(unittest.IsolatedAsyncioTestCase):
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def exercise(self, direction="zh2en", *, future=False, dropped=False, send_error=False,
-                       initial_events=None):
+                       initial_events=None, max_source_speed=0.0):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "results").mkdir()
@@ -422,7 +422,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             async def consume(value):
                 delivered.append(value)
 
-            adapter = Youdao(root / "session", root, source_chunk_ms=4000)
+            adapter = Youdao(root / "session", root, source_chunk_ms=4000,
+                             max_source_speed=max_source_speed)
             with (
                 patch.dict(
                     sys.modules,
@@ -448,6 +449,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                         adapter.completion_metadata["asr_model_consumed_samples"], 8160
                     )
                     self.assertEqual(adapter.completion_metadata['translation_source_chunk_ms'], 4000)
+                    self.assertEqual(adapter.completion_metadata['source_feed_max_speed'], max_source_speed)
+                    self.assertEqual(adapter.completion_metadata['source_feed_admitted_samples'], 160)
+                    self.assertEqual(adapter.completion_metadata['source_feed_wait_seconds'], 0)
                     self.assertIn('initialization_loading_events', adapter.completion_metadata)
                     self.assertTrue(health_calls)
                     return result
@@ -473,6 +477,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
     async def test_complete_input_and_padding_are_distinct_in_both_directions(self):
         await self.exercise("zh2en")
         await self.exercise("en2zh")
+
+    async def test_source_admission_preserves_pcm_and_excludes_eos_padding(self):
+        await self.exercise(max_source_speed=1.25)
 
     async def test_future_speaker_reference_is_rejected_including_one_sample(self):
         with self.assertRaisesRegex(RuntimeError, "before arrival"):
