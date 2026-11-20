@@ -2874,6 +2874,62 @@ def t_whisper():
               (rr.status_code, rr.headers.get("content-type"), rr.content[:40]))
 
 
+def t_diar_asr():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import diar_asr as d
+
+    raw = "[0.48][S01]Welcome everyone[1.66][2.0][S02]Thanks[3.5]"
+    d._state.update(ready=True, kind=d.KIND_MOSS, device="cpu")
+    real = d._generate_moss
+    d._generate_moss = lambda path, prompt, ctx: (raw, d.parse_moss(raw), 20, 3.5)
+    try:
+        with TestClient(d.build_app(["stt"])) as c:
+            advertises_tasks(c, "diar_asr")
+            both_ways(c, "/v1/audio/transcriptions", WAV, {}, "diar_asr stt", meters=("input",))
+            doc = both_ways(c, "/v1/audio/transcriptions", WAV,
+                            {"response_format": "diarized_json"}, "diar_asr diarized",
+                            meters=("input",))
+            segs = ((doc or {}).get("result") or {}).get("segments") or []
+            check("diar_asr diarized_json carries a speaker per segment",
+                  [s.get("speaker") for s in segs] == ["S01", "S02"], segs)
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": '[{"start":0,"end":1}]'})
+            check("diar_asr refuses segments rather than transcribing out of context",
+                  r.status_code == 400, (r.status_code, r.text[:120]))
+    finally:
+        d._generate_moss = real
+
+
+def t_torch_asr():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import torch_asr as t
+
+    real_decode, real_firered = t._decode, t._firered
+    t._decode = lambda data, fn, rate: np.zeros(rate * 4, dtype="float32")
+    t._firered = lambda clips: ["span %d" % len(c) for c in clips]
+    t._state.update(ready=True, model=object(), kind=t.KIND_FIRERED, device="cpu", rate=16000,
+                    max_span=2.0, error=None)
+    try:
+        with TestClient(t.build_app(["stt"])) as c:
+            advertises_tasks(c, "torch_asr")
+            r = c.post("/v1/audio/transcriptions", files=WAV)
+            check("torch_asr refuses a whole file longer than one span",
+                  r.status_code == 413, (r.status_code, r.text[:120]))
+            spans = '[{"start":0,"end":1},{"start":0.5,"end":3},{"start":2,"end":4}]'
+            both_ways(c, "/v1/audio/transcriptions", WAV, {"segments": spans}, "torch_asr batch",
+                      meters=("input",))
+            r = c.post("/v1/audio/transcriptions", files=WAV, data={"segments": spans})
+            results = (r.json() or {}).get("results") or []
+            check("torch_asr batch answers each span in order",
+                  [x.get("text") for x in results] == ["span 16000", None, "span 32000"], results)
+            check("torch_asr fails an over-long span alone",
+                  "error" in (results[1] if len(results) > 1 else {}), results)
+            t._state["max_span"] = 60.0
+            both_ways(c, "/v1/audio/transcriptions", WAV, {}, "torch_asr stt", meters=("input",))
+    finally:
+        t._decode, t._firered = real_decode, real_firered
+
+
 def t_whisper_ov():
     from fastapi.testclient import TestClient
     from wrapper.caps import whisper_ov as w
@@ -5900,6 +5956,8 @@ def main():
                            ("align", t_align, "qwen"),
                            ("whisper (fasterwhisper)", t_whisper, "fasterwhisper"),
                            ("whisper_ov", t_whisper_ov, "whisperov"),
+                           ("diar_asr", t_diar_asr, "diarasr"),
+                           ("torch_asr", t_torch_asr, "torchasr"),
                            ("qwen", t_qwen, "qwen"),
                            ("ov", t_ov, "ov"),
                            ("tts", t_tts, "qwen3tts"),

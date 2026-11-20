@@ -19,6 +19,14 @@ BASES = {
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],
+    # Whole recordings in, speakers and timestamps out (MOSS-Transcribe-Diarize, VibeVoice-ASR).
+    "diarasr": [
+        (("stt",), "diar_asr"),
+    ],
+    # Recognisers that ship as a research repo plus PyTorch weights (FireRedASR2-AED, MiMo-V2.5-ASR).
+    "torchasr": [
+        (("stt",), "torch_asr"),
+    ],
     "pyannote": [
         (("vad",), "vad"),
         (("diar",), "diar"),
@@ -119,6 +127,8 @@ FAMILIES = {
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
     "whisper_ov": "whisper",
+    "diar_asr": "speaker-attributed-asr",
+    "torch_asr": "speech-recognition",
     "vad": "silero-vad",
     "diar": "pyannote",
     "diar_speakrs": "speakrs",
@@ -157,6 +167,15 @@ _MOUNTS = {
          "Offline transcription (single / batch segments)", True),
         ("POST", "/v1/audio/translations",
          "Speech -> English (Whisper translate task)", True),
+    ],
+    ("diar_asr", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Whole-recording transcription with speakers and timestamps "
+         "(response_format=diarized_json for segments; no segments field)", True),
+    ],
+    ("torch_asr", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Offline transcription (single / batch segments)", True),
     ],
     ("align", "align"): [
         ("POST", "/v1/audio/align", "Forced alignment (single / batch segments)", True),
@@ -521,7 +540,7 @@ def _parameters(module, operation_id, path=""):
     # Keep it tied to the implementations that actually accept the multipart
     # field: a future single-clip recogniser must not inherit the claim merely
     # because it also exposes audio.transcribe.
-    if operation_id == "audio.transcribe" and module in ("stt_stream", "whisper"):
+    if operation_id == "audio.transcribe" and module in ("stt_stream", "whisper", "torch_asr"):
         params.append({"name": "segments", "type": "array"})
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
         if module in ("firered", "breeze") and not path.startswith("/v1/audio/"):

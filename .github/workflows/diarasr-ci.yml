@@ -1,0 +1,45 @@
+# diarasr CI: triggers only; the build is the shared build-image.yml.
+name: diarasr-ci
+
+on:
+  # Publishes are deliberate: a v* tag publishes this listing base, or dispatch.
+  push:
+    tags: ['v*']
+  # A PR ref publishes nothing: the run is the contract and smoke tests that gate main.
+  pull_request:
+    paths:
+      - 'wrapper/**'
+      - 'tests/**'
+      - 'bases/diarasr/**'
+      - '.github/workflows/diarasr-ci.yml'
+      - '.github/workflows/build-image.yml'
+  # Dev: dispatch namespace + image_tag to publish; an empty tag publishes only from main or v*.
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: 'Docker Hub namespace'
+        required: false
+        default: beclab
+      image_tag:
+        description: 'Explicit tag for a dev build (empty = only main/v* refs publish)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diarasr-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: diarasr
+      repo: audio-diarasr
+      # deps.Dockerfile refuses arm64: these images measure meeting models on x86 NVIDIA cards.
+      slices: '[{"arch":"amd64","platform":"linux/amd64","runner":"ubuntu-latest"}]'
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || '' }}
+    secrets: inherit

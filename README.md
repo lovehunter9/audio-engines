@@ -227,6 +227,8 @@ passes. For the same reason the build's final import check must go **through**
 | `whisperov` | `beclab/audio-whisper-ov` | `stt` (+ `/v1/audio/translations`) | OpenVINO GenAI WhisperPipeline (Intel GPU, amd64) | in progress |
 | `enhanceov` | `beclab/audio-enhance-ov` | `enhance` | SpeechBrain → OpenVINO GPU (amd64) | in progress |
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
+| `diarasr` | `beclab/audio-diarasr` | `stt` (whole recording, `diarized_json`; no `segments`) | MOSS-Transcribe-Diarize or VibeVoice-ASR in-process transformers 5 (amd64 only) | in progress |
+| `torchasr` | `beclab/audio-torchasr` | `stt` (single / batch segments) | FireRedASR2-AED or MiMo-V2.5-ASR from pinned upstream source, in-process PyTorch (amd64 only) | in progress |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
 | `speakrs-ov` | `beclab/audio-speakrs-ov` | `diar` | the same speakrs, on ONNX Runtime's OpenVINO provider for Intel GPUs (amd64 only) | in progress |
