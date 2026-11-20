@@ -127,7 +127,7 @@ def _load():
             raise RuntimeError("%s holds neither FireRedASR2-AED nor MiMo-V2.5-ASR weights" % path)
         cuda = torch.cuda.is_available()
         if kind == KIND_FIRERED:
-            from fireredasr2s.fireredasr2 import FireRedAsr2, FireRedAsr2Config
+            from fireredasr2 import FireRedAsr2, FireRedAsr2Config
 
             model = FireRedAsr2.from_pretrained("aed", path, FireRedAsr2Config(
                 use_gpu=cuda, use_half=False, beam_size=BEAM_SIZE, nbest=1, decode_max_len=0,
