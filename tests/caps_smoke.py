@@ -2874,6 +2874,32 @@ def t_whisper():
               (rr.status_code, rr.headers.get("content-type"), rr.content[:40]))
 
 
+def t_diar_asr():
+    from fastapi.testclient import TestClient
+    from wrapper.caps import diar_asr as d
+
+    raw = "[0.48][S01]Welcome everyone[1.66][2.0][S02]Thanks[3.5]"
+    d._state.update(ready=True, kind=d.KIND_MOSS, device="cpu")
+    real = d._generate_moss
+    d._generate_moss = lambda path, prompt: (raw, d.parse_moss(raw), 20, 3.5)
+    try:
+        with TestClient(d.build_app(["stt"])) as c:
+            advertises_tasks(c, "diar_asr")
+            both_ways(c, "/v1/audio/transcriptions", WAV, {}, "diar_asr stt", meters=("input",))
+            doc = both_ways(c, "/v1/audio/transcriptions", WAV,
+                            {"response_format": "diarized_json"}, "diar_asr diarized",
+                            meters=("input",))
+            segs = ((doc or {}).get("result") or {}).get("segments") or []
+            check("diar_asr diarized_json carries a speaker per segment",
+                  [s.get("speaker") for s in segs] == ["S01", "S02"], segs)
+            r = c.post("/v1/audio/transcriptions", files=WAV,
+                       data={"segments": '[{"start":0,"end":1}]'})
+            check("diar_asr refuses segments rather than transcribing out of context",
+                  r.status_code == 400, (r.status_code, r.text[:120]))
+    finally:
+        d._generate_moss = real
+
+
 def t_whisper_ov():
     from fastapi.testclient import TestClient
     from wrapper.caps import whisper_ov as w
@@ -5900,6 +5926,7 @@ def main():
                            ("align", t_align, "qwen"),
                            ("whisper (fasterwhisper)", t_whisper, "fasterwhisper"),
                            ("whisper_ov", t_whisper_ov, "whisperov"),
+                           ("diar_asr", t_diar_asr, "diarasr"),
                            ("qwen", t_qwen, "qwen"),
                            ("ov", t_ov, "ov"),
                            ("tts", t_tts, "qwen3tts"),

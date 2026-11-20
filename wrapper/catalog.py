@@ -19,6 +19,10 @@ BASES = {
     "fasterwhisper": [
         (("stt",), "whisper"),
     ],
+    # Whole recordings in, speakers and timestamps out (MOSS-Transcribe-Diarize, VibeVoice-ASR).
+    "diarasr": [
+        (("stt",), "diar_asr"),
+    ],
     "pyannote": [
         (("vad",), "vad"),
         (("diar",), "diar"),
@@ -119,6 +123,7 @@ FAMILIES = {
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
     "whisper_ov": "whisper",
+    "diar_asr": "speaker-attributed-asr",
     "vad": "silero-vad",
     "diar": "pyannote",
     "diar_speakrs": "speakrs",
@@ -157,6 +162,11 @@ _MOUNTS = {
          "Offline transcription (single / batch segments)", True),
         ("POST", "/v1/audio/translations",
          "Speech -> English (Whisper translate task)", True),
+    ],
+    ("diar_asr", "stt"): [
+        ("POST", "/v1/audio/transcriptions",
+         "Whole-recording transcription with speakers and timestamps "
+         "(response_format=diarized_json for segments; no segments field)", True),
     ],
     ("align", "align"): [
         ("POST", "/v1/audio/align", "Forced alignment (single / batch segments)", True),
