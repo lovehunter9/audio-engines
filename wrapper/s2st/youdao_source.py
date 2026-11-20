@@ -1,9 +1,10 @@
 import asyncio
 from dataclasses import dataclass
 import json
-import re
 import time
 from types import SimpleNamespace
+import re
+from .youdao_numbers import boundary, decimal_separator
 
 
 _TRAILING = re.compile(
@@ -21,7 +22,7 @@ class SourceClauses:
         self.committed = ""
         self.since = None
 
-    def feed(self, text, samples, final=False, endpoint=False):
+    def feed(self, text, samples, final=False):
         if text and not self.pending:
             self.since = samples
         self.pending += text
@@ -29,6 +30,8 @@ class SourceClauses:
         end = 0
         for match in re.finditer(r"[,，。！？!?；;.]", self.pending):
             index = match.end()
+            if decimal_separator(self.pending, match.start()):
+                continue
             if match.group() == "." and self.direction == "en2zh":
                 if index == len(self.pending) or not self.pending[index].isspace():
                     continue
@@ -52,9 +55,11 @@ class SourceClauses:
                     end = 0
             if self.direction == "en2zh" and _TRAILING.search(content):
                 end = 0
-        if final or endpoint:
+        if final:
             end = len(self.pending)
             complete = True
+        if not final:
+            end = boundary(self.pending, end)
         if not end:
             return []
         value, self.pending = self.pending[:end], self.pending[end:]
@@ -106,15 +111,11 @@ def install():
             update.text,
             update.source_samples,
             final=update.reset,
-            endpoint=getattr(update, "speech_end", False),
         ):
             if text:
                 self._translation_queue.put_nowait(
                     CompleteSource(text, time.monotonic(), update.source_samples, complete)
                 )
-        if getattr(update, "speech_end", False):
-            await self.send(dict(type="asr_boundary", source_samples=update.source_samples))
-            self._translation_queue.put_nowait(server._FLUSH)
         if update.reset:
             self._cancel_idle_timer()
             self._translation_queue.put_nowait(server._FLUSH)
@@ -143,7 +144,6 @@ def install():
                             text=value.text,
                             reset=value.reset,
                             source_samples=mark,
-                            speech_end=bool(packet.get("speech_end", False)),
                         )
                     )
         except asyncio.CancelledError:

@@ -13,7 +13,14 @@ from .gpu_queue import async_stage
 class Youdao:
     separate_speech_events = True
 
-    def __init__(self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo"):
+    def __init__(
+        self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high"
+    ):
+        if latency_mode not in ("high", "native"):
+            raise ValueError(
+                "Only the validated official high/native translation policies are allowed"
+            )
+        self.latency_mode = latency_mode
         self.directory = Path(directory)
         self.root = Path(root)
         self.url = url
@@ -53,7 +60,11 @@ class Youdao:
         try:
             await self.socket.send(
                 json.dumps(
-                    {"type": "init", "direction": audio.stream.direction, "latency_mode": "high"}
+                    {
+                        "type": "init",
+                        "direction": audio.stream.direction,
+                        "latency_mode": self.latency_mode,
+                    }
                 )
             )
             initial = json.loads(await asyncio.wait_for(self.socket.recv(), 120))
@@ -100,6 +111,15 @@ class Youdao:
                         receiver.cancel()
                     await asyncio.gather(receiver, return_exceptions=True)
                 kind = event.get("type")
+                if kind in ("translation_delta", "speech_text"):
+                    mark = event.get("request_source_samples")
+                    if (
+                        not isinstance(mark, int)
+                        or isinstance(mark, bool)
+                        or mark < 0
+                        or mark > len(original) // 2 + (padding_samples if self._eos_sent else 0)
+                    ):
+                        raise RuntimeError("Youdao referenced source audio before arrival")
                 if kind == "translation_delta":
                     delta = event.get("canonical_text", event.get("text", ""))
                     streamed += delta
@@ -107,7 +127,8 @@ class Youdao:
                         yield dict(
                             type="translation_delta",
                             text=delta,
-                            source_samples=event.get("request_source_samples"),
+                            source_samples=min(mark, len(original) // 2),
+                            asr_wire_samples=mark,
                         )
                 elif kind == "speech_text":
                     mark = event.get("request_source_samples")
@@ -181,6 +202,7 @@ class Youdao:
                 asr_eos_padding_samples=padding_samples,
                 asr_source_consumed_samples=audio.samples,
                 translation_retries=0,
+                translation_latency_mode=self.latency_mode,
             )
             if not mt_observer.exists():
                 raise RuntimeError("Translation observation is absent")

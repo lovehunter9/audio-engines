@@ -57,14 +57,6 @@ def apply(code):
         )
 
     handler = re.sub(pattern, replace, handler)
-    needle = "out_msg['total_cost_ms'] = vad_cost_ms + asr_cost_ms + finish_cost_ms"
-    if handler.count(needle) != 1:
-        raise RuntimeError("Unexpected VAD observation boundary")
-    handler = handler.replace(
-        needle,
-        "out_msg['speech_end'] = bool(speech_ended_in_this_chunk)\n                    " + needle,
-        1,
-    )
     if count != 4:
         raise RuntimeError("Unexpected ASR response boundaries: " + str(count))
     return before + "async def asr_stream_api_v1(" + handler

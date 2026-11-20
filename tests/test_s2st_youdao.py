@@ -10,9 +10,17 @@ from unittest.mock import patch
 from wrapper.s2st.protocol import Input, Stream
 from wrapper.s2st.youdao import Youdao
 from wrapper.s2st.youdao_word_tail import SpeechWordTail
+from wrapper.s2st.youdao_source import SourceClauses
+from wrapper.s2st import youdao_source
+from wrapper.s2st.youdao_numbers import boundary, decimal_separator
 
 
 class WordTailTests(unittest.TestCase):
+    def test_translation_policy_is_explicit_and_low_force_is_not_selected(self):
+        self.assertEqual(Youdao("/unused", "/unused", latency_mode="native").latency_mode, "native")
+        with self.assertRaises(ValueError):
+            Youdao("/unused", "/unused", latency_mode="low")
+
     def test_dangling_preposition_waits_for_the_actual_next_words(self):
         guard = SpeechWordTail("zh2en")
         self.assertEqual(guard.feed("delivering the ball to "), "delivering the ball ")
@@ -44,6 +52,115 @@ class WordTailTests(unittest.TestCase):
         guard = SpeechWordTail("en2zh")
         for text in ["我们拼命尝试", "去修复", "。", "UTF-8 is a "]:
             self.assertEqual(guard.feed(text), text)
+
+
+class SourceNumbersTests(unittest.TestCase):
+    def test_chinese_quantity_scale_cannot_be_sent_separately(self):
+        guard = SourceClauses("zh2en")
+        self.assertEqual(guard.feed("太阳的半径笼统地说是七十", 0), [])
+        first = guard.feed("", 32000)
+        self.assertEqual(first[0][0], "太阳的半径笼统地说是")
+        second = guard.feed("万公里。", 64000)
+        self.assertEqual(second[0][0], "七十万公里。")
+        self.assertEqual(guard.received, guard.committed)
+
+    def test_mixed_numeric_scales_are_retained_as_a_whole(self):
+        cases = [
+            ("距离为70万", "距离为"),
+            ("人口为1.4 million", "人口为"),
+            ("距离为3.26万", "距离为"),
+            ("质量为2x10^30", "质量为"),
+            ("It is one point four million ", "It is "),
+            ("这是第70", "这是"),
+        ]
+        for value, expected in cases:
+            self.assertEqual(value[: boundary(value, len(value))], expected)
+
+    def test_every_decimal_split_preserves_source_characters(self):
+        raw = "总人口是1.4 million people。"
+        for split in range(len(raw) + 1):
+            guard = SourceClauses("zh2en")
+            parts = guard.feed(raw[:split], 0)
+            parts += guard.feed(raw[split:], 32000)
+            parts += guard.feed("", 64000, final=True)
+            self.assertEqual("".join(text for text, _ in parts), raw)
+            self.assertFalse(any(text.endswith("1.") for text, _ in parts[:-1]))
+
+    def test_final_number_is_not_dropped_and_ordinary_period_is_unchanged(self):
+        guard = SourceClauses("zh2en")
+        guard.feed("这是第七十", 0)
+        self.assertEqual(guard.feed("", 32000, final=True), [("这是第七十", True)])
+        self.assertFalse(decimal_separator("Done. Next", 4))
+
+
+class AsrFinalityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vad_cannot_force_a_half_word_but_reset_drains_all_text(self):
+        sent = []
+        marker = object()
+
+        class Engine:
+            async def feed(self, text):
+                return []
+
+        class ASR:
+            async def finish(self):
+                pass
+
+        class Session:
+            def _cancel_idle_timer(self):
+                pass
+
+            async def send(self, event):
+                sent.append(event)
+
+        server = ModuleType("inference.server")
+        server.SpeechSession, server._FLUSH = Session, marker
+        asr = ModuleType("inference.asr")
+        asr.R2T2StreamingASR = ASR
+        translation = ModuleType("inference.translation")
+        translation.TranslationEngine = Engine
+        inference = ModuleType("inference")
+        inference.server, inference.asr = server, asr
+        with patch.dict(
+            sys.modules,
+            {
+                "inference": inference,
+                "inference.server": server,
+                "inference.asr": asr,
+                "inference.translation": translation,
+            },
+        ):
+            youdao_source.install()
+            session = Session()
+            session.direction = "zh2en"
+            session._translation_queue = asyncio.Queue()
+            await session._on_asr_update(
+                SimpleNamespace(text="，太阳半", source_samples=16000, reset=False, speech_end=True)
+            )
+            pending = []
+            while not session._translation_queue.empty():
+                pending.append(session._translation_queue.get_nowait())
+            self.assertFalse(any(item is marker for item in pending))
+            self.assertNotIn("太阳半", [item.text for item in pending])
+            await session._on_asr_update(
+                SimpleNamespace(
+                    text="径看得出来吗？", source_samples=48000, reset=False, speech_end=True
+                )
+            )
+            self.assertEqual(session._translation_queue.get_nowait().text, "太阳半径看得出来吗？")
+            self.assertTrue(session._translation_queue.empty())
+            await session._on_asr_update(
+                SimpleNamespace(
+                    text="这是第七十", source_samples=64000, reset=False, speech_end=True
+                )
+            )
+            self.assertTrue(session._translation_queue.empty())
+            await session._on_asr_update(
+                SimpleNamespace(text="", source_samples=96000, reset=True, speech_end=False)
+            )
+            self.assertEqual(session._translation_queue.get_nowait().text, "这是第七十")
+            self.assertIs(session._translation_queue.get_nowait(), marker)
+            self.assertEqual(session._source_clauses.received, session._source_clauses.committed)
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
@@ -174,6 +291,8 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 try:
                     result = [row async for row in adapter.run(source, consume)]
                     self.assertEqual(result[0]["text"], text)
+                    self.assertEqual(result[0]["source_samples"], 160)
+                    self.assertEqual(result[0]["asr_wire_samples"], 8160)
                     self.assertEqual(b"".join(delivered), pcm)
                     self.assertEqual(socket.input, pcm + bytes(16000))
                     self.assertEqual(

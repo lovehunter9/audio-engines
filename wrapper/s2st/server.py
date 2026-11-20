@@ -44,6 +44,9 @@ def build_app(supports):
     speech_override = args.text("--speech-model")
     recognition_override = args.text("--recognition-model") if family == "youdao" else None
     vad_override = args.text("--vad-model") if family == "youdao" else None
+    latency_mode = args.text("--translation-latency", "high") if family == "youdao" else None
+    if family == "youdao" and latency_mode not in ("high", "native"):
+        raise ValueError("Unsupported official translation latency policy")
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -222,7 +225,7 @@ def build_app(supports):
                     ASR_WS_URL="ws://127.0.0.1:18094/asr_stream_api_v1",
                     ASR_SECRET_KEY="test0102",
                     ASR_RECV_TIMEOUT_SECONDS="600",
-                    LATENCY_MODE="high",
+                    LATENCY_MODE=latency_mode,
                     HOST="127.0.0.1",
                     PORT="18093",
                     FORCE_BREAK_THRESHOLD="200",
@@ -310,7 +313,7 @@ def build_app(supports):
                         native_url="http://127.0.0.1:18091/internal/tencent",
                     )
                     if family == "tencent"
-                    else Youdao(Path(directory) / "native", cache)
+                    else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.
