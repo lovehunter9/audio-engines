@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from wrapper.s2st import gpu_queue
+from wrapper.s2st.r2t2_worker import recognition_stage
 
 
 class SharedUpstreamTests(unittest.TestCase):
@@ -178,7 +179,6 @@ class SharedAsrMingTests(unittest.TestCase):
     def test_aged_ming_reader_stops_new_asr_admission_until_it_finishes(self):
         import threading
         import time
-        from wrapper.s2st.r2t2_worker import recognition_stage
 
         with (
             tempfile.TemporaryDirectory() as directory,
@@ -270,3 +270,30 @@ class ProducerAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 for ticket in [asr, mt]:
                     if ticket is not None and not ticket.fd.closed:
                         ticket.close()
+
+
+class ModuleStateTests(unittest.TestCase):
+    def test_loaded_admission_uses_one_module_state_if_import_cache_changes(self):
+        import types
+        import time
+
+        replacement = types.ModuleType("wrapper.s2st.gpu_queue")
+        replacement.SHARED_UPSTREAM = False
+        replacement.SHARED_ASR_MING = False
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            patch.object(gpu_queue, "DEFAULT", Path(directory) / "queue"),
+            patch.object(gpu_queue, "SHARED_UPSTREAM", False),
+            patch.object(gpu_queue, "SHARED_ASR_MING", True),
+        ):
+            with gpu_queue.stage("ming"):
+                path = Path(directory) / "queue.json"
+                rows = json.loads(path.read_text())
+                rows[0]["enqueued"] = time.monotonic() - 21
+                path.write_text(json.dumps(rows))
+                metadata = {}
+                with patch.dict(sys.modules, {"wrapper.s2st.gpu_queue": replacement}):
+                    context = recognition_stage(False, metadata)
+                self.assertTrue(metadata["shared_asr_ming_gpu"])
+                self.assertTrue(metadata["ming_deadline_protected"])
+                self.assertIsNotNone(context)
