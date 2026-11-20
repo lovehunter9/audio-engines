@@ -18,7 +18,7 @@ class Youdao:
     def __init__(
         self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high",
         source_chunk_ms=0, overlap_translation=False, max_source_speed=0.0,
-        shared_upstream_gpu=False, shared_asr_ming_gpu=False,
+        shared_upstream_gpu=False, shared_asr_ming_gpu=False, asr_separate_cuda_stream=False,
     ):
         if latency_mode not in ("high", "native"):
             raise ValueError(
@@ -41,7 +41,8 @@ class Youdao:
         self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms,
                                     "overlap_translation": bool(overlap_translation),
                                     "shared_upstream_gpu": bool(shared_upstream_gpu),
-                                    "shared_asr_ming_gpu": self.shared_asr_ming_gpu}
+                                    "shared_asr_ming_gpu": self.shared_asr_ming_gpu,
+                                    "asr_separate_cuda_stream": bool(asr_separate_cuda_stream)}
         self._close_lock = asyncio.Lock()
         self._eos_sent = False
 
