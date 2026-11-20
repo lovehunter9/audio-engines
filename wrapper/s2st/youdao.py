@@ -29,6 +29,7 @@ class Youdao:
         self.root = Path(root)
         self.url = url
         self.socket = None
+        self.incoming = None
         self.feeder = None
         self.speech_text = ""
         self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms,
@@ -88,6 +89,9 @@ class Youdao:
                 break
             self.completion_metadata["initialization_loading_events"] = loading
             initialized = True
+            from .youdao_receive import BoundedReceiver
+
+            self.incoming = BoundedReceiver(self.socket)
 
             async def feed():
                 async for pcm in audio:
@@ -104,7 +108,7 @@ class Youdao:
                 remaining = 2400 - (time.monotonic() - started)
                 if remaining <= 0:
                     raise TimeoutError("Youdao session exceeded its input/compute deadline")
-                receiver = asyncio.create_task(self.socket.recv())
+                receiver = asyncio.create_task(self.incoming.recv())
                 try:
                     wait_seconds = min(600, remaining)
                     deadline = time.monotonic() + wait_seconds
@@ -218,6 +222,7 @@ class Youdao:
             if len(original) // 2 != audio.samples or not audio.exhausted:
                 raise RuntimeError("Youdao input producer stopped early")
             self.completion_metadata.update(
+                upstream_receive_queue=self.incoming.stats(),
                 asr_model_consumed_samples=consumed,
                 asr_observed_chunk_samples=sorted(observed_chunk_samples),
                 asr_eos_padding_samples=padding_samples,
@@ -263,6 +268,9 @@ class Youdao:
             self.feeder.cancel()
         if self.feeder is not None:
             await asyncio.gather(self.feeder, return_exceptions=True)
+        if self.incoming is not None:
+            await self.incoming.close()
+            self.incoming = None
         if self.socket is None:
             return
         socket, self.socket = self.socket, None

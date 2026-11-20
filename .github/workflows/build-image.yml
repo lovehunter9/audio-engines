@@ -60,7 +60,7 @@ jobs:
         # falls back to the standard library's `wave`, so tests/test_audio_readers.py, the
         # whole point of which is that the two readers disagree about which containers they
         # can measure, was running against one reader. Both printed pass.
-        run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart soundfile uvicorn
+        run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart soundfile uvicorn websockets==15.0.1
       - name: install ffmpeg
         # The tempo assertions for FireRed/Breeze long text shell out to ffmpeg, and skipped
         # themselves on every run without it -- on the one path where a wrong filter chain is
