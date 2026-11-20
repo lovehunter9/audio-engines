@@ -76,9 +76,6 @@ def serve(args, ready):
 
     import fireredvad
     import torch
-    from .asr_cuda import AsrCuda
-
-    execution = AsrCuda(torch.cuda, bool(getattr(args, "asr_separate_cuda_stream", False)))
 
     original_vad_factory = fireredvad.FireRedStreamVad.from_pretrained.__func__
 
@@ -215,9 +212,7 @@ def serve(args, ready):
             try:
                 scheduling = {}
                 with recognition_stage(getattr(args, "overlap_asr", False), scheduling) as gpu_wait:
-                    with execution.scope() as stream_metadata:
-                        result = _original(self, *positional, **keywords)
-                    scheduling.update(stream_metadata)
+                    result = _original(self, *positional, **keywords)
             except BaseException as exc:
                 record(
                     _name + "_failed",

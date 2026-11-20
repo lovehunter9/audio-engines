@@ -1,4 +1,4 @@
-"""Lossless English delivery boundary; no target text or TTS parameter changes."""
+"""Lossless upstream speech boundaries; no target text or TTS parameter changes."""
 
 import re
 
@@ -17,7 +17,7 @@ class SpeechWordTail:
     def feed(self, text, final=False):
         self.received += text
         self.pending += text
-        cut = len(self.pending)
+        cut = 0 if self.direction == "en2zh" and not final else len(self.pending)
         if self.direction == "zh2en" and not final:
             words = list(re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)?", self.pending))
             # Hold only a trailing function-word chain, never the whole sentence.
@@ -32,4 +32,13 @@ class SpeechWordTail:
             raise RuntimeError("Youdao speech boundary revised delivered text")
         if final and (self.pending or self.received != self.delivered):
             raise RuntimeError("Youdao speech boundary did not flush all text")
+        return ready
+
+    def commit(self):
+        if self.direction != "en2zh":
+            return ""
+        ready, self.pending = self.pending, ""
+        self.delivered += ready
+        if not self.received.startswith(self.delivered):
+            raise RuntimeError("Youdao speech boundary revised delivered text")
         return ready

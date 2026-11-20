@@ -240,14 +240,17 @@ def install(observer_path, overlap_translation=False):
                     observed_source_samples=getattr(self, "_asr_latest_source_samples", None),
                 )
                 await original_send(self, value)
+                ready = ""
                 if value.get("type") == "translation_delta":
                     ready = self._speech_word_tail.feed(value["text"])
-                    if ready:
-                        self._direct_speech_characters += len(ready)
-                        await original_send(
-                            self,
-                            dict(value, type="speech_text", text=ready, upstream_word_tail=True),
-                        )
+                elif value.get("type") == "translation_commit":
+                    ready = self._speech_word_tail.commit()
+                if ready:
+                    self._direct_speech_characters += len(ready)
+                    await original_send(
+                        self,
+                        dict(value, type="speech_text", text=ready, upstream_word_tail=True),
+                    )
 
             async def observe(value):
                 with observer_path.open("a") as log:
@@ -293,7 +296,7 @@ def install(observer_path, overlap_translation=False):
                     type="speech_text_integrity",
                     identical=True,
                     received_characters=self._direct_speech_characters,
-                    adapter="lossless upstream open-word boundary",
+                    adapter="lossless upstream speech boundary",
                 ),
             )
         return await original_send(self, event)

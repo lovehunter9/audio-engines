@@ -59,10 +59,78 @@ class WordTailTests(unittest.TestCase):
         self.assertEqual(guard.feed("passing to."), "passing ")
         self.assertEqual(guard.feed("", True), "to.")
 
-    def test_chinese_is_immediate(self):
+    def test_chinese_native_completion_is_one_lossless_speech_item(self):
         guard = SpeechWordTail("en2zh")
-        for text in ["我们拼命尝试", "去修复", "。", "UTF-8 is a "]:
-            self.assertEqual(guard.feed(text), text)
+        chunks = ["约翰，你怎么", "看？是啊，"]
+        for text in chunks:
+            self.assertEqual(guard.feed(text), "")
+        self.assertEqual(guard.commit(), "".join(chunks))
+        self.assertEqual(guard.commit(), "")
+        self.assertEqual(guard.feed("我觉得有几个我们还没讨论"), "")
+        self.assertEqual(guard.feed("", final=True), "我觉得有几个我们还没讨论")
+        self.assertEqual(guard.received, guard.delivered)
+
+    def test_chinese_response_boundaries_preserve_all_utf8_characters(self):
+        text = "谁会成为英格兰之后的第二名？这才是关键问题，"
+        for split in range(len(text) + 1):
+            guard = SpeechWordTail("en2zh")
+            self.assertEqual(guard.feed(text[:split]), "")
+            self.assertEqual(guard.feed(text[split:]), "")
+            self.assertEqual(guard.commit(), text)
+            self.assertEqual(guard.feed("", final=True), "")
+
+    def test_english_completion_does_not_flush_its_open_word_tail(self):
+        guard = SpeechWordTail("zh2en")
+        self.assertEqual(guard.feed("passing to "), "passing ")
+        self.assertEqual(guard.commit(), "")
+        self.assertEqual(guard.feed("the station. "), "to the station. ")
+        self.assertEqual(guard.feed("", final=True), "")
+
+
+class SpeechDeliveryBridgeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_chinese_text_precedes_atomic_speech_at_native_commit(self):
+        from wrapper.s2st import youdao_target
+
+        events = []
+        class Session:
+            direction = "en2zh"
+            latency_mode = "native"
+            async def send(self, value):
+                events.append(value)
+            async def run(self):
+                return None
+        async def native(mode):
+            return object()
+        server = ModuleType("inference.server")
+        server.SpeechSession = Session
+        server.model_store = SimpleNamespace(get_translation=native)
+        prompts = ModuleType("inference.prompts")
+        prompts.parse_model_response = lambda raw: (None, raw)
+        translation = ModuleType("inference.translation")
+        translation.join_translation_segments = lambda parts, direction: "".join(parts)
+        inference = ModuleType("inference")
+        inference.server = server
+        with tempfile.TemporaryDirectory() as directory, patch.dict(sys.modules, {
+            "inference": inference, "inference.server": server,
+            "inference.prompts": prompts, "inference.translation": translation,
+        }):
+            youdao_target.install(Path(directory) / "observer.jsonl")
+            session = Session()
+            session._translation = SimpleNamespace(engine=SimpleNamespace(_source_samples=64000))
+            await session.send({"type": "init_ok"})
+            target = session._target_completion_stream.target
+            target.begin()
+            await target.update("约翰，你怎么")
+            self.assertEqual(events[-1]["type"], "translation_delta")
+            self.assertFalse(any(e["type"] == "speech_text" for e in events))
+            await target.update("看？是啊，")
+            await target.finish()
+            speech = [e for e in events if e["type"] == "speech_text"]
+            self.assertEqual([e["text"] for e in speech], ["约翰，你怎么看？是啊，"])
+            self.assertEqual(speech[0]["request_source_samples"], 64000)
+            await session.send({"type": "ended"})
+            self.assertEqual(session._speech_word_tail.received, session._speech_word_tail.delivered)
+            self.assertEqual(len([e for e in events if e["type"] == "speech_text"]), 1)
 
 
 class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):

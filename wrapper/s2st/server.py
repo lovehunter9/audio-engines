@@ -66,9 +66,6 @@ def build_app(supports):
     translation_chunk_ms = args.count("--translation-chunk-ms", 0) if family == "youdao" else 0
     if translation_chunk_ms not in (0, 2000, 4000):
         raise ValueError("Unsupported translation source increment")
-    asr_separate_cuda_stream = args.switch("--asr-separate-cuda-stream", False)
-    if asr_separate_cuda_stream and not shared_asr_ming_gpu:
-        raise ValueError("A separate ASR CUDA stream requires Youdao ASR/MING shared admission")
     raw_source_speed = args.text("--max-source-speed")
     max_source_speed = 0.0
     if args.given("--max-source-speed"):
@@ -244,7 +241,6 @@ def build_app(supports):
                             str(asr_chunk_ms_zh),
                             "--compile-flow",
                             *(("--overlap-asr",) if overlap_asr else ()),
-                            *(("--asr-separate-cuda-stream",) if asr_separate_cuda_stream else ()),
                             *(("--share-upstream-gpu",) if shared_upstream_gpu else ()),
                             *(("--share-asr-ming-gpu",) if shared_asr_ming_gpu else ()),
                         ),
@@ -359,8 +355,7 @@ def build_app(supports):
                                 source_chunk_ms=translation_chunk_ms,
                                 overlap_translation=overlap_translation,
                                 max_source_speed=max_source_speed, shared_upstream_gpu=shared_upstream_gpu,
-                                shared_asr_ming_gpu=shared_asr_ming_gpu,
-                                asr_separate_cuda_stream=asr_separate_cuda_stream)
+                                shared_asr_ming_gpu=shared_asr_ming_gpu)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.

@@ -218,9 +218,6 @@ class SharedAsrMingTests(unittest.TestCase):
 
         for family, flags in [
             ("s2st-tencent", "--share-asr-ming-gpu"),
-            ("s2st-youdao", "--asr-separate-cuda-stream"),
-            ("s2st-tencent", "--asr-separate-cuda-stream"),
-            ("s2st-youdao", "--share-upstream-gpu --asr-separate-cuda-stream"),
             ("s2st-youdao", "--share-asr-ming-gpu --share-upstream-gpu"),
             ("s2st-youdao", "--share-asr-ming-gpu --overlap-asr"),
             ("s2st-youdao", "--share-asr-ming-gpu --overlap-translation"),
