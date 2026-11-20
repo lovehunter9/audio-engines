@@ -58,6 +58,21 @@ class FlashShimTest(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             t.flash_attn_varlen_func(None, None, None, None, None, 0, 0, window_size=(8, 8))
 
+    def test_installed_shim_survives_find_spec(self):
+        import importlib.util
+        import sys
+
+        saved = sys.modules.pop("flash_attn", None)
+        try:
+            t._install_flash_attn_shim()
+            self.assertIsNotNone(importlib.util.find_spec("flash_attn"))
+            from flash_attn import flash_attn_varlen_func
+            self.assertIs(flash_attn_varlen_func, t.flash_attn_varlen_func)
+        finally:
+            sys.modules.pop("flash_attn", None)
+            if saved is not None:
+                sys.modules["flash_attn"] = saved
+
 
 if __name__ == "__main__":
     unittest.main()

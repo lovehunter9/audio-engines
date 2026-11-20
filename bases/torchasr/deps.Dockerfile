@@ -51,15 +51,21 @@ open(os.path.join(sp, "fireredasr2.pth"), "w").write("/opt/fireredasr2s/firereda
 open(os.path.join(sp, "mimo_v25asr.pth"), "w").write("/opt/mimo\n")
 EOF
 
-RUN python3 -c "\
-import shutil, sys, types, torch, torchaudio, transformers, fastapi; \
-sys.modules['flash_attn'] = types.SimpleNamespace(flash_attn_varlen_func=None); \
-from fireredasr2 import FireRedAsr2, FireRedAsr2Config; \
-from mimo_v25asr.mimo_audio.mimo_audio import MimoAudio; \
-assert shutil.which('ffmpeg'), 'no ffmpeg'; \
-assert torch.version.cuda, 'torchasr deps must be CUDA torch, got %s' % torch.__version__; \
-assert transformers.__version__ == '4.49.0', transformers.__version__; \
-print('torch', torch.__version__, 'cuda', torch.version.cuda, 'torchaudio', torchaudio.__version__)" \
-    && ln -sf "$(command -v python3)" /usr/local/bin/audio-python
+RUN python3 - <<'EOF'
+import importlib.machinery, shutil, sys, types
+import torch, torchaudio, transformers, fastapi
+# Same stand-in the wrapper installs before loading MiMo.
+fa = types.ModuleType("flash_attn")
+fa.__spec__ = importlib.machinery.ModuleSpec("flash_attn", None)
+fa.flash_attn_varlen_func = None
+sys.modules["flash_attn"] = fa
+from fireredasr2 import FireRedAsr2, FireRedAsr2Config
+from mimo_v25asr.mimo_audio.mimo_audio import MimoAudio
+assert shutil.which("ffmpeg"), "no ffmpeg"
+assert torch.version.cuda, "torchasr deps must be CUDA torch, got %s" % torch.__version__
+assert transformers.__version__ == "4.49.0", transformers.__version__
+print("torch", torch.__version__, "cuda", torch.version.cuda, "torchaudio", torchaudio.__version__)
+EOF
+RUN ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
 LABEL org.opencontainers.image.title="audio-torchasr-deps"

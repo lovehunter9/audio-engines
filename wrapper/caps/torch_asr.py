@@ -9,6 +9,7 @@
 # Batch mode decodes the upload once and cuts spans out of memory. FireRed is an
 # attention-based encoder-decoder and decodes a padded batch of spans in one call; MiMo
 # generates one span at a time.
+import importlib.machinery
 import json
 import logging
 import os
@@ -113,6 +114,8 @@ def _install_flash_attn_shim():
     if "flash_attn" in sys.modules:
         return
     mod = types.ModuleType("flash_attn")
+    # transformers probes optional packages with find_spec, which raises on a spec-less module.
+    mod.__spec__ = importlib.machinery.ModuleSpec("flash_attn", None)
     mod.flash_attn_varlen_func = flash_attn_varlen_func
     sys.modules["flash_attn"] = mod
 
