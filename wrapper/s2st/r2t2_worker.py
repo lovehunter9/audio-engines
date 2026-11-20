@@ -8,9 +8,12 @@ from .gpu_queue import ming_priority_age, stage
 
 
 def recognition_stage(overlap=False, metadata=None):
+    from .gpu_queue import SHARED_UPSTREAM
+
     age = ming_priority_age() if overlap else None
     if metadata is not None:
-        metadata.update(ming_deadline_protected=age is not None,
+        metadata.update(shared_upstream_gpu=SHARED_UPSTREAM,
+                        ming_deadline_protected=age is not None,
                         ming_stage_age_seconds=age)
     return nullcontext(0.0) if overlap and age is None else stage("r2t2")
 

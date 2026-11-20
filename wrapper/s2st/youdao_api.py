@@ -11,10 +11,13 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--translation-chunk-ms", type=int, default=0, choices=(0, 2000, 4000))
     parser.add_argument("--overlap-translation", action="store_true")
+    parser.add_argument("--share-upstream-gpu", action="store_true")
     options = parser.parse_args()
+    if options.share_upstream_gpu and options.overlap_translation:
+        raise ValueError("Shared upstream GPU cannot bypass MING admission")
     from .gpu_queue import configure
 
-    configure(options.root / "gpu-stage-fifo")
+    configure(options.root / "gpu-stage-fifo", shared_upstream=options.share_upstream_gpu)
     sys.path.insert(0, "/opt/youdao/t3po")
     import httpx
 

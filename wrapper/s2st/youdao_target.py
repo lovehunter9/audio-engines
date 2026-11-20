@@ -4,6 +4,7 @@ import re
 import time
 
 from .gpu_queue import async_stage, ming_priority_age
+from . import gpu_queue
 
 
 _CONTROL_PREFIX = re.compile(
@@ -126,6 +127,7 @@ class CompletionStream:
             age = ming_priority_age() if self.stage is None else None
             selected = self.stage or (async_stage if age is not None else None)
             scheduling = dict(gpu_stage_serialized=selected is not None,
+                              shared_upstream_gpu=gpu_queue.SHARED_UPSTREAM,
                               ming_deadline_protected=age is not None,
                               ming_stage_age_seconds=age)
             if selected is None:

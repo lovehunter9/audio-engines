@@ -55,6 +55,9 @@ def build_app(supports):
         raise ValueError("Unsupported Chinese ASR delivery increment")
     overlap_asr = args.switch("--overlap-asr", False) if family == "youdao" else False
     overlap_translation = args.switch("--overlap-translation", False) if family == "youdao" else False
+    shared_upstream_gpu = args.switch("--share-upstream-gpu", False)
+    if shared_upstream_gpu and (family != "youdao" or overlap_asr or overlap_translation):
+        raise ValueError("Shared upstream GPU requires Youdao with MING-exclusive scheduling")
     translation_chunk_ms = args.count("--translation-chunk-ms", 0) if family == "youdao" else 0
     if translation_chunk_ms not in (0, 2000, 4000):
         raise ValueError("Unsupported translation source increment")
@@ -233,6 +236,7 @@ def build_app(supports):
                             str(asr_chunk_ms_zh),
                             "--compile-flow",
                             *(("--overlap-asr",) if overlap_asr else ()),
+                            *(("--share-upstream-gpu",) if shared_upstream_gpu else ()),
                         ),
                         "http://127.0.0.1:18091/internal/youdao/health",
                         environment=environment,
@@ -262,7 +266,8 @@ def build_app(supports):
                         "youdao-api",
                         (python, "-m", "wrapper.s2st.youdao_api", "--root", str(cache),
                          "--translation-chunk-ms", str(translation_chunk_ms),
-                         *(("--overlap-translation",) if overlap_translation else ())),
+                         *(("--overlap-translation",) if overlap_translation else ()),
+                         *(("--share-upstream-gpu",) if shared_upstream_gpu else ())),
                         "http://127.0.0.1:18093/api/v1/health",
                         environment=api_environment,
                         timeout=180,
@@ -342,7 +347,7 @@ def build_app(supports):
                     else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode,
                                 source_chunk_ms=translation_chunk_ms,
                                 overlap_translation=overlap_translation,
-                                max_source_speed=max_source_speed)
+                                max_source_speed=max_source_speed, shared_upstream_gpu=shared_upstream_gpu)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.

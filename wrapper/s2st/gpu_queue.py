@@ -8,6 +8,7 @@ import time
 import uuid
 
 DEFAULT = None
+SHARED_UPSTREAM = False
 MING_PROTECTION_SECONDS = 20.0
 
 
@@ -27,9 +28,10 @@ def ming_priority_age(path=None):
     return age if age >= MING_PROTECTION_SECONDS else None
 
 
-def configure(path):
-    global DEFAULT
+def configure(path, *, shared_upstream=False):
+    global DEFAULT, SHARED_UPSTREAM
     DEFAULT = Path(path)
+    SHARED_UPSTREAM = bool(shared_upstream)
 
 
 def identity(pid):
@@ -52,11 +54,13 @@ class Ticket:
         self.path = Path(selected)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.token = uuid.uuid4().hex
+        self.shared = SHARED_UPSTREAM and label in ("r2t2", "t3po")
         self.entry = {
             "token": self.token,
             "pid": os.getpid(),
             "start": identity(os.getpid()),
             "label": label,
+            "shared": self.shared,
             "enqueued": time.monotonic(),
         }
         self.fd = (self.path.with_suffix(".gpu")).open("a")
@@ -83,10 +87,14 @@ class Ticket:
 
     def try_acquire(self):
         def claim(queue):
-            if not queue or queue[0]["token"] != self.token:
+            position = next((i for i, row in enumerate(queue) if row["token"] == self.token), None)
+            if position is None:
+                return False
+            if position and (not self.shared or any(not row.get("shared", False) for row in queue[:position])):
                 return False
             try:
-                fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                mode = fcntl.LOCK_SH if self.shared else fcntl.LOCK_EX
+                fcntl.flock(self.fd, mode | fcntl.LOCK_NB)
             except BlockingIOError:
                 return False
             self.acquired = True
