@@ -273,6 +273,11 @@ def serve(args, ready):
 
     code = add_sample_watermark(code)
     (root / "results/deployed-ws-server-watermark.py").write_text(code)
+    from .youdao_asr_fairness import apply as cooperative_processor
+
+    code = cooperative_processor(code)
+    record("asr_event_loop_fairness", cooperative_processor_loops=2,
+           source_sha256=hashlib.sha256(code.encode()).hexdigest())
     code = _embed_sanic_entry(code)
     (root / "results/deployed-ws-server-one-pid.py").write_text(code)
     globals_ = {
