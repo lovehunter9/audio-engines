@@ -68,9 +68,20 @@ class Youdao:
                     }
                 )
             )
-            initial = json.loads(await asyncio.wait_for(self.socket.recv(), 120))
-            if initial.get("type") != "init_ok":
-                raise RuntimeError("Youdao session did not initialize: " + str(initial))
+            deadline = time.monotonic() + 120
+            loading = []
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Youdao session initialization exceeded its deadline")
+                initial = json.loads(await asyncio.wait_for(self.socket.recv(), remaining))
+                if initial.get("type") == "loading":
+                    loading.append(initial)
+                    continue
+                if initial.get("type") != "init_ok":
+                    raise RuntimeError("Youdao session did not initialize: " + str(initial))
+                break
+            self.completion_metadata["initialization_loading_events"] = loading
             initialized = True
 
             async def feed():

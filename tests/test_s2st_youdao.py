@@ -210,7 +210,8 @@ class AsrFinalityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, direction="zh2en", *, future=False, dropped=False, send_error=False):
+    async def exercise(self, direction="zh2en", *, future=False, dropped=False, send_error=False,
+                       initial_events=None):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             (root / "results").mkdir()
@@ -219,8 +220,9 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             await source.feed(pcm)
             await source.finish()
             pending = asyncio.Queue()
-            await pending.put({"type": "init_ok"})
-            socket = SimpleNamespace(closed=False, input=bytearray())
+            for event in initial_events if initial_events is not None else [{"type": "init_ok"}]:
+                await pending.put(event)
+            socket = SimpleNamespace(closed=False, input=bytearray(), initialized=False)
             text = (
                 "The next train leaves at eleven."
                 if direction == "zh2en"
@@ -229,6 +231,7 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
             async def send(value):
                 if isinstance(value, bytes):
+                    self.assertTrue(socket.initialized, "PCM must wait for the official init_ok")
                     if send_error:
                         raise RuntimeError("input transport failed")
                     socket.input.extend(value)
@@ -277,7 +280,10 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     await pending.put(event)
 
             async def recv():
-                return json.dumps(await pending.get())
+                event = await pending.get()
+                if event.get("type") == "init_ok":
+                    socket.initialized = True
+                return json.dumps(event)
 
             async def close():
                 socket.closed = True
@@ -351,7 +357,22 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                     return result
                 finally:
                     self.assertTrue(socket.closed)
-                    self.assertTrue(adapter.feeder.done())
+                    if adapter.feeder is not None:
+                        self.assertTrue(adapter.feeder.done())
+
+    async def test_loading_progress_before_init_ok_is_not_an_inference_retry(self):
+        await self.exercise(initial_events=[
+            {"type": "loading", "component": "translation"},
+            {"type": "loading", "component": "asr"},
+            {"type": "init_ok"},
+        ])
+
+    async def test_real_initialization_error_is_not_ignored_as_loading(self):
+        with self.assertRaisesRegex(RuntimeError, "backend unavailable"):
+            await self.exercise(initial_events=[
+                {"type": "loading", "component": "translation"},
+                {"type": "error", "message": "backend unavailable"},
+            ])
 
     async def test_complete_input_and_padding_are_distinct_in_both_directions(self):
         await self.exercise("zh2en")

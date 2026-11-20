@@ -92,8 +92,9 @@ def main():
         "Confucius4-T3PO",
         "--metrics",
         "-lv",
-        {"debug": "5", "info": "3", "warn": "2", "error": "1"}.get(
-            os.environ.get("LOG_LEVEL", "info").lower(), "3"
+        # The official core loader's INFO callback uses verbosity 4.
+        {"debug": "5", "info": "4", "warn": "2", "error": "1"}.get(
+            os.environ.get("LOG_LEVEL", "info").lower(), "4"
         ),
     ]
     native = NativeServer("/opt/llama/lib/libaudio-t3po-entry.so", command)
