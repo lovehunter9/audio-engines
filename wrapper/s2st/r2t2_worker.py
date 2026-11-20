@@ -1,19 +1,51 @@
-import argparse
+import asyncio
 import json
 from pathlib import Path
 import sys
 import time
-from .gpu_queue import configure, stage
+from .gpu_queue import stage
 
 
-def main(args):
-    configure(args.gpu_queue)
+def embed_sanic_entry(code):
+    entry = "    app.run(host=args.ip, port=int(args.port), single_process=True)"
+    if code.count(entry) != 1:
+        raise ValueError("Unknown official Sanic entry")
+    return code.replace(entry, "    _run_embedded_sanic(app, args.ip, int(args.port))", 1)
+
+
+def run_embedded_sanic(app, host, port, ready=None):
+    async def serve():
+        # The author's before_server_start listener still loads VAD/ASR and
+        # executes both language warmups. create_server starts no child worker.
+        server = await app.create_server(host=host, port=port, access_log=False)
+        await server.startup()
+        await server.before_start()
+        await server.after_start()
+        if ready is not None:
+            ready.set()
+        try:
+            await server.serve_forever()
+        finally:
+            await server.before_stop()
+            await server.close()
+            await server.after_stop()
+
+    asyncio.run(serve())
+
+
+def serve(args, ready):
+    _embed_sanic_entry = embed_sanic_entry
+
+    def _run_embedded_sanic(app, host, port):
+        return run_embedded_sanic(app, host, port, ready)
+
     root = Path(args.root)
     source = root / "sources/Confucius4-R2T2"
     sys.path.insert(0, str(source))
     from r2t2 import R2T2ASRModel
+    from .youdao_asr_dispatch import install, load_prepared
 
-    original_factory = R2T2ASRModel.LLM
+    install(R2T2ASRModel)
     log = (root / "results/asr-observer.jsonl").open("a", buffering=1)
 
     def record(kind, **fields):
@@ -30,20 +62,17 @@ def main(args):
         )
 
     def factory(*positional, **keywords):
-        original_options = dict(keywords)
-        keywords.update(
-            gpu_memory_utilization=args.memory_fraction,
-            max_model_len=args.context,
-            max_num_seqs=1,
-            limit_mm_per_prompt={"audio": 1},
-        )
+        if positional or set(keywords) != {"model", "gpu_memory_utilization", "max_new_tokens"}:
+            raise RuntimeError("Unknown official ASR construction arguments")
+        model = load_prepared(keywords["model"], max_new_tokens=keywords["max_new_tokens"])
         record(
             "model_factory",
-            backend="official_vllm_bf16",
-            original_options=original_options,
-            deployment_options=keywords,
+            backend="official_transformers_bf16",
+            original_options=keywords,
+            device_audit=model.device_audit,
+            gpu_pid=__import__("os").getpid(),
         )
-        return original_factory(*positional, **keywords)
+        return model
 
     R2T2ASRModel.LLM = staticmethod(factory)
     import inspect
@@ -96,9 +125,7 @@ def main(args):
             )
         lines = code.splitlines(keepends=True)
         start = next(
-            i
-            for i, line in enumerate(lines)
-            if "# Once the accumulated audio reaches 16 seconds" in line
+            i for i, line in enumerate(lines) if "# Once the accumulated audio reaches 16 seconds" in line
         )
         end = next(
             i
@@ -212,20 +239,16 @@ def main(args):
         chunk_ms=args.chunk_ms,
     )
     (root / "results/deployed-ws-server.py").write_text(code)
+    from .youdao_asr_watermark import apply as add_sample_watermark
+
+    code = add_sample_watermark(code)
+    (root / "results/deployed-ws-server-watermark.py").write_text(code)
+    code = _embed_sanic_entry(code)
+    (root / "results/deployed-ws-server-one-pid.py").write_text(code)
     globals_ = {
         "__name__": "__main__",
-        "__file__": str(source / "ws_server.py"),
+        "__file__": str(root / "results/deployed-ws-server-one-pid.py"),
         "__package__": None,
+        "_run_embedded_sanic": _run_embedded_sanic,
     }
     exec(compile(code, str(source / "ws_server.py"), "exec"), globals_)
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--root", required=True)
-    parser.add_argument("--gpu-queue", required=True)
-    parser.add_argument("--port", type=int, default=18094)
-    parser.add_argument("--memory-fraction", type=float, default=0.20)
-    parser.add_argument("--context", type=int, default=4096)
-    parser.add_argument("--chunk-ms", type=int, default=4000)
-    main(parser.parse_args())

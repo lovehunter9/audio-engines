@@ -4,6 +4,7 @@ from . import tasks
 # base -> ordered [(caps served together, module)]; first match wins, one instance = one model.
 BASES = {
     "s2st-tencent": [(("audio_s2s",), "s2st")],
+    "s2st-youdao": [(("audio_s2s",), "s2st")],
     "qwen": [
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),

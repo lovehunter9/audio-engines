@@ -1,0 +1,240 @@
+"""Audio-only adapter for the pinned author's R2T2/T3PO speech session."""
+
+import asyncio
+import json
+from pathlib import Path
+import time
+
+import httpx
+
+from .gpu_queue import async_stage
+
+
+class Youdao:
+    separate_speech_events = True
+
+    def __init__(self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo"):
+        self.directory = Path(directory)
+        self.root = Path(root)
+        self.url = url
+        self.socket = None
+        self.feeder = None
+        self.speech_text = ""
+        self.completion_metadata = {}
+        self._eos_sent = False
+
+    def speech_stage(self):
+        return async_stage("ming", self.root / "gpu-stage-fifo")
+
+    async def run(self, audio, emit_source):
+        import websockets
+        from inference.translation import join_translation_segments
+
+        self.directory.mkdir(parents=True, exist_ok=False)
+        observer = self.root / "results/asr-observer.jsonl"
+        mt_observer = self.root / "results/target-stream-observer.jsonl"
+        mt_offset = mt_observer.stat().st_size if mt_observer.exists() else 0
+        offset = observer.stat().st_size if observer.exists() else 0
+        original = bytearray()
+        conditioned = 0
+        committed = []
+        streamed = ""
+        initialized = False
+        ended = False
+        padding_samples = 8000
+        started = time.monotonic()
+        self.socket = await websockets.connect(
+            self.url,
+            ping_interval=None,
+            max_size=4 * 1024 * 1024,
+            open_timeout=120,
+            close_timeout=15,
+        )
+        try:
+            await self.socket.send(
+                json.dumps(
+                    {"type": "init", "direction": audio.stream.direction, "latency_mode": "high"}
+                )
+            )
+            initial = json.loads(await asyncio.wait_for(self.socket.recv(), 120))
+            if initial.get("type") != "init_ok":
+                raise RuntimeError("Youdao session did not initialize: " + str(initial))
+            initialized = True
+
+            async def feed():
+                async for pcm in audio:
+                    original.extend(pcm)
+                    await self.socket.send(pcm)
+                self._eos_sent = True
+                await self.socket.send(bytes(padding_samples * 2))
+                await self.socket.send(json.dumps({"type": "end"}))
+
+            self.feeder = asyncio.create_task(feed())
+            while True:
+                if self.feeder.done():
+                    self.feeder.result()
+                remaining = 2400 - (time.monotonic() - started)
+                if remaining <= 0:
+                    raise TimeoutError("Youdao session exceeded its input/compute deadline")
+                receiver = asyncio.create_task(self.socket.recv())
+                try:
+                    wait_seconds = min(600, remaining)
+                    deadline = time.monotonic() + wait_seconds
+                    if not self.feeder.done():
+                        ready, _ = await asyncio.wait(
+                            {receiver, self.feeder},
+                            timeout=wait_seconds,
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if not ready:
+                            raise TimeoutError(
+                                "Youdao stream produced no event before its deadline"
+                            )
+                    if self.feeder.done():
+                        self.feeder.result()
+                    event = json.loads(
+                        await asyncio.wait_for(receiver, max(0.001, deadline - time.monotonic()))
+                    )
+                finally:
+                    if not receiver.done():
+                        receiver.cancel()
+                    await asyncio.gather(receiver, return_exceptions=True)
+                kind = event.get("type")
+                if kind == "translation_delta":
+                    delta = event.get("canonical_text", event.get("text", ""))
+                    streamed += delta
+                    if delta:
+                        yield dict(
+                            type="translation_delta",
+                            text=delta,
+                            source_samples=event.get("request_source_samples"),
+                        )
+                elif kind == "speech_text":
+                    mark = event.get("request_source_samples")
+                    if not isinstance(mark, int) or mark < conditioned:
+                        raise RuntimeError("Invalid causal source-speaker watermark")
+                    if mark > len(original) // 2 + (padding_samples if self._eos_sent else 0):
+                        raise RuntimeError("Youdao referenced source audio before arrival")
+                    end = min(mark, len(original) // 2)
+                    if end < conditioned or end > len(original) // 2:
+                        raise RuntimeError("Youdao referenced source audio before arrival")
+                    await emit_source(bytes(original[conditioned * 2 : end * 2]))
+                    conditioned = end
+                    self.speech_text += event["text"]
+                    if event["text"]:
+                        yield dict(type="speech_text", text=event["text"])
+                elif kind == "translation":
+                    committed.append(event["text"])
+                    value = join_translation_segments(committed, audio.stream.direction)
+                    if not streamed.startswith(value):
+                        raise RuntimeError(
+                            "Committed translation differs from the live canonical stream"
+                        )
+                elif kind == "speech_text_integrity":
+                    if not event.get("identical"):
+                        raise RuntimeError("Youdao speech text integrity failed")
+                elif kind == "error":
+                    raise RuntimeError(
+                        "Youdao source/translation failure: " + str(event.get("message", event))
+                    )
+                elif kind == "asr":
+                    yield dict(
+                        type="source_transcript",
+                        text=event.get("text", ""),
+                        source_samples=event.get("source_samples"),
+                    )
+                elif kind == "ended":
+                    if event.get("stats", {}).get("buffer_units"):
+                        raise RuntimeError("Youdao ended with uncommitted source text")
+                    ended = True
+                    break
+            await asyncio.wait_for(asyncio.shield(self.feeder), 2)
+            self.feeder.result()
+            canonical = join_translation_segments(committed, audio.stream.direction)
+            if (
+                not canonical
+                or streamed != canonical
+                or join_translation_segments([self.speech_text], audio.stream.direction)
+                != canonical
+            ):
+                raise RuntimeError(
+                    "Youdao did not deliver all final translated text to shared MING"
+                )
+            consumed = 0
+            if not observer.exists():
+                raise RuntimeError("ASR consumption observer is absent")
+            with observer.open() as stream:
+                stream.seek(offset)
+                for line in stream:
+                    row = json.loads(line)
+                    if row.get("event", "").endswith("_failed"):
+                        raise RuntimeError("An original ASR model call failed")
+                    consumed += row.get("input_samples", 0)
+            if consumed != audio.samples + padding_samples:
+                raise RuntimeError(
+                    "ASR did not consume the complete original input and explicit EOS padding"
+                )
+            if len(original) // 2 != audio.samples or not audio.exhausted:
+                raise RuntimeError("Youdao input producer stopped early")
+            self.completion_metadata = dict(
+                asr_model_consumed_samples=consumed,
+                asr_eos_padding_samples=padding_samples,
+                asr_source_consumed_samples=audio.samples,
+                translation_retries=0,
+            )
+            if not mt_observer.exists():
+                raise RuntimeError("Translation observation is absent")
+            with mt_observer.open() as stream:
+                stream.seek(mt_offset)
+                rows = [json.loads(line) for line in stream]
+            requests = [row for row in rows if row.get("event") == "translation_request"]
+            responses = [row for row in rows if row.get("event") == "translation_response"]
+            if not requests or len(requests) != len(responses):
+                raise RuntimeError("Translation request/completion counts differ")
+            self.completion_metadata.update(
+                translation_calls=len(requests),
+                translation_compute_seconds=sum(
+                    row["finished_monotonic_seconds"] - row["started_monotonic_seconds"]
+                    for row in responses
+                ),
+                translation_timing_scope="Actual MT SSE after GPU gate; includes local HTTP/dispatch, not kernel-only time",
+            )
+            if not initialized or not ended:
+                raise RuntimeError("Youdao session has no complete acknowledgment")
+        finally:
+            await self.close()
+
+    async def close(self):
+        if self.feeder is not None and not self.feeder.done():
+            self.feeder.cancel()
+        if self.feeder is not None:
+            await asyncio.gather(self.feeder, return_exceptions=True)
+        if self.socket is None:
+            return
+        await self.socket.close()
+        await self.socket.wait_closed()
+        self.socket = None
+        # The author's ended event precedes its final ASR/socket cleanup.
+        # Wait for actual session release before public success or another request.
+        deadline = time.monotonic() + 60
+        async with httpx.AsyncClient(trust_env=False, timeout=3) as client:
+            while time.monotonic() < deadline:
+                response = await client.get("http://127.0.0.1:18093/api/v1/health")
+                response.raise_for_status()
+                metrics = await client.get("http://127.0.0.1:18092/metrics")
+                metrics.raise_for_status()
+                active = {
+                    line.split()[0]: float(line.split()[1])
+                    for line in metrics.text.splitlines()
+                    if line.startswith(
+                        ("llamacpp:requests_processing ", "llamacpp:requests_deferred ")
+                    )
+                }
+                if (
+                    response.json().get("active_speech_sessions") == 0
+                    and active.get("llamacpp:requests_processing") == 0
+                    and active.get("llamacpp:requests_deferred") == 0
+                ):
+                    return
+                await asyncio.sleep(0.05)
+        raise RuntimeError("Youdao cleanup did not finish; the request is not complete")

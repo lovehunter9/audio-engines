@@ -1,0 +1,28 @@
+name: s2st-youdao-ci
+on:
+  push:
+    tags:
+      - s2st-youdao-*
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: lovehunter9
+      image_tag:
+        description: Development image tag
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: s2st-youdao-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: s2st-youdao
+      repo: audio-s2st-youdao
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      image_tag: ${{ inputs.image_tag || github.ref_name }}
+    secrets: inherit

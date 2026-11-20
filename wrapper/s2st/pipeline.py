@@ -13,6 +13,8 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
     install()
     config = settings(speech_url)
     target = ""
+    spoken_target = ""
+    separate_speech = getattr(producer, "separate_speech_events", False)
     published = 0
     done = False
     started = time.monotonic()
@@ -111,6 +113,14 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
 
     direction = "zh-en" if source.stream.direction == "zh2en" else "en-zh"
     speech = Speech(config, speech_event, direction)
+    if hasattr(producer, "speech_stage"):
+        original_synthesize = speech._synthesize
+
+        async def scheduled_synthesize(text):
+            async with producer.speech_stage():
+                return await original_synthesize(text)
+
+        speech._synthesize = scheduled_synthesize
 
     async def source_consumed(pcm):
         if pcm:
@@ -121,7 +131,15 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
         async for event in producer.run(source, source_consumed):
             if event["type"] == "translation_delta":
                 target += event["text"]
+                if not separate_speech:
+                    spoken_target += event["text"]
+                    await speech.text(event["text"])
+            elif event["type"] == "speech_text":
+                if not separate_speech:
+                    raise RuntimeError("Unexpected separate speech text")
+                spoken_target += event["text"]
                 await speech.text(event["text"])
+                continue
             await emit(event)
         await speech.finish()
         playout = None
@@ -137,7 +155,7 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
             or not published
             or state is None
             or state.received != state.committed
-            or state.received != target
+            or state.received != spoken_target
         ):
             raise RuntimeError("S2ST did not deliver all translated text and audio")
         await emit(
@@ -153,6 +171,7 @@ async def run(source, producer, emit, speech_url, *, streaming=False):
                 "elapsed_seconds": time.monotonic() - started,
                 "tts_attempts_per_phrase": 1,
                 "tts_retries": 0,
+                **getattr(producer, "completion_metadata", {}),
             }
         )
     finally:

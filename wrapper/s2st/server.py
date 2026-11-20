@@ -16,11 +16,18 @@ from anyio import CancelScope
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
 from ..runtime import Runtime
-from .config import MING_MODEL_REF, TENCENT_MODEL_REF
+from .config import (
+    MING_MODEL_REF,
+    TENCENT_MODEL_REF,
+    YOUDAO_MODEL_REF,
+    R2T2_MODEL_REF,
+    VAD_MODEL_REF,
+)
 from .pipeline import run as run_pipeline
 from .processes import Worker, Workers
 from .protocol import Input, Stream
 from .tencent import Tencent
+from .youdao import Youdao
 
 
 async def consume_file(source, pcm):
@@ -33,10 +40,10 @@ def build_app(supports):
     runtime = Runtime()
     args = EngineArgs()
     family = "tencent" if os.environ.get("AUDIO_BASE") == "s2st-tencent" else "youdao"
-    if family != "tencent":
-        raise RuntimeError("Youdao deployment remains gated on its upstream quality validation")
     translation_override = args.text("--translation-model")
     speech_override = args.text("--speech-model")
+    recognition_override = args.text("--recognition-model") if family == "youdao" else None
+    vad_override = args.text("--vad-model") if family == "youdao" else None
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -57,15 +64,17 @@ def build_app(supports):
                 snapshot = await asyncio.to_thread(
                     snapshot_download,
                     repo,
-                    revision=TENCENT_MODEL_REF,
+                    revision=TENCENT_MODEL_REF if family == "tencent" else YOUDAO_MODEL_REF,
                     local_files_only=True,
                     cache_dir=os.environ.get("HF_HUB_CACHE"),
                     allow_patterns=include,
                     ignore_patterns=exclude,
                 )
-                candidates = list(Path(snapshot).glob("*Q4_K_M.gguf"))
+                candidates = list(
+                    Path(snapshot).glob("*Q4_K_M.gguf" if family == "tencent" else "*Q6_K.gguf")
+                )
                 if len(candidates) != 1:
-                    raise RuntimeError("Exactly one official Tencent Q4_K_M file is required")
+                    raise RuntimeError("Exactly one official translation GGUF file is required")
                 model = candidates[0]
             speech = (
                 Path(speech_override)
@@ -106,41 +115,130 @@ def build_app(supports):
                     environment[key] = os.environ[key]
             if os.environ.get("LD_LIBRARY_PATH"):
                 environment["LD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
-            await workers.start(
-                Worker(
-                    "ming",
-                    (
-                        python,
-                        "-m",
-                        "wrapper.s2st.tencent_worker",
-                        "--model",
-                        str(speech),
-                        "--translation-model",
-                        str(model),
-                        "--cache",
-                        str(cache / "ming"),
-                        "--compile-flow",
-                    ),
-                    "http://127.0.0.1:18091/internal/tencent/health",
-                    environment=environment,
-                    timeout=1800,
+            if family == "tencent":
+                await workers.start(
+                    Worker(
+                        "ming",
+                        (
+                            python,
+                            "-m",
+                            "wrapper.s2st.tencent_worker",
+                            "--model",
+                            str(speech),
+                            "--translation-model",
+                            str(model),
+                            "--cache",
+                            str(cache / "ming"),
+                            "--compile-flow",
+                        ),
+                        "http://127.0.0.1:18091/internal/tencent/health",
+                        environment=environment,
+                        timeout=1800,
+                    )
                 )
-            )
-            # A short synthetic input verifies the actual full-GPU co-residency at startup.
-            warm = Input(Stream("zh2en"))
-            await warm.feed(bytes(51200))
-            await warm.finish()
-            with tempfile.TemporaryDirectory(prefix="warmup-", dir=cache) as directory:
-                producer = Tencent(model, Path(directory) / "native", binary=binary, native_url="http://127.0.0.1:18091/internal/tencent")
+                # A short synthetic input verifies the actual full-GPU co-residency at startup.
+                warm = Input(Stream("zh2en"))
+                await warm.feed(bytes(51200))
+                await warm.finish()
+                with tempfile.TemporaryDirectory(prefix="warmup-", dir=cache) as directory:
+                    producer = Tencent(
+                        model,
+                        Path(directory) / "native",
+                        binary=binary,
+                        native_url="http://127.0.0.1:18091/internal/tencent",
+                    )
 
-                async def discard(pcm):
-                    pass
-
-                try:
-                    async for event in producer.run(warm, discard):
+                    async def discard(pcm):
                         pass
-                finally:
-                    await producer.close()
+
+                    try:
+                        async for event in producer.run(warm, discard):
+                            pass
+                    finally:
+                        await producer.close()
+            else:
+
+                async def snapshot(repo, revision, override=None):
+                    if override:
+                        value = Path(override)
+                    else:
+                        value = Path(
+                            await asyncio.to_thread(
+                                snapshot_download,
+                                repo,
+                                revision=revision,
+                                local_files_only=True,
+                                cache_dir=os.environ.get("HF_HUB_CACHE"),
+                            )
+                        )
+                    if not value.is_dir():
+                        raise RuntimeError("Required local snapshot is absent: " + repo)
+                    return value
+
+                recognition = await snapshot(
+                    "netease-youdao/Confucius4-R2T2", R2T2_MODEL_REF, recognition_override
+                )
+                vad = (
+                    Path(vad_override)
+                    if vad_override
+                    else await snapshot("FireRedTeam/FireRedVAD", VAD_MODEL_REF) / "Stream-VAD"
+                )
+                if not (vad / "model.pth.tar").is_file() or not (vad / "cmvn.ark").is_file():
+                    raise RuntimeError("The official Stream-VAD snapshot is incomplete")
+                environment["PYTHONPATH"] = "/opt/asr-private:" + environment["PYTHONPATH"]
+                await workers.start(
+                    Worker(
+                        "ming",
+                        (
+                            python,
+                            "-m",
+                            "wrapper.s2st.youdao_worker",
+                            "--model",
+                            str(speech),
+                            "--translation-model",
+                            str(model),
+                            "--recognition-model",
+                            str(recognition),
+                            "--vad-model",
+                            str(vad),
+                            "--cache",
+                            str(cache / "ming"),
+                            "--root",
+                            str(cache),
+                            "--compile-flow",
+                        ),
+                        "http://127.0.0.1:18091/internal/youdao/health",
+                        environment=environment,
+                        timeout=1800,
+                    )
+                )
+                api_environment = dict(
+                    environment,
+                    CUDA_VISIBLE_DEVICES="",
+                    PYTHONPATH=str(Path(__file__).resolve().parents[2]),
+                    TRANSLATION_BACKEND="openai",
+                    VLLM_BASE_URL="http://127.0.0.1:18092/v1",
+                    VLLM_MODEL="Confucius4-T3PO",
+                    ASR_WS_URL="ws://127.0.0.1:18094/asr_stream_api_v1",
+                    ASR_SECRET_KEY="test0102",
+                    ASR_RECV_TIMEOUT_SECONDS="600",
+                    LATENCY_MODE="high",
+                    HOST="127.0.0.1",
+                    PORT="18093",
+                    FORCE_BREAK_THRESHOLD="200",
+                    HISTORY_WINDOW="128",
+                    MAX_NEW_TOKENS="256",
+                    FORCE_MAX_NEW_TOKENS="256",
+                )
+                await workers.start(
+                    Worker(
+                        "youdao-api",
+                        (python, "-m", "wrapper.s2st.youdao_api", "--root", str(cache)),
+                        "http://127.0.0.1:18093/api/v1/health",
+                        environment=api_environment,
+                        timeout=180,
+                    )
+                )
             runtime.state["ready"] = True
         except Exception as exc:
             runtime.state.update(ready=False, error=str(exc))
@@ -157,7 +255,11 @@ def build_app(supports):
             await asyncio.gather(task, return_exceptions=True)
             await workers.close()
 
-    app = FastAPI(title="Hy-SimulMT + MING speech translation", lifespan=lifespan)
+    app = FastAPI(
+        title=("Hy-SimulMT" if family == "tencent" else "Confucius4")
+        + " + MING speech translation",
+        lifespan=lifespan,
+    )
 
     def ready():
         if not runtime.state["ready"]:
@@ -200,7 +302,16 @@ def build_app(supports):
         async with exclusive:
             workers.assert_alive()
             with tempfile.TemporaryDirectory(prefix="session-", dir=cache) as directory:
-                producer = Tencent(model, Path(directory) / "native", binary=binary, native_url="http://127.0.0.1:18091/internal/tencent")
+                producer = (
+                    Tencent(
+                        model,
+                        Path(directory) / "native",
+                        binary=binary,
+                        native_url="http://127.0.0.1:18091/internal/tencent",
+                    )
+                    if family == "tencent"
+                    else Youdao(Path(directory) / "native", cache)
+                )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.
         if terminal is None:
