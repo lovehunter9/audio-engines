@@ -9,6 +9,7 @@ import uuid
 
 DEFAULT = None
 SHARED_UPSTREAM = False
+SHARED_ASR_MING = False
 MING_PROTECTION_SECONDS = 20.0
 
 
@@ -28,10 +29,13 @@ def ming_priority_age(path=None):
     return age if age >= MING_PROTECTION_SECONDS else None
 
 
-def configure(path, *, shared_upstream=False):
-    global DEFAULT, SHARED_UPSTREAM
+def configure(path, *, shared_upstream=False, shared_asr_ming=False):
+    global DEFAULT, SHARED_UPSTREAM, SHARED_ASR_MING
+    if shared_upstream and shared_asr_ming:
+        raise ValueError("Only one GPU stage pair can share admission")
     DEFAULT = Path(path)
     SHARED_UPSTREAM = bool(shared_upstream)
+    SHARED_ASR_MING = bool(shared_asr_ming)
 
 
 def identity(pid):
@@ -47,14 +51,17 @@ def identity(pid):
 
 
 class Ticket:
-    def __init__(self, label, path=None):
+    def __init__(self, label, path=None, *, shared=None):
         selected = path if path is not None else DEFAULT
         if selected is None:
             raise RuntimeError("GPU stage queue has not been configured")
         self.path = Path(selected)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.token = uuid.uuid4().hex
-        self.shared = SHARED_UPSTREAM and label in ("r2t2", "t3po")
+        policy_shared = (SHARED_UPSTREAM and label in ("r2t2", "t3po")) or (
+            SHARED_ASR_MING and label in ("r2t2", "ming")
+        )
+        self.shared = policy_shared if shared is None else bool(shared)
         self.entry = {
             "token": self.token,
             "pid": os.getpid(),
@@ -125,8 +132,8 @@ class Ticket:
 
 
 @contextmanager
-def stage(label, path=None):
-    ticket = Ticket(label, path)
+def stage(label, path=None, *, shared=None):
+    ticket = Ticket(label, path, shared=shared)
     try:
         while not ticket.try_acquire():
             time.sleep(0.005)
@@ -136,8 +143,8 @@ def stage(label, path=None):
 
 
 @asynccontextmanager
-async def async_stage(label, path=None):
-    ticket = Ticket(label, path)
+async def async_stage(label, path=None, *, shared=None):
+    ticket = Ticket(label, path, shared=shared)
     try:
         while not ticket.try_acquire():
             await asyncio.sleep(0.005)

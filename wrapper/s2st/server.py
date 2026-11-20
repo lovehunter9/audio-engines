@@ -56,8 +56,13 @@ def build_app(supports):
     overlap_asr = args.switch("--overlap-asr", False) if family == "youdao" else False
     overlap_translation = args.switch("--overlap-translation", False) if family == "youdao" else False
     shared_upstream_gpu = args.switch("--share-upstream-gpu", False)
-    if shared_upstream_gpu and (family != "youdao" or overlap_asr or overlap_translation):
-        raise ValueError("Shared upstream GPU requires Youdao with MING-exclusive scheduling")
+    shared_asr_ming_gpu = args.switch("--share-asr-ming-gpu", False)
+    if shared_upstream_gpu and shared_asr_ming_gpu:
+        raise ValueError("Only one GPU stage pair can share admission")
+    if (shared_upstream_gpu or shared_asr_ming_gpu) and (
+        family != "youdao" or overlap_asr or overlap_translation
+    ):
+        raise ValueError("Shared GPU stages require Youdao without unlocked overlap")
     translation_chunk_ms = args.count("--translation-chunk-ms", 0) if family == "youdao" else 0
     if translation_chunk_ms not in (0, 2000, 4000):
         raise ValueError("Unsupported translation source increment")
@@ -237,6 +242,7 @@ def build_app(supports):
                             "--compile-flow",
                             *(("--overlap-asr",) if overlap_asr else ()),
                             *(("--share-upstream-gpu",) if shared_upstream_gpu else ()),
+                            *(("--share-asr-ming-gpu",) if shared_asr_ming_gpu else ()),
                         ),
                         "http://127.0.0.1:18091/internal/youdao/health",
                         environment=environment,
@@ -267,7 +273,8 @@ def build_app(supports):
                         (python, "-m", "wrapper.s2st.youdao_api", "--root", str(cache),
                          "--translation-chunk-ms", str(translation_chunk_ms),
                          *(("--overlap-translation",) if overlap_translation else ()),
-                         *(("--share-upstream-gpu",) if shared_upstream_gpu else ())),
+                         *(("--share-upstream-gpu",) if shared_upstream_gpu else ()),
+                         *(("--share-asr-ming-gpu",) if shared_asr_ming_gpu else ())),
                         "http://127.0.0.1:18093/api/v1/health",
                         environment=api_environment,
                         timeout=180,
@@ -347,7 +354,8 @@ def build_app(supports):
                     else Youdao(Path(directory) / "native", cache, latency_mode=latency_mode,
                                 source_chunk_ms=translation_chunk_ms,
                                 overlap_translation=overlap_translation,
-                                max_source_speed=max_source_speed, shared_upstream_gpu=shared_upstream_gpu)
+                                max_source_speed=max_source_speed, shared_upstream_gpu=shared_upstream_gpu,
+                                shared_asr_ming_gpu=shared_asr_ming_gpu)
                 )
                 await run_pipeline(source, producer, deliver, speech_url, streaming=streaming)
         # A terminal acknowledgement means native cleanup and the session lock are released.

@@ -8,14 +8,17 @@ from .gpu_queue import ming_priority_age, stage
 
 
 def recognition_stage(overlap=False, metadata=None):
-    from .gpu_queue import SHARED_UPSTREAM
+    from .gpu_queue import SHARED_UPSTREAM, SHARED_ASR_MING
 
-    age = ming_priority_age() if overlap else None
+    age = ming_priority_age() if overlap or SHARED_ASR_MING else None
     if metadata is not None:
         metadata.update(shared_upstream_gpu=SHARED_UPSTREAM,
+                        shared_asr_ming_gpu=SHARED_ASR_MING,
                         ming_deadline_protected=age is not None,
                         ming_stage_age_seconds=age)
-    return nullcontext(0.0) if overlap and age is None else stage("r2t2")
+    if overlap and age is None:
+        return nullcontext(0.0)
+    return stage("r2t2", shared=False if SHARED_ASR_MING and age is not None else None)
 
 
 def embed_sanic_entry(code):

@@ -128,6 +128,7 @@ class CompletionStream:
             selected = self.stage or (async_stage if age is not None else None)
             scheduling = dict(gpu_stage_serialized=selected is not None,
                               shared_upstream_gpu=gpu_queue.SHARED_UPSTREAM,
+                              shared_asr_ming_gpu=gpu_queue.SHARED_ASR_MING,
                               ming_deadline_protected=age is not None,
                               ming_stage_age_seconds=age)
             if selected is None:

@@ -18,13 +18,16 @@ class Youdao:
     def __init__(
         self, directory, root, url="ws://127.0.0.1:18093/ws/simul-demo", latency_mode="high",
         source_chunk_ms=0, overlap_translation=False, max_source_speed=0.0,
-        shared_upstream_gpu=False,
+        shared_upstream_gpu=False, shared_asr_ming_gpu=False,
     ):
         if latency_mode not in ("high", "native"):
             raise ValueError(
                 "Only the validated official high/native translation policies are allowed"
             )
         self.latency_mode = latency_mode
+        if shared_upstream_gpu and shared_asr_ming_gpu:
+            raise ValueError("Only one GPU stage pair can share admission")
+        self.shared_asr_ming_gpu = bool(shared_asr_ming_gpu)
         self.max_source_speed = SourceAdmission.validate(max_source_speed)
         if source_chunk_ms not in (0, 2000, 4000):
             raise ValueError("Unsupported translation source increment")
@@ -37,12 +40,13 @@ class Youdao:
         self.speech_text = ""
         self.completion_metadata = {"translation_source_chunk_ms": source_chunk_ms,
                                     "overlap_translation": bool(overlap_translation),
-                                    "shared_upstream_gpu": bool(shared_upstream_gpu)}
+                                    "shared_upstream_gpu": bool(shared_upstream_gpu),
+                                    "shared_asr_ming_gpu": self.shared_asr_ming_gpu}
         self._close_lock = asyncio.Lock()
         self._eos_sent = False
 
     def speech_stage(self):
-        return async_stage("ming", self.root / "gpu-stage-fifo")
+        return async_stage("ming", self.root / "gpu-stage-fifo", shared=self.shared_asr_ming_gpu)
 
     async def run(self, audio, emit_source):
         import websockets

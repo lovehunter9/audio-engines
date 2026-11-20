@@ -69,18 +69,22 @@ def main():
     parser.add_argument("--overlap-asr", action="store_true")
     parser.add_argument("--port", type=int, default=18091)
     parser.add_argument("--share-upstream-gpu", action="store_true")
+    parser.add_argument("--share-asr-ming-gpu", action="store_true")
     options = parser.parse_args()
     if options.asr_chunk_ms not in (800, 1600, 2000, 4000):
         raise ValueError("Unsupported ASR delivery increment")
     if options.asr_chunk_ms_zh is not None and options.asr_chunk_ms_zh not in (800, 1600, 2000, 4000):
         raise ValueError("Unsupported Chinese ASR delivery increment")
-    if options.share_upstream_gpu and options.overlap_asr:
+    if options.share_upstream_gpu and options.share_asr_ming_gpu:
+        raise ValueError("Only one GPU stage pair can share admission")
+    if (options.share_upstream_gpu or options.share_asr_ming_gpu) and options.overlap_asr:
         raise ValueError("Shared upstream GPU cannot bypass MING admission")
     root = options.root.resolve()
     (root / "results").mkdir(parents=True, exist_ok=True)
     from .gpu_queue import configure
 
-    configure(root / "gpu-stage-fifo", shared_upstream=options.share_upstream_gpu)
+    configure(root / "gpu-stage-fifo", shared_upstream=options.share_upstream_gpu,
+              shared_asr_ming=options.share_asr_ming_gpu)
     for folder in ["sources", "models"]:
         (root / folder).mkdir(exist_ok=True)
     links = {
@@ -153,6 +157,7 @@ def main():
                     chinese_chunk_ms=options.asr_chunk_ms_zh,
                     overlap_asr=options.overlap_asr,
                     shared_upstream_gpu=options.share_upstream_gpu,
+                    shared_asr_ming_gpu=options.share_asr_ming_gpu,
                 ),
                 ready,
             )
@@ -175,6 +180,7 @@ def main():
             raise HTTPException(503, "ASR loading and language warmup")
         return dict(status="ready", gpu_pid=os.getpid(), asr_chunk_ms=options.asr_chunk_ms,
                     shared_upstream_gpu=options.share_upstream_gpu,
+                    shared_asr_ming_gpu=options.share_asr_ming_gpu,
                     asr_chunk_ms_zh=options.asr_chunk_ms_zh or options.asr_chunk_ms,
                     overlap_asr=options.overlap_asr,
                     ming_deadline_protection_seconds=MING_PROTECTION_SECONDS)
