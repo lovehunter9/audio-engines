@@ -61,6 +61,24 @@ def serve(args, ready):
             + "\n"
         )
 
+    import fireredvad
+    import torch
+
+    original_vad_factory = fireredvad.FireRedStreamVad.from_pretrained.__func__
+
+    def audited_vad_factory(cls, model_dir, config=None):
+        if config is None or not config.use_gpu:
+            raise RuntimeError("The official Stream-VAD must explicitly request CUDA")
+        detector = original_vad_factory(cls, model_dir, config)
+        modules = [value for value in vars(detector).values() if isinstance(value, torch.nn.Module)]
+        devices = sorted({str(parameter.device) for value in modules for parameter in value.parameters()})
+        if not devices or any(not device.startswith("cuda") for device in devices):
+            raise RuntimeError("Stream-VAD neural parameters are not wholly CUDA")
+        record("vad_model_factory", parameter_devices=devices, gpu_pid=__import__("os").getpid())
+        return detector
+
+    fireredvad.FireRedStreamVad.from_pretrained = classmethod(audited_vad_factory)
+
     def factory(*positional, **keywords):
         if positional or set(keywords) != {"model", "gpu_memory_utilization", "max_new_tokens"}:
             raise RuntimeError("Unknown official ASR construction arguments")
