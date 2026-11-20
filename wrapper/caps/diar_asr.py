@@ -161,7 +161,22 @@ def _cjk(ch):
     return "\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af"
 
 
-def _generate_moss(path, prompt):
+def _watch(ctx, prompt_len):
+    # One generate() is the whole job; without ticks a long meeting looks stalled to the caller.
+    from transformers import StoppingCriteria, StoppingCriteriaList
+
+    class _Tick(StoppingCriteria):
+        def __call__(self, input_ids, scores, **kwargs):
+            n = input_ids.shape[1] - prompt_len
+            if n % 64 == 0:
+                ctx.checkpoint()
+                ctx.progress(stage="transcribe", done=n, total=MAX_NEW_TOKENS)
+            return False
+
+    return StoppingCriteriaList([_Tick()])
+
+
+def _generate_moss(path, prompt, ctx):
     import librosa
     import torch
 
@@ -181,13 +196,14 @@ def _generate_moss(path, prompt):
             input_features=inputs["input_features"],
             audio_feature_lengths=inputs["audio_feature_lengths"],
             audio_chunk_mapping=inputs["audio_chunk_mapping"],
-            max_new_tokens=MAX_NEW_TOKENS, do_sample=False)
+            max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
+            stopping_criteria=_watch(ctx, inputs["input_ids"].shape[1]))
     ids = out[0][prompt_len:]
     raw = processor.tokenizer.decode(ids, skip_special_tokens=True).strip()
     return raw, parse_moss(raw), int(ids.numel()), len(audio) / processor.feature_extractor.sampling_rate
 
 
-def _generate_vibevoice(path, prompt):
+def _generate_vibevoice(path, prompt, ctx):
     import librosa
     import torch
 
@@ -197,7 +213,8 @@ def _generate_vibevoice(path, prompt):
     inputs = processor.apply_transcription_request(audio=audio, prompt=prompt or None)
     inputs = inputs.to(_state["device"], model.dtype)
     with torch.inference_mode():
-        out = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False)
+        out = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, do_sample=False,
+                             stopping_criteria=_watch(ctx, inputs["input_ids"].shape[1]))
     ids = out[:, inputs["input_ids"].shape[1]:]
     raw = processor.decode(ids)[0]
     return raw, parse_vibevoice(raw), int(ids.shape[1]), len(audio) / sr
@@ -215,7 +232,7 @@ def _run(data, filename, prompt, response_format, ctx=tasks.NULL_CTX):
         ctx.progress(ratio=0.0, stage="transcribe")
         gen = _generate_moss if _state["kind"] == KIND_MOSS else _generate_vibevoice
         with _gen_lock:
-            raw, segments, tokens, duration = gen(path, prompt)
+            raw, segments, tokens, duration = gen(path, prompt, ctx)
     except tasks.Cancelled:
         raise
     except Exception as e:

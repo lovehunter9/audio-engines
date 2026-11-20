@@ -2881,7 +2881,7 @@ def t_diar_asr():
     raw = "[0.48][S01]Welcome everyone[1.66][2.0][S02]Thanks[3.5]"
     d._state.update(ready=True, kind=d.KIND_MOSS, device="cpu")
     real = d._generate_moss
-    d._generate_moss = lambda path, prompt: (raw, d.parse_moss(raw), 20, 3.5)
+    d._generate_moss = lambda path, prompt, ctx: (raw, d.parse_moss(raw), 20, 3.5)
     try:
         with TestClient(d.build_app(["stt"])) as c:
             advertises_tasks(c, "diar_asr")
