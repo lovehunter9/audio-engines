@@ -15,6 +15,16 @@ from wrapper.s2st import youdao_source
 from wrapper.s2st.youdao_numbers import boundary, decimal_separator
 
 
+class DeliverySettingsTests(unittest.TestCase):
+    def test_unknown_asr_delivery_increment_is_rejected_before_loading(self):
+        from wrapper.s2st import server
+        import os
+
+        with patch.dict(os.environ, {"AUDIO_BASE": "s2st-youdao", "ENGINE_ARGS": "--asr-chunk-ms 3000"}):
+            with self.assertRaisesRegex(ValueError, "ASR delivery increment"):
+                server.build_app(["audio_s2s"])
+
+
 class WordTailTests(unittest.TestCase):
     def test_translation_policy_is_explicit_and_low_force_is_not_selected(self):
         self.assertEqual(Youdao("/unused", "/unused", latency_mode="native").latency_mode, "native")
@@ -52,6 +62,42 @@ class WordTailTests(unittest.TestCase):
         guard = SpeechWordTail("en2zh")
         for text in ["我们拼命尝试", "去修复", "。", "UTF-8 is a "]:
             self.assertEqual(guard.feed(text), text)
+
+
+class TranslationQualityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_foreign_script_is_preserved_and_reported_without_inference_retry(self):
+        import httpx
+        from wrapper.s2st.youdao_target import CompletionStream, TargetText
+
+        original = "A 副 product."
+        packets = [
+            {"choices": [{"delta": {"content": original}, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        ]
+        body = "".join("data: " + json.dumps(value) + "\n\n" for value in packets)
+        body += "data: [DONE]\n\n"
+        calls, delivered, observed = [], [], []
+
+        async def handler(request):
+            calls.append(request)
+            return httpx.Response(200, text=body)
+
+        async def emit(event):
+            delivered.append(event)
+
+        async def observe(event):
+            observed.append(event)
+
+        target = TargetText("zh2en", emit, lambda parts, direction: "".join(parts), lambda raw: (None, raw))
+        native = SimpleNamespace(model="test", max_new_tokens=256, force_max_new_tokens=256,
+                                 logit_bias=None, repetition_penalty=None, api_key=None, url="http://test/v1/chat/completions")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            raw = await CompletionStream(native, "zh2en", target, observe=observe, client=client)("source")
+        self.assertEqual(raw, original)
+        self.assertEqual("".join(e.get("canonical_text", "") for e in delivered), original)
+        self.assertEqual(len(calls), 1)
+        warnings = [e for e in observed if e["event"] == "translation_quality_warning"]
+        self.assertEqual([e["text"] for e in warnings], [original])
 
 
 class SourceNumbersTests(unittest.TestCase):
@@ -326,3 +372,32 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SourceLanguageIncrementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_direction_routing_does_not_leak_between_sessions_or_change_warmup(self):
+        from wrapper.s2st.youdao_asr_chunking import apply
+
+        source = '''SAMPLING_RATE = 16000
+CHUNK_ASR_SECONDS = 2.0
+CHUNK_ASR_SIZE = 32000
+STEP_MS = 2000
+WARMUP = (STEP_MS, CHUNK_ASR_SECONDS, CHUNK_ASR_SIZE)
+async def asr_stream_api_v1(header):
+    async def processor():
+        try:
+            language = header.get("language", "zhen")
+            return STEP_MS, CHUNK_ASR_SECONDS, CHUNK_ASR_SIZE
+        finally:
+            pass
+    return await processor()
+'''
+        namespace = {}
+        exec(apply(source, 2000, 4000), namespace)
+        self.assertEqual(namespace['WARMUP'], (2000, 2.0, 32000))
+        entry = namespace['asr_stream_api_v1']
+        self.assertEqual(await entry({'language': 'Chinese'}), (4000, 4.0, 64000))
+        self.assertEqual(await entry({'language': 'English'}), (2000, 2.0, 32000))
+        self.assertEqual(await entry({}), (2000, 2.0, 32000))
+        with self.assertRaisesRegex(ValueError, 'source-language parser'):
+            apply(source.replace('header.get("language", "zhen")', 'header.get("lang")'), 2000, 4000)

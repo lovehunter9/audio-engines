@@ -46,10 +46,13 @@ def main():
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--compile-flow", action="store_true")
     parser.add_argument("--asr-chunk-ms", type=int, default=2000)
+    parser.add_argument("--asr-chunk-ms-zh", type=int)
     parser.add_argument("--port", type=int, default=18091)
     options = parser.parse_args()
     if options.asr_chunk_ms not in (800, 1600, 2000, 4000):
         raise ValueError("Unsupported ASR delivery increment")
+    if options.asr_chunk_ms_zh is not None and options.asr_chunk_ms_zh not in (800, 1600, 2000, 4000):
+        raise ValueError("Unsupported Chinese ASR delivery increment")
     root = options.root.resolve()
     (root / "results").mkdir(parents=True, exist_ok=True)
     from .gpu_queue import configure
@@ -89,7 +92,9 @@ def main():
         "Confucius4-T3PO",
         "--metrics",
         "-lv",
-        "5",
+        {"debug": "5", "info": "3", "warn": "2", "error": "1"}.get(
+            os.environ.get("LOG_LEVEL", "info").lower(), "3"
+        ),
     ]
     native = NativeServer("/opt/llama/lib/libaudio-t3po-entry.so", command)
     native.start()
@@ -119,6 +124,7 @@ def main():
                     memory_fraction=0.20,
                     context=4096,
                     chunk_ms=options.asr_chunk_ms,
+                    chinese_chunk_ms=options.asr_chunk_ms_zh,
                 ),
                 ready,
             )
@@ -139,7 +145,8 @@ def main():
             raise HTTPException(503, errors[-1] if errors else "ASR thread exited")
         if not ready.is_set():
             raise HTTPException(503, "ASR loading and language warmup")
-        return dict(status="ready", gpu_pid=os.getpid(), asr_chunk_ms=options.asr_chunk_ms)
+        return dict(status="ready", gpu_pid=os.getpid(), asr_chunk_ms=options.asr_chunk_ms,
+                    asr_chunk_ms_zh=options.asr_chunk_ms_zh or options.asr_chunk_ms)
 
     stop = threading.Event()
 

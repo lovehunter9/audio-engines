@@ -250,11 +250,17 @@ def serve(args, ready):
         code = code.replace(
             "CHUNK_ASR_SECONDS = 0.16", "CHUNK_ASR_SECONDS = " + str(args.chunk_ms / 1000), 1
         )
+    chinese_chunk_ms = getattr(args, "chinese_chunk_ms", None)
+    if chinese_chunk_ms is not None and chinese_chunk_ms != args.chunk_ms:
+        from .youdao_asr_chunking import apply as source_language_increment
+
+        code = source_language_increment(code, args.chunk_ms, chinese_chunk_ms)
     record(
         "deployment_patch",
         original_sha256=hashlib.sha256(original_source.encode()).hexdigest(),
         description="Pass actual residual input to original ASR before original finish; no silence padding",
         chunk_ms=args.chunk_ms,
+        chinese_chunk_ms=chinese_chunk_ms,
     )
     (root / "results/deployed-ws-server.py").write_text(code)
     from .youdao_asr_watermark import apply as add_sample_watermark

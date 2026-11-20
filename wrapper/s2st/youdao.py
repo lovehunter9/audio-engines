@@ -1,6 +1,7 @@
 """Audio-only adapter for the pinned author's R2T2/T3PO speech session."""
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -182,6 +183,7 @@ class Youdao:
                     "Youdao did not deliver all final translated text to shared MING"
                 )
             consumed = 0
+            observed_chunk_samples = set()
             if not observer.exists():
                 raise RuntimeError("ASR consumption observer is absent")
             with observer.open() as stream:
@@ -191,6 +193,8 @@ class Youdao:
                     if row.get("event", "").endswith("_failed"):
                         raise RuntimeError("An original ASR model call failed")
                     consumed += row.get("input_samples", 0)
+                    if row.get("input_samples", 0) > 0:
+                        observed_chunk_samples.add(row["input_samples"])
             if consumed != audio.samples + padding_samples:
                 raise RuntimeError(
                     "ASR did not consume the complete original input and explicit EOS padding"
@@ -199,10 +203,13 @@ class Youdao:
                 raise RuntimeError("Youdao input producer stopped early")
             self.completion_metadata = dict(
                 asr_model_consumed_samples=consumed,
+                asr_observed_chunk_samples=sorted(observed_chunk_samples),
                 asr_eos_padding_samples=padding_samples,
                 asr_source_consumed_samples=audio.samples,
                 translation_retries=0,
                 translation_latency_mode=self.latency_mode,
+                speech_input_text_sha256=hashlib.sha256(self.speech_text.encode()).hexdigest(),
+                speech_text_integrity_scope="Pinned official join_translation_segments(speech_text) equals canonical MT; explicit word-boundary whitespace is allowed",
             )
             if not mt_observer.exists():
                 raise RuntimeError("Translation observation is absent")
@@ -214,6 +221,11 @@ class Youdao:
             if not requests or len(requests) != len(responses):
                 raise RuntimeError("Translation request/completion counts differ")
             self.completion_metadata.update(
+                translation_quality_warnings=[
+                    {key: row[key] for key in ("sequence", "reason", "text")}
+                    for row in rows
+                    if row.get("event") == "translation_quality_warning"
+                ],
                 translation_calls=len(requests),
                 translation_compute_seconds=sum(
                     row["finished_monotonic_seconds"] - row["started_monotonic_seconds"]

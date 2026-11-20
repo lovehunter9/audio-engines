@@ -165,9 +165,15 @@ class CompletionStream:
                 choice = choices[0]
                 text = choice.get("delta", {}).get("content") or ""
                 if self.direction == "zh2en" and re.search(r"[\u3400-\u9fff\uf900-\ufaff]", text):
-                    raise RuntimeError(
-                        "English-target translation produced Han characters; stream cannot be retracted"
-                    )
+                    if self.observe:
+                        await self.observe(
+                            dict(
+                                event="translation_quality_warning",
+                                sequence=self.target.sequence,
+                                reason="English-target output contains Han characters",
+                                text=text,
+                            )
+                        )
                 if text:
                     await self.target.update(text)
                 if choice.get("finish_reason") is not None:

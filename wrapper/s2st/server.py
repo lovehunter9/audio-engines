@@ -47,6 +47,12 @@ def build_app(supports):
     latency_mode = args.text("--translation-latency", "high") if family == "youdao" else None
     if family == "youdao" and latency_mode not in ("high", "native"):
         raise ValueError("Unsupported official translation latency policy")
+    asr_chunk_ms = args.count("--asr-chunk-ms", 2000) if family == "youdao" else None
+    if family == "youdao" and asr_chunk_ms not in (800, 1600, 2000, 4000):
+        raise ValueError("Unsupported ASR delivery increment")
+    asr_chunk_ms_zh = args.count("--asr-chunk-ms-zh", asr_chunk_ms) if family == "youdao" else None
+    if family == "youdao" and asr_chunk_ms_zh not in (800, 1600, 2000, 4000):
+        raise ValueError("Unsupported Chinese ASR delivery increment")
     cache = Path(args.text("--cache-dir", "/data/s2st"))
     binary = args.text("--translation-binary", "/opt/llama/bin/llama-mtmd-cli")
     args.warn_unclaimed(__import__("logging").getLogger("audio-s2st"))
@@ -208,6 +214,10 @@ def build_app(supports):
                             str(cache / "ming"),
                             "--root",
                             str(cache),
+                            "--asr-chunk-ms",
+                            str(asr_chunk_ms),
+                            "--asr-chunk-ms-zh",
+                            str(asr_chunk_ms_zh),
                             "--compile-flow",
                         ),
                         "http://127.0.0.1:18091/internal/youdao/health",
