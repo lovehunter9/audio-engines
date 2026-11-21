@@ -131,6 +131,27 @@ def model_paths():
     return main, draft
 
 
+def wait_for_draft(timeout_s=3600.0, interval_s=5.0):
+    """Block until llm-init has written extra_model_path, when it is going to.
+
+    The wrapper starts once the main snapshot exists, but llm-init fetches the draft after it and
+    writes extra_model_path only when every download is done. Starting earlier would run the
+    engine without DFlash for the life of the pod.
+    """
+    if XPU or not USE_DRAFT or len(_repos()) < 2 or not os.path.isdir(RUN_DIR):
+        return
+    path = os.path.join(RUN_DIR, "extra_model_path")
+    started = time.monotonic()
+    while not os.path.exists(path):
+        elapsed = time.monotonic() - started
+        if elapsed >= timeout_s:
+            log.warning("no %s after %.0fs; starting without the draft", path, elapsed)
+            return
+        _state["waiting"] = "waiting for the draft model download"
+        time.sleep(interval_s)
+    _state["waiting"] = None
+
+
 def engine_argv(model, draft):
     argv = [ENGINE_BIN, "serve", "--model-path", model, "--host", "127.0.0.1",
             "--port", str(ENGINE_PORT),
@@ -233,6 +254,7 @@ def _load():
     import httpx
 
     try:
+        wait_for_draft()
         model, draft = model_paths()
         if not model:
             raise RuntimeError("no local snapshot of %s" % MODEL_REPO)

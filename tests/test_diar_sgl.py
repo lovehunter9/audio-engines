@@ -81,6 +81,22 @@ class ModelPathsTest(unittest.TestCase):
         draft = self.snapshot("w/MOSS-dflash2")
         self.assertEqual(diar_sgl.model_paths(), (main, draft))
 
+    def test_the_engine_waits_for_llm_init_to_finish_the_draft(self):
+        import threading
+
+        path = os.path.join(self.run_dir, "extra_model_path")
+        threading.Timer(0.3, lambda: open(path, "w").write("/models/draft\n")).start()
+        started = time.monotonic()
+        diar_sgl.wait_for_draft(timeout_s=10, interval_s=0.05)
+        self.assertGreaterEqual(time.monotonic() - started, 0.25)
+        self.assertTrue(os.path.exists(path))
+
+    def test_without_a_run_directory_nothing_waits(self):
+        diar_sgl.RUN_DIR = os.path.join(self.tmp.name, "absent")
+        started = time.monotonic()
+        diar_sgl.wait_for_draft(timeout_s=10, interval_s=0.05)
+        self.assertLess(time.monotonic() - started, 0.2)
+
     def test_no_second_source_means_no_draft(self):
         os.environ["MODEL_SOURCE"] = "hf://OpenMOSS-Team/MOSS-Transcribe-Diarize"
         main = self.snapshot("OpenMOSS-Team/MOSS-Transcribe-Diarize")
