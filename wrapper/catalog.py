@@ -24,6 +24,10 @@ BASES = {
     "diarasr": [
         (("stt", "diar"), "diar_asr"),
     ],
+    # Intel Arc sibling: the same transformers code on PyTorch XPU, not an OpenVINO port.
+    "diarasr-xpu": [
+        (("stt", "diar"), "diar_asr"),
+    ],
     # Recognisers that ship as a research repo plus PyTorch weights (FireRedASR2-AED, MiMo-V2.5-ASR).
     "torchasr": [
         (("stt",), "torch_asr"),
