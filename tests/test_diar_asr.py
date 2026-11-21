@@ -1,5 +1,9 @@
+import sys
+import types
 import unittest
+from unittest import mock
 
+from wrapper import gpu
 from wrapper.caps import diar_asr
 
 
@@ -89,6 +93,33 @@ class KindTest(unittest.TestCase):
         self.assertEqual(diar_asr.kind_of({"model_type": "moss_transcribe_diarize"}), diar_asr.KIND_MOSS)
         self.assertEqual(diar_asr.kind_of({"model_type": "vibevoice_asr"}), diar_asr.KIND_VIBEVOICE)
         self.assertIsNone(diar_asr.kind_of({"model_type": "qwen3_asr"}))
+
+
+def _fake_torch(cuda, xpu, xpu_mem=(6 << 30, 32 << 30)):
+    t = types.SimpleNamespace()
+    t.cuda = types.SimpleNamespace(is_available=lambda: cuda, device_count=lambda: int(cuda))
+    if xpu is not None:
+        t.xpu = types.SimpleNamespace(is_available=lambda: xpu, mem_get_info=lambda: xpu_mem,
+                                      utilization=lambda: 40)
+    return t
+
+
+class DeviceTest(unittest.TestCase):
+    def test_prefers_cuda_then_xpu_then_cpu(self):
+        self.assertEqual(diar_asr.pick_device(_fake_torch(True, True)), "cuda")
+        self.assertEqual(diar_asr.pick_device(_fake_torch(False, True)), "xpu")
+        self.assertEqual(diar_asr.pick_device(_fake_torch(False, False)), "cpu")
+
+    def test_a_torch_without_the_xpu_module_is_cpu(self):
+        self.assertEqual(diar_asr.pick_device(_fake_torch(False, None)), "cpu")
+
+    def test_metrics_report_the_xpu_card(self):
+        with mock.patch.dict(sys.modules, {"torch": _fake_torch(False, True)}):
+            text = gpu.gpu_metrics_text()
+        self.assertIn("gpu_present 1", text)
+        self.assertIn("gpu_mem_total_bytes %d" % (32 << 30), text)
+        self.assertIn("gpu_mem_used_bytes %d" % (26 << 30), text)
+        self.assertIn("gpu_util_ratio 0.4000", text)
 
 
 if __name__ == "__main__":

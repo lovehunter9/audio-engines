@@ -99,6 +99,15 @@ def gpu_metrics_text(nvml_fallback=False):
                 util = float(torch.cuda.utilization()) / 100.0  # needs pynvml; 0 if absent
             except Exception:
                 util = 0.0
+        elif getattr(torch, "xpu", None) is not None and torch.xpu.is_available():
+            present = 1
+            free, tot = torch.xpu.mem_get_info()
+            total = int(tot)
+            used = int(tot - free)
+            try:
+                util = float(torch.xpu.utilization()) / 100.0
+            except Exception:
+                util = 0.0
     except Exception:
         present = 0
     if not present:

@@ -66,6 +66,16 @@ def kind_of(config):
     return _KINDS.get(str(config.get("model_type") or "").lower())
 
 
+def pick_device(torch):
+    """cuda, then xpu (Intel Arc through PyTorch XPU), then cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    xpu = getattr(torch, "xpu", None)
+    if xpu is not None and xpu.is_available():
+        return "xpu"
+    return "cpu"
+
+
 def _load():
     try:
         import torch
@@ -75,10 +85,10 @@ def _load():
             kind = kind_of(json.load(f))
         if kind is None:
             raise RuntimeError("config.json model_type is neither %s" % " nor ".join(_KINDS))
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = pick_device(torch)
         named = {"bf16": torch.bfloat16, "bfloat16": torch.bfloat16,
                  "fp16": torch.float16, "float16": torch.float16, "fp32": torch.float32}
-        dtype = named.get(DTYPE) or (torch.bfloat16 if device == "cuda" else torch.float32)
+        dtype = named.get(DTYPE) or (torch.float32 if device == "cpu" else torch.bfloat16)
         if kind == KIND_MOSS:
             from transformers import AutoModelForCausalLM, AutoProcessor
 
@@ -188,7 +198,7 @@ def _generate_moss(path, prompt, ctx):
                                              {"type": "text", "text": instruction}]}]
     rendered = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     audio, _ = librosa.load(path, sr=processor.feature_extractor.sampling_rate, mono=True)
-    kw = {"device": _state["device"]} if _state["device"] == "cuda" else {}
+    kw = {"device": _state["device"]} if _state["device"] != "cpu" else {}
     inputs = processor(text=rendered, audio=[audio], max_length=131072, audio_kwargs=kw,
                        return_tensors="pt").to(_state["device"])
     prompt_len = int(inputs["attention_mask"][0].sum().item())
