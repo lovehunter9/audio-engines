@@ -49,6 +49,7 @@ OUTPUT_TOKENS_PER_SECOND = 12.0
 PROMPT_TOKENS = 128
 # SGLang refuses a request whose input + max_new_tokens + this exceeds the pool.
 POOL_MARGIN = 16 + 64
+POOL_ALIGN = 256
 
 _runtime = Runtime(proc=None, device="xpu" if XPU else "cuda", pool=None, max_seconds=None)
 MODEL_NAME = _runtime.model_name
@@ -72,9 +73,13 @@ _EXIT_GRACE_S = 2.0
 
 
 def pool_tokens(seconds):
-    """The KV pool a recording of this many seconds needs, transcript included."""
-    return int(math.ceil(seconds * (INPUT_TOKENS_PER_SECOND + OUTPUT_TOKENS_PER_SECOND))) \
+    """The KV pool a recording of this many seconds needs, transcript included.
+
+    Rounded up to POOL_ALIGN because SGLang rounds max_total_tokens down to its page size.
+    """
+    need = int(math.ceil(seconds * (INPUT_TOKENS_PER_SECOND + OUTPUT_TOKENS_PER_SECOND))) \
         + PROMPT_TOKENS + POOL_MARGIN
+    return -(-need // POOL_ALIGN) * POOL_ALIGN
 
 
 def seconds_for(pool):

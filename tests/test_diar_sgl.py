@@ -27,6 +27,12 @@ class PoolMathTest(unittest.TestCase):
         for seconds in (60, 860.19, 1800, 3600):
             self.assertGreaterEqual(diar_sgl.seconds_for(diar_sgl.pool_tokens(seconds)), seconds)
 
+    def test_the_pool_survives_sglang_rounding_it_down_to_a_page(self):
+        # Asked for 46108 tokens, SGLang on the B70 allocated 46080 and the limit fell to 1799s.
+        pool = diar_sgl.pool_tokens(1800)
+        self.assertEqual(pool % diar_sgl.POOL_ALIGN, 0)
+        self.assertGreaterEqual(diar_sgl.seconds_for(pool // 64 * 64), 1800)
+
     def test_the_budget_covers_the_densest_measured_meeting(self):
         # AMI R8001: 860 s, 11335 input tokens, 9047 transcript tokens, KV pool 49780.
         budget = diar_sgl.output_budget(49780, 860.19)
