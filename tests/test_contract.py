@@ -29,6 +29,7 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     },
     ("diar", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("diar_asr", "stt", "POST", "/v1/audio/transcriptions"): {"async_supported": True},
+    ("diar_asr", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("torch_asr", "stt", "POST", "/v1/audio/transcriptions"): {"async_supported": True},
     # Same capability, same route, different engine: speakrs serves diar from its own image.
     ("diar_speakrs", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
@@ -545,7 +546,7 @@ class RuntimeHelperTest(unittest.TestCase):
                 },
             },
             "diar_asr": {
-                "supports": ["stt"],
+                "supports": ["stt", "diar"],
                 "watchdog": "diarized-asr",
                 "state": {
                     "ready": False,
