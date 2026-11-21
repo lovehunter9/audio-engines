@@ -3,7 +3,9 @@
 # These models hear a whole recording and write who spoke, when and what in one generation, so
 # they serve `stt` without `segments`: cutting the audio first would throw away the context the
 # speaker labels come from. `response_format=diarized_json` (or verbose_json) returns the parsed
-# segments; json and text return the words only. Both run in this process with transformers.
+# segments; json and text return the words only. `diar` runs the same generation and answers
+# with the speaker turns alone, so it costs as much as a transcription. Both models run in this
+# process with transformers.
 #
 # Which model the weights are is read off config.json's model_type, not the chart: the two
 # share nothing past the HTTP shape, and a chart naming the wrong one would fail at load anyway.
@@ -220,7 +222,36 @@ def _generate_vibevoice(path, prompt, ctx):
     return raw, parse_vibevoice(raw), int(ids.shape[1]), len(audio) / sr
 
 
-def _run(data, filename, prompt, response_format, ctx=tasks.NULL_CTX):
+def turns(segments, exclusive):
+    """Speaker turns of the segments, in time order.
+
+    Exclusive turns hold one speaker at a time: where two overlap, the one that started later
+    takes over from its start, and touching turns of one speaker merge.
+    """
+    segs = sorted(({"start": round(float(s["start"]), 3), "end": round(float(s["end"]), 3),
+                    "speaker": s["speaker"]} for s in segments), key=lambda s: (s["start"], s["end"]))
+    segs = [s for s in segs if s["end"] > s["start"]]
+    if not exclusive:
+        return segs
+    points = sorted({p for s in segs for p in (s["start"], s["end"])})
+    out, active, i = [], [], 0
+    for a, b in zip(points, points[1:]):
+        while i < len(segs) and segs[i]["start"] <= a:
+            active.append(segs[i])
+            i += 1
+        active = [s for s in active if s["end"] > a]
+        if not active:
+            continue
+        speaker = active[-1]["speaker"]
+        if out and out[-1]["speaker"] == speaker and out[-1]["end"] == a:
+            out[-1]["end"] = b
+        else:
+            out.append({"start": a, "end": b, "speaker": speaker})
+    return out
+
+
+def _transcribe(data, filename, prompt, ctx):
+    """(raw, segments, generated tokens, audio seconds, truncated) of one whole recording."""
     if not _state["ready"]:
         raise HTTPException(status_code=503, detail=_state["error"] or "model not ready")
     suffix = os.path.splitext(filename or "a.wav")[1] or ".wav"
@@ -249,6 +280,11 @@ def _run(data, filename, prompt, response_format, ctx=tasks.NULL_CTX):
              "speakers=%d truncated=%s duration_seconds=%.1f", MODEL_NAME, _state["kind"], duration,
              tokens, len(segments), len({s["speaker"] for s in segments}), truncated,
              time.monotonic() - started)
+    return raw, segments, tokens, duration, truncated
+
+
+def _run(data, filename, prompt, response_format, ctx=tasks.NULL_CTX):
+    raw, segments, tokens, duration, truncated = _transcribe(data, filename, prompt, ctx)
     text = joined_text(segments) if segments else raw
     rf = (response_format or "json").lower()
     if rf == "text":
@@ -257,6 +293,19 @@ def _run(data, filename, prompt, response_format, ctx=tasks.NULL_CTX):
         return {"task": "transcribe", "duration": round(duration, 3), "text": text,
                 "segments": segments, "generated_tokens": tokens, "truncated": truncated}
     return {"text": text}
+
+
+def _diarize(data, filename, exclusive, ctx=tasks.NULL_CTX):
+    _, segments, tokens, _, truncated = _transcribe(data, filename, None, ctx)
+    segs = turns(segments, exclusive)
+    speakers = sorted({s["speaker"] for s in segs})
+    body = {"model": MODEL_NAME, "mode": "diar", "device": _state["device"],
+            "num_speakers": len(speakers), "speakers": speakers,
+            "num_segments": len(segs), "segments": segs, "exclusive": exclusive,
+            "generated_tokens": tokens, "truncated": truncated}
+    if exclusive:
+        body["nonexclusive_segments"] = turns(segments, False)
+    return body
 
 
 def build_app(supports):
@@ -284,6 +333,27 @@ def build_app(supports):
             return _run(data, fn, prompt, response_format, ctx)
 
         return await tasks.dispatch(async_, "stt", MODEL_NAME, _work, fail="transcription failed")
+
+    # num_speakers and the clustering knobs of the pyannote route are refused rather than
+    # ignored: the speaker count here is whatever the generation wrote.
+    @app.post("/v1/audio/diarization")
+    async def diarization(file: UploadFile = File(...), exclusive: str = Form(default=None),
+                          num_speakers: str = Form(default=None),
+                          min_speakers: str = Form(default=None),
+                          max_speakers: str = Form(default=None),
+                          async_: str = Form(default=None, alias="async")):
+        if num_speakers or min_speakers or max_speakers:
+            raise HTTPException(status_code=400, detail=(
+                "this model counts speakers itself; num_speakers, min_speakers and "
+                "max_speakers are not supported"))
+        want_exclusive = tasks.truthy(exclusive) if exclusive is not None else False
+        data = await file.read()
+        fn = file.filename
+
+        def _work(ctx):
+            return _diarize(data, fn, want_exclusive, ctx)
+
+        return await tasks.dispatch(async_, "diar", MODEL_NAME, _work, fail="diarization failed")
 
     return app
 

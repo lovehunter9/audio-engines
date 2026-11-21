@@ -20,8 +20,9 @@ BASES = {
         (("stt",), "whisper"),
     ],
     # Whole recordings in, speakers and timestamps out (MOSS-Transcribe-Diarize, VibeVoice-ASR).
+    # diar is the same generation with the words dropped: one model, both questions answered.
     "diarasr": [
-        (("stt",), "diar_asr"),
+        (("stt", "diar"), "diar_asr"),
     ],
     # Recognisers that ship as a research repo plus PyTorch weights (FireRedASR2-AED, MiMo-V2.5-ASR).
     "torchasr": [
@@ -172,6 +173,11 @@ _MOUNTS = {
         ("POST", "/v1/audio/transcriptions",
          "Whole-recording transcription with speakers and timestamps "
          "(response_format=diarized_json for segments; no segments field)", True),
+    ],
+    ("diar_asr", "diar"): [
+        ("POST", "/v1/audio/diarization",
+         "Speaker turns from a whole-recording transcription (exclusive=1 for non-overlapping "
+         "turns; costs a full transcription)", True),
     ],
     ("torch_asr", "stt"): [
         ("POST", "/v1/audio/transcriptions",

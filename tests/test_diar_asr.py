@@ -39,6 +39,51 @@ class JoinedTextTest(unittest.TestCase):
         self.assertEqual(diar_asr.joined_text(segs), "hello world你好再见")
 
 
+class TurnsTest(unittest.TestCase):
+    SEGS = [{"speaker": "S01", "start": 0.0, "end": 10.0, "text": "a"},
+            {"speaker": "S02", "start": 2.0, "end": 4.0, "text": "b"},
+            {"speaker": "S03", "start": 3.0, "end": 5.0, "text": "c"},
+            {"speaker": "S01", "start": 12.0, "end": 13.0, "text": "d"},
+            {"speaker": "S01", "start": 13.0, "end": 14.0, "text": "e"},
+            {"speaker": "S02", "start": 20.0, "end": 20.0, "text": "empty"}]
+
+    def turn(self, out):
+        return [(t["speaker"], t["start"], t["end"]) for t in out]
+
+    def test_overlapping_turns_keep_every_segment(self):
+        self.assertEqual(self.turn(diar_asr.turns(self.SEGS, False)), [
+            ("S01", 0.0, 10.0), ("S02", 2.0, 4.0), ("S03", 3.0, 5.0),
+            ("S01", 12.0, 13.0), ("S01", 13.0, 14.0)])
+
+    def test_exclusive_turns_give_the_floor_to_the_latest_starter(self):
+        self.assertEqual(self.turn(diar_asr.turns(self.SEGS, True)), [
+            ("S01", 0.0, 2.0), ("S02", 2.0, 3.0), ("S03", 3.0, 5.0),
+            ("S01", 5.0, 10.0), ("S01", 12.0, 14.0)])
+
+    def test_exclusive_turns_never_overlap(self):
+        out = diar_asr.turns(self.SEGS, True)
+        for prev, cur in zip(out, out[1:]):
+            self.assertLessEqual(prev["end"], cur["start"])
+
+
+class DiarizeTest(unittest.TestCase):
+    def test_answers_in_the_diar_shape_from_one_transcription(self):
+        segs = [{"speaker": "S01", "start": 0.0, "end": 3.0, "text": "a"},
+                {"speaker": "S02", "start": 2.0, "end": 4.0, "text": "b"}]
+        orig = diar_asr._transcribe
+        diar_asr._transcribe = lambda data, fn, prompt, ctx: ("raw", segs, 42, 4.0, False)
+        try:
+            body = diar_asr._diarize(b"", "a.wav", True)
+        finally:
+            diar_asr._transcribe = orig
+        self.assertEqual(body["speakers"], ["S01", "S02"])
+        self.assertEqual(body["num_segments"], 2)
+        self.assertTrue(body["exclusive"])
+        self.assertEqual(body["segments"][0]["end"], 2.0)
+        self.assertEqual(len(body["nonexclusive_segments"]), 2)
+        self.assertFalse(body["truncated"])
+
+
 class KindTest(unittest.TestCase):
     def test_reads_the_family_off_model_type(self):
         self.assertEqual(diar_asr.kind_of({"model_type": "moss_transcribe_diarize"}), diar_asr.KIND_MOSS)
