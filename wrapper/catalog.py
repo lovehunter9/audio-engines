@@ -28,6 +28,14 @@ BASES = {
     "diarasr-xpu": [
         (("stt", "diar"), "diar_asr"),
     ],
+    # MOSS-Transcribe-Diarize on SGLang-Omni in a child process: DFlash speculative decoding on
+    # CUDA, the intel_xpu attention backend on Arc. Several times faster than diar_asr, MOSS only.
+    "diarasr-sgl": [
+        (("stt", "diar"), "diar_sgl"),
+    ],
+    "diarasr-sgl-xpu": [
+        (("stt", "diar"), "diar_sgl"),
+    ],
     # Recognisers that ship as a research repo plus PyTorch weights (FireRedASR2-AED, MiMo-V2.5-ASR).
     "torchasr": [
         (("stt",), "torch_asr"),
@@ -133,6 +141,7 @@ FAMILIES = {
     "whisper": "faster-whisper",
     "whisper_ov": "whisper",
     "diar_asr": "speaker-attributed-asr",
+    "diar_sgl": "speaker-attributed-asr",
     "torch_asr": "speech-recognition",
     "vad": "silero-vad",
     "diar": "pyannote",
@@ -445,6 +454,9 @@ for _el_mod in ("firered", "breeze"):
         ("POST", "/v1/audio/speech/clone",
          "OpenAI clone: multipart file + input + ref_text, audio back, voice not saved", True),
     )
+
+_MOUNTS[("diar_sgl", "stt")] = list(_MOUNTS[("diar_asr", "stt")])
+_MOUNTS[("diar_sgl", "diar")] = list(_MOUNTS[("diar_asr", "diar")])
 
 # Same HTTP as the CUDA module. A second key, not an edit of the ("tts", ...) rows.
 _MOUNTS[("tts_ov", "tts")] = list(_MOUNTS[("tts", "tts")])

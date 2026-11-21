@@ -114,6 +114,8 @@ class WhoMeasuresWhat(unittest.TestCase):
         "diar": (("Bounds",), "shared upload guard"),
         "diar_nemotron": (("Bounds",), "shared upload guard"),
         "diar_speakrs": (("Bounds",), "shared upload guard"),
+        "diar_sgl": (("Bounds",), "shared upload guard; an unmeasured clip skips the KV-pool "
+                                  "check and SGLang refuses it if it does not fit"),
         "embed": (("Bounds",), "shared upload guard"),
         "enhance": (("Bounds",), "shared upload guard"),
         "vad": (("Bounds",), "shared upload guard"),

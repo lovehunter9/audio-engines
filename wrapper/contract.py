@@ -238,6 +238,10 @@ class EngineArgs:
         rest = self.passthrough()
         if rest:
             log.warning("ignoring ENGINE_ARGS flags this engine does not take: %s", " ".join(rest))
+        self.warn_unreadable(log)
+
+    def warn_unreadable(self, log):
+        """The claimed flags whose value could not be read, and the default used instead."""
         for name, raw, default, wanted in self._unreadable:
             if raw is None:
                 # Quoting a placeholder here sends the reader grepping their ENGINE_ARGS for
