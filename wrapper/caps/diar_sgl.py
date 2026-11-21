@@ -70,6 +70,7 @@ _KV_POOL = re.compile(r"KV Cache is allocated\..*#tokens: (\d+)")
 _stopping = threading.Event()
 _exit = os._exit
 _EXIT_GRACE_S = 2.0
+_STRAGGLER_GRACE_S = 3.0
 
 
 def pool_tokens(seconds):
@@ -230,14 +231,18 @@ class _Child:
             return
         with contextlib.suppress(OSError):
             os.killpg(pgid, signal.SIGTERM)
+        # The leader stops its stage workers in order; whatever is left once it has exited
+        # waits on nothing, and on the B70 one such process held the stop for the full grace.
         deadline = time.monotonic() + grace_s
         while time.monotonic() < deadline:
             try:
                 os.killpg(pgid, 0)
             except OSError:
                 return
-            time.sleep(0.5)
-        log.warning("engine process group %d outlived SIGTERM by %.0fs; killing it", pgid, grace_s)
+            if self.proc.poll() is not None:
+                deadline = min(deadline, time.monotonic() + _STRAGGLER_GRACE_S)
+            time.sleep(0.25)
+        log.warning("engine process group %d outlived SIGTERM; killing it", pgid)
         with contextlib.suppress(OSError):
             os.killpg(pgid, signal.SIGKILL)
 

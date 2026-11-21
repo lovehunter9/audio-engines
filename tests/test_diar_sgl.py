@@ -306,13 +306,22 @@ class FakeEngineTest(unittest.TestCase):
 
 class StopTest(unittest.TestCase):
     def test_stop_takes_the_whole_process_group(self):
+        self._stop("import time; time.sleep(600)", grace_s=5)
+
+    def test_a_worker_left_after_the_leader_exits_does_not_hold_the_stop(self):
+        started = time.monotonic()
+        self._stop("import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                   "time.sleep(600)", grace_s=20)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def _stop(self, worker_code, grace_s):
         child = diar_sgl._Child()
         child.start([sys.executable, "-c", textwrap.dedent('''
             import subprocess, sys, time
-            w = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+            w = subprocess.Popen([sys.executable, "-c", %r])
             print(w.pid, flush=True)
             time.sleep(600)
-        ''')], dict(os.environ))
+        ''' % worker_code)], dict(os.environ))
         worker = None
         deadline = time.time() + 10
         while worker is None and time.time() < deadline:
@@ -321,9 +330,10 @@ class StopTest(unittest.TestCase):
             worker = int(out[0]) if out else None
             time.sleep(0.1)
         self.assertIsNotNone(worker)
+        time.sleep(0.5)
         diar_sgl._stopping.set()
         try:
-            child.stop(grace_s=5)
+            child.stop(grace_s=grace_s)
             child.proc.wait(timeout=5)
             for _ in range(50):
                 try:
