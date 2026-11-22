@@ -1,0 +1,51 @@
+diff --git a/sglang_omni/pipeline/stage_workers.py b/sglang_omni/pipeline/stage_workers.py
+index 23e660a2..959a8531 100644
+--- a/sglang_omni/pipeline/stage_workers.py
++++ b/sglang_omni/pipeline/stage_workers.py
+@@ -790,11 +790,16 @@ def prewarm_cuda_ipc_export(spec: StageWorkerProcessSpec, log: logging.Logger) -
+         return
+     else:
+         pass
+-    gpu_ids = stage_gpu_ids(host_owned_stage_specs(spec))
++    owned = host_owned_stage_specs(spec)
++    gpu_ids = stage_gpu_ids(owned)
+     if not gpu_ids:
+         return
+     else:
+         pass
++    if not any(may_send_out_of_process(stage_spec) for stage_spec in owned):
++        return
++    else:
++        pass
+     tensor = torch.empty(1, dtype=torch.uint8, device=f"cuda:{gpu_ids[0]}")
+     shared = (
+         tensor.untyped_storage()._share_cuda_()
+@@ -939,6 +944,28 @@ def cleanup_constructed_stages(
+             stage.scheduler = None
+ 
+ 
++def may_send_out_of_process(stage_spec: StageLaunchConfig) -> bool:
++    """Whether the stage can hand a payload or stream to a stage in another process.
++
++    Only such a hand-off exports CUDA IPC. A process that never exports must not
++    prewarm either: managed allocations, as under GPU time slicing, have no IPC
++    handle, and the prewarm alone would fail the stage.
++    """
++    if stage_spec.route_fn is not None:
++        return True
++    else:
++        pass
++    next_stages = stage_spec.next_stages
++    if next_stages is None:
++        targets: set[str] = set()
++    elif isinstance(next_stages, str):
++        targets = {next_stages}
++    else:
++        targets = set(next_stages)
++    targets.update(stage_spec.stream_targets)
++    return bool(targets - stage_spec.same_process_targets)
++
++
+ def host_owned_stage_specs(spec: StageWorkerProcessSpec) -> list[StageLaunchConfig]:
+     """Stages whose device work runs in this host process.
+ 

@@ -617,6 +617,11 @@ the pool, because SGLang-Omni's own default (10 tokens per second) truncates den
 to `sgl-omni serve` unchanged. Compiled kernels are kept under `/tmp/sgl-omni-home`, which the
 chart mounts from app data.
 
+The CUDA base patches SGLang-Omni (`bases/diarasr-sgl/patches/`) so a stage process that never
+hands data to another process skips its CUDA IPC prewarm. Under HAMi time slicing every
+allocation is managed memory, which has no IPC handle, and the unconditional prewarm failed
+MOSS's single terminal stage before it loaded. The deps build asserts that MOSS still skips it.
+
 **`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
 other bases apply: no KV cache, no autoregression, and `generate()` denoises a
 whole list in one pass — batch here is a real forward-pass win, not just one

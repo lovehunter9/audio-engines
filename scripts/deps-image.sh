@@ -24,7 +24,7 @@ fi
 if [ -d "$dir/patches" ]; then
     while IFS= read -r f; do
         hash_inputs="$hash_inputs $f"
-    done < <(find "$dir/patches" -name '*.py' -type f | sort)
+    done < <(find "$dir/patches" \( -name '*.py' -o -name '*.patch' \) -type f | sort)
 fi
 
 if command -v sha256sum >/dev/null; then
