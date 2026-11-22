@@ -2,11 +2,34 @@
 import os
 import sys
 
-from . import catalog
+from . import catalog, cgroup
 from .contract import SUPPORTS_PREFIX, parse_supports
+
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def cap_threads(quota=None, cpus=None, environ=os.environ):
+    """Size the math libraries' thread pools to the container's CPU limit.
+
+    They size themselves by the host's cores. Under a 4-CPU quota on a 24-core host the extra
+    threads spend most of each period throttled, and the busier the host the worse: Qwen3 forced
+    alignment's feature extraction took 6.6 s instead of 0.14 s per 600 s batch. Must run before
+    torch is imported; a value the deployment already set wins."""
+    quota = cgroup.cpu_quota() if quota is None else quota
+    cpus = os.cpu_count() if cpus is None else cpus
+    if not quota or not cpus or quota >= cpus:
+        return None
+    for var in THREAD_VARS:
+        environ.setdefault(var, str(quota))
+    return quota
 
 
 def main():
+    capped = cap_threads()
+    if capped:
+        print("[app] CPU limit is %d of %d cores: math library threads default to %s"
+              % (capped, os.cpu_count(), os.environ["OMP_NUM_THREADS"]), flush=True)
+
     base = (os.environ.get("AUDIO_BASE") or "").strip()
     routes = catalog.BASES.get(base)
     if routes is None:

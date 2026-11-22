@@ -23,6 +23,18 @@ def _read_int(path):
         return None
 
 
+def cpu_quota(root=ROOT):
+    """Whole CPUs the container may use per period (`cpu.max`, rounded up), or None without a limit."""
+    try:
+        with open(os.path.join(root, "cpu.max")) as f:
+            quota, period = f.read().split()[:2]
+        if quota == "max":
+            return None
+        return max(1, -(-int(quota) // int(period)))
+    except (OSError, ValueError):
+        return None
+
+
 def _machine_available(meminfo=MEMINFO):
     """MemAvailable in bytes, or None. The wall to measure against when the container has
     no limit of its own -- it can still run the machine out of memory."""
