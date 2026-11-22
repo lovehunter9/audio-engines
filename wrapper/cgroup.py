@@ -78,6 +78,19 @@ def read(root=ROOT, meminfo=MEMINFO):
             "kernel": _stat(root, "kernel")}
 
 
+def oom_kills(root=ROOT):
+    """Processes the kernel has killed in this container for crossing its limit, or None."""
+    try:
+        with open(os.path.join(root, "memory.events")) as f:
+            for line in f:
+                key, _, value = line.partition(" ")
+                if key == "oom_kill":
+                    return int(value)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def headroom(snapshot):
     """Bytes left before this container is killed: its own limit when there is one, the machine's
     free memory when there is not. 🔴 None is a third answer: nothing read, not "no room left"."""

@@ -25,6 +25,7 @@ import time
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import PlainTextResponse
 
+from .. import cgroup
 from .. import tasks
 from .. import watchdog
 from ..audioio import unlink
@@ -71,6 +72,7 @@ _stopping = threading.Event()
 _exit = os._exit
 _EXIT_GRACE_S = 2.0
 _STRAGGLER_GRACE_S = 3.0
+_WATCH_S = 5.0
 
 
 def pool_tokens(seconds):
@@ -181,6 +183,39 @@ def engine_env():
     return env
 
 
+def _processes():
+    """(pid, ppid, state) of every process this container can see."""
+    if not os.path.isdir("/proc/self"):
+        out = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,stat="], capture_output=True,
+                             text=True).stdout
+        return [(int(p), int(pp), st[0]) for p, pp, st in (line.split() for line in
+                                                          out.splitlines())]
+    found = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            with open("/proc/%s/stat" % name) as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        found.append((int(name), int(fields[1]), fields[0]))
+    return found
+
+
+def _children(pid):
+    """Live children of pid; a zombie is dead but stays listed until its parent reaps it."""
+    return [p for p, pp, st in _processes() if pp == pid and st != "Z"]
+
+
+def _cmdline(pid):
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return f.read().replace(b"\0", b" ").decode(errors="replace").strip()[:120]
+    except OSError:
+        return "?"
+
+
 class _Child:
     """The sgl-omni server process, in its own process group so it can be stopped as a whole.
 
@@ -212,12 +247,39 @@ class _Child:
 
     def _reap(self):
         rc = self.proc.wait()
+        self._fail("engine process exited with code %d" % rc)
+
+    def watch(self, interval_s=_WATCH_S):
+        """Fail when a process the leader started has gone.
+
+        A stage worker killed for memory leaves the leader answering /health and accepting
+        requests that nothing will ever run. Only direct children are watched: torch's compile
+        workers below them come and go on their own.
+        """
+        leader = self.proc.pid
+        watched = {pid: _cmdline(pid) for pid in _children(leader)}
+        log.info("watching engine processes %s", sorted(watched))
+
+        def loop():
+            while not _stopping.is_set() and self.proc.poll() is None:
+                time.sleep(interval_s)
+                gone = sorted(set(watched) - set(_children(leader)))
+                if gone and not _stopping.is_set() and self.proc.poll() is None:
+                    self._fail("engine process %d (%s) exited while the engine leader kept "
+                               "running; the container has had %s OOM kills"
+                               % (gone[0], watched[gone[0]], cgroup.oom_kills()))
+                    return
+
+        threading.Thread(target=loop, name="engine-process-watch", daemon=True).start()
+
+    def _fail(self, reason):
         _state["ready"] = False
-        _state["error"] = "engine process exited with code %d" % rc
         if _stopping.is_set():
-            log.info("engine process exited with code %d during shutdown", rc)
+            log.info("%s during shutdown", reason)
             return
-        log.error("engine process exited with code %d; exiting so the container is restarted", rc)
+        _state["error"] = reason
+        log.error("%s; exiting so the container is restarted", reason)
+        _stopping.set()
         self.stop()
         time.sleep(_EXIT_GRACE_S)
         _exit(watchdog.EXIT_CODE)
@@ -286,6 +348,7 @@ def _load():
                         "--mem-fraction-static", pool, seconds, BOUNDS.seconds)
         _state.update(pool=pool, max_seconds=seconds, ready=True)
         log.info("engine ready: KV pool %d tokens, recordings up to %.0fs", pool, seconds)
+        _child.watch()
     except Exception as e:
         _state["error"] = str(e)
         log.exception("engine load failed: %s", e)

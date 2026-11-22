@@ -9,6 +9,7 @@ import time
 import unittest
 import wave
 
+from wrapper import watchdog
 from wrapper.caps import diar_sgl
 
 
@@ -347,6 +348,54 @@ class StopTest(unittest.TestCase):
             diar_sgl._stopping.clear()
             with __import__("contextlib").suppress(OSError):
                 os.kill(worker, signal.SIGKILL)
+
+
+class WatchTest(unittest.TestCase):
+    """A stage worker killed under the leader must not leave a server that accepts and hangs."""
+
+    def setUp(self):
+        self.codes = []
+        self._saved = (diar_sgl._exit, diar_sgl._EXIT_GRACE_S, dict(diar_sgl._state))
+        diar_sgl._exit = self.codes.append
+        diar_sgl._EXIT_GRACE_S = 0.0
+        self.child = diar_sgl._Child()
+        self.child.start([sys.executable, "-c", textwrap.dedent('''
+            import subprocess, sys, time
+            subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
+            time.sleep(600)
+        ''')], dict(os.environ))
+        self.worker = None
+        deadline = time.time() + 10
+        while self.worker is None and time.time() < deadline:
+            kids = diar_sgl._children(self.child.proc.pid)
+            self.worker = kids[0] if kids else None
+            time.sleep(0.1)
+        self.assertIsNotNone(self.worker)
+
+    def tearDown(self):
+        diar_sgl._stopping.set()
+        self.child.stop(grace_s=5)
+        diar_sgl._stopping.clear()
+        diar_sgl._exit, diar_sgl._EXIT_GRACE_S, state = self._saved
+        diar_sgl._state.clear()
+        diar_sgl._state.update(state)
+
+    def test_a_worker_killed_under_the_leader_restarts_the_container(self):
+        self.child.watch(interval_s=0.1)
+        os.kill(self.worker, signal.SIGKILL)
+        deadline = time.time() + 10
+        while not self.codes and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.codes, [watchdog.EXIT_CODE])
+        self.assertFalse(diar_sgl._state["ready"])
+        self.assertIn("engine process %d" % self.worker, diar_sgl._state["error"])
+
+    def test_workers_ending_during_shutdown_are_not_a_failure(self):
+        self.child.watch(interval_s=0.1)
+        diar_sgl._stopping.set()
+        os.kill(self.worker, signal.SIGKILL)
+        time.sleep(0.5)
+        self.assertEqual(self.codes, [])
 
 
 if __name__ == "__main__":
