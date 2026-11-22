@@ -30,6 +30,8 @@ EXPECTED_CAPABILITY_ENDPOINTS = {
     ("diar", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("diar_asr", "stt", "POST", "/v1/audio/transcriptions"): {"async_supported": True},
     ("diar_asr", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
+    ("diar_sgl", "stt", "POST", "/v1/audio/transcriptions"): {"async_supported": True},
+    ("diar_sgl", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},
     ("torch_asr", "stt", "POST", "/v1/audio/transcriptions"): {"async_supported": True},
     # Same capability, same route, different engine: speakrs serves diar from its own image.
     ("diar_speakrs", "diar", "POST", "/v1/audio/diarization"): {"async_supported": True},

@@ -229,6 +229,8 @@ passes. For the same reason the build's final import check must go **through**
 | `fasterwhisper` | `beclab/audio-fasterwhisper` | `stt` (+ `/v1/audio/translations`) | faster-whisper (CTranslate2) | validated |
 | `diarasr` | `beclab/audio-diarasr` | `stt` (whole recording, `diarized_json`; no `segments`), `diar` (turns from the same generation) | MOSS-Transcribe-Diarize or VibeVoice-ASR in-process transformers 5 (amd64 only) | in progress |
 | `diarasr-xpu` | `beclab/audio-diarasr-xpu` | same as `diarasr` | the same transformers code on PyTorch XPU, for discrete Intel Arc (amd64 only); not for iGPU | in progress |
+| `diarasr-sgl` | `beclab/audio-diarasr-sgl` | same as `diarasr` | MOSS-Transcribe-Diarize on SGLang-Omni in a child process, DFlash2 speculative decoding (amd64 only) | in progress |
+| `diarasr-sgl-xpu` | `beclab/audio-diarasr-sgl-xpu` | same as `diarasr` | SGLang-Omni's XPU build with the `intel_xpu` attention backend, for discrete Intel Arc (amd64 only) | in progress |
 | `torchasr` | `beclab/audio-torchasr` | `stt` (single / batch segments) | FireRedASR2-AED or MiMo-V2.5-ASR from pinned upstream source, in-process PyTorch (amd64 only) | in progress |
 | `pyannote` | `beclab/audio-pyannote` | `vad`, `diar`, `speaker_embed`, `enhance` | pyannote / speechbrain / silero (torch) | validated |
 | `speakrs` | `beclab/audio-speakrs` | `diar` | speakrs: pyannote community-1 in Rust, on ONNX Runtime (child process) | validated |
@@ -593,6 +595,27 @@ streaming runner the socket uses, which hands NeMo an empty `total_preds` each
 step and keeps turns instead, so GPU and host memory stay flat at any length and
 `--max-audio-seconds` / `--max-upload-mb` default to 0 (no cap). The inference lock
 is taken per chunk, so a long job does not stall live sockets.
+
+**`diarasr-sgl` / `diarasr-sgl-xpu` (`diar_sgl`).** MOSS-Transcribe-Diarize only, on
+SGLang-Omni. The engine is a child `sgl-omni serve` in its own process group; the wrapper
+streams each request to it, turns the transcript's last timestamp into progress, and closes
+the stream on cancel, which aborts the request in the engine. The wrapper never opens a device
+context of its own (`/metrics` reads NVML, or `/dev/dri` on Intel), so the whole quota is the
+engine's. CUDA runs the DFlash2 draft named by the second `MODEL_SOURCE` entry (llm-init's
+`extra_model_path`), with async decode; without that entry, or with `--draft off`, it runs
+plain. XPU runs `intel_xpu` attention without torch.compile; the default Triton decode
+attention there slows with context until it is slower than transformers.
+
+Memory is set by `--max-audio-seconds` (default 1800), not by a share of the card: a recording
+needs KV for its whole input (about 13.3 tokens per second of audio) and its whole transcript
+(up to about 11 per second), so the KV pool is capped at what that length needs and the rest of
+the card is left for the encoder and prefill activations, which grow with the recording too.
+After start the wrapper reads the pool SGLang actually allocated; a longer upload is refused
+with 413 before a task exists, and every request gets an explicit `max_new_tokens` that fits
+the pool, because SGLang-Omni's own default (10 tokens per second) truncates dense meetings.
+`--mem-fraction-static` only raises or lowers the ceiling. Flags the wrapper does not claim go
+to `sgl-omni serve` unchanged. Compiled kernels are kept under `/tmp/sgl-omni-home`, which the
+chart mounts from app data.
 
 **`dasheng`.** A diffusion transformer, so almost none of the reflexes from the
 other bases apply: no KV cache, no autoregression, and `generate()` denoises a

@@ -25,6 +25,7 @@ from .. import tasks
 from ..contract import EngineArgs, register
 from ..gpu import mount_metrics
 from ..runtime import Runtime
+from .diar_text import MOSS_PROMPT, joined_text, parse_moss, turns
 
 log = logging.getLogger("audio-diar-asr")
 
@@ -43,12 +44,6 @@ _args.warn_unclaimed(log)
 KIND_MOSS = "moss"
 KIND_VIBEVOICE = "vibevoice"
 _KINDS = {"moss_transcribe_diarize": KIND_MOSS, "vibevoice_asr": KIND_VIBEVOICE}
-
-MOSS_PROMPT = (
-    "请将音频转写为文本，每一段需以起始时间戳和说话人编号"
-    "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
-    "并在段末标注结束时间戳，以清晰标明该段语音范围。"
-)
 
 _state = _runtime.state
 _gen_lock = threading.Lock()
@@ -109,20 +104,6 @@ def _load():
         log.exception("diarized stt load failed: %s", e)
 
 
-_MOSS_SEGMENT = re.compile(r"\[(\d+(?:\.\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:\.\d+)?)\]", re.S)
-
-
-def parse_moss(text):
-    """Segments of MOSS's `[start][Sxx]text[end]` transcript; anything unparseable is dropped."""
-    out = []
-    for m in _MOSS_SEGMENT.finditer(text or ""):
-        words = m.group(3).strip()
-        if words:
-            out.append({"speaker": m.group(2), "start": float(m.group(1)),
-                        "end": float(m.group(4)), "text": words})
-    return out
-
-
 _VV_OBJECT = re.compile(r"\{[^{}]*\}", re.S)
 
 
@@ -157,20 +138,6 @@ def parse_vibevoice(text):
         speaker = "S%02d" % (int(spk) + 1) if spk.isdigit() else spk
         out.append({"speaker": speaker, "start": start, "end": end, "text": words})
     return out
-
-
-def joined_text(segments):
-    """The words of the segments in time order, without speakers."""
-    parts = []
-    for s in sorted(segments, key=lambda s: s["start"]):
-        if parts and not _cjk(parts[-1][-1]) and not _cjk(s["text"][0]):
-            parts.append(" ")
-        parts.append(s["text"])
-    return "".join(parts)
-
-
-def _cjk(ch):
-    return "\u3040" <= ch <= "\u30ff" or "\u3400" <= ch <= "\u9fff" or "\uac00" <= ch <= "\ud7af"
 
 
 def _watch(ctx, prompt_len):
@@ -230,34 +197,6 @@ def _generate_vibevoice(path, prompt, ctx):
     ids = out[:, inputs["input_ids"].shape[1]:]
     raw = processor.decode(ids)[0]
     return raw, parse_vibevoice(raw), int(ids.shape[1]), len(audio) / sr
-
-
-def turns(segments, exclusive):
-    """Speaker turns of the segments, in time order.
-
-    Exclusive turns hold one speaker at a time: where two overlap, the one that started later
-    takes over from its start, and touching turns of one speaker merge.
-    """
-    segs = sorted(({"start": round(float(s["start"]), 3), "end": round(float(s["end"]), 3),
-                    "speaker": s["speaker"]} for s in segments), key=lambda s: (s["start"], s["end"]))
-    segs = [s for s in segs if s["end"] > s["start"]]
-    if not exclusive:
-        return segs
-    points = sorted({p for s in segs for p in (s["start"], s["end"])})
-    out, active, i = [], [], 0
-    for a, b in zip(points, points[1:]):
-        while i < len(segs) and segs[i]["start"] <= a:
-            active.append(segs[i])
-            i += 1
-        active = [s for s in active if s["end"] > a]
-        if not active:
-            continue
-        speaker = active[-1]["speaker"]
-        if out and out[-1]["speaker"] == speaker and out[-1]["end"] == a:
-            out[-1]["end"] = b
-        else:
-            out.append({"start": a, "end": b, "speaker": speaker})
-    return out
 
 
 def _transcribe(data, filename, prompt, ctx):

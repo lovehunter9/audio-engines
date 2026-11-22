@@ -84,10 +84,12 @@ def _nvml_stats():
         return None
 
 
-def gpu_metrics_text(nvml_fallback=False):
+def gpu_metrics_text(nvml_fallback=False, torch_probe=True):
     present, used, total, util = 0, 0, 0, 0.0
     slice_scoped = True
     try:
+        if not torch_probe:
+            raise ImportError("torch probe disabled")
         import torch
 
         if torch.cuda.is_available() and torch.cuda.device_count() > 0:
@@ -113,7 +115,7 @@ def gpu_metrics_text(nvml_fallback=False):
     if not present:
         # ov has no CUDA and must not ask NVML; /dev/dri means the chart mounted Intel, used/total stay 0.
         if (os.environ.get("AUDIO_BASE") or "").strip() in (
-                "ov", "whisperov", "enhanceov", "nemotron-ov"):
+                "ov", "whisperov", "enhanceov", "nemotron-ov", "diarasr-sgl-xpu"):
             present = 1 if os.path.exists("/dev/dri") else 0
         elif nvml_fallback:
             # torch is absent or saw no device; ask NVML before reporting zeros.
@@ -138,20 +140,23 @@ def gpu_metrics_text(nvml_fallback=False):
     return "\n".join(lines) + "\n"
 
 
-def mount_metrics(app, nvml_fallback=False):
+def mount_metrics(app, nvml_fallback=False, torch_probe=True):
     """Register GET /metrics on a FastAPI/Starlette app (Prometheus text exposition).
 
     nvml_fallback is opt-in because the two sources do not measure the same thing (see
     gpu_metrics_text). Defaulting it on would change what an existing engine's gauges mean
     the day someone adds nvidia-ml-py to its image for an unrelated reason, and nothing
     about that day would look like a change: same gauge names, same shape, wider scope.
+
+    torch_probe=False is for a wrapper whose engine runs in another process: asking torch for
+    memory opens a device context in this one, which takes its own slice of the GPU quota.
     """
     from fastapi.responses import PlainTextResponse
 
     @app.get("/metrics")
     def _metrics():
         return PlainTextResponse(
-            gpu_metrics_text(nvml_fallback), media_type="text/plain; version=0.0.4"
+            gpu_metrics_text(nvml_fallback, torch_probe), media_type="text/plain; version=0.0.4"
         )
 
     return app
