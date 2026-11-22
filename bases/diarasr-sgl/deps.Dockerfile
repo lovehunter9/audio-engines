@@ -40,8 +40,15 @@ RUN set -eux; \
     ln -sf "$(command -v python3)" /usr/local/bin/python; \
     ln -sf "$(command -v python3)" /usr/local/bin/audio-python
 
-RUN uv pip install --prerelease=allow \
-        "sglang-omni @ git+https://github.com/sgl-project/sglang-omni@${SGLANG_OMNI_REF}" \
+# The patch skips the CUDA IPC prewarm in a stage process that never sends to another process.
+# Under HAMi time slicing every allocation is managed memory, which has no IPC handle, so the
+# prewarm alone failed MOSS's single terminal stage.
+COPY bases/diarasr-sgl/patches/ /tmp/sglang-omni-patches/
+RUN git clone --filter=blob:none https://github.com/sgl-project/sglang-omni /tmp/sglang-omni \
+    && git -C /tmp/sglang-omni checkout -q "${SGLANG_OMNI_REF}" \
+    && git -C /tmp/sglang-omni apply /tmp/sglang-omni-patches/*.patch \
+    && uv pip install --prerelease=allow /tmp/sglang-omni \
+    && rm -rf /tmp/sglang-omni /tmp/sglang-omni-patches \
     && uv pip install --index-url https://flashinfer.ai/whl/cu130 "flashinfer-jit-cache==0.7.2" \
     && uv pip install "nvidia-cuda-nvcc==13.0.*" "nvidia-cuda-crt==13.0.*" "nvidia-nvvm==13.0.*" \
         "fastapi>=0.110" "uvicorn>=0.29" httpx python-multipart soundfile nvidia-ml-py
@@ -59,6 +66,10 @@ import shutil, torch, sglang, sglang_omni, flashinfer, fastapi; \
 assert shutil.which('ffmpeg'), 'no ffmpeg'; \
 assert torch.version.cuda and torch.version.cuda.startswith('13.'), torch.__version__; \
 from sglang_omni.models.moss_transcribe_diarize import config; \
+from sglang_omni.pipeline.stage_workers import StageLaunchConfig, may_send_out_of_process; \
+stages = config.MossTranscribeDiarizePipelineConfig(model_path='x').stages; \
+assert not any(may_send_out_of_process(StageLaunchConfig(stage_name=s.name, next_stages=s.next, \
+    route_fn=s.route_fn, stream_targets=list(s.stream_to))) for s in stages), 'MOSS would prewarm CUDA IPC'; \
 print('torch', torch.__version__, 'sglang', sglang.__version__, 'flashinfer', flashinfer.__version__)"
 
 # bf16 needs no FP8 GEMM, and deep_gemm asserts on CUDA_HOME at import on sm_120.
