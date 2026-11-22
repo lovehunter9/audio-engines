@@ -61,6 +61,11 @@ class ReadTest(unittest.TestCase):
         root = self._root(memory_stat="inactive_file lots\n")
         self.assertIsNone(cgroup.read(root=root, meminfo="/nonexistent")["reclaimable"])
 
+    def test_oom_kills_are_read_off_the_events_file(self):
+        root = self._root(memory_events="low 0\nhigh 0\nmax 35850\noom 1\noom_kill 1\n")
+        self.assertEqual(cgroup.oom_kills(root=root), 1)
+        self.assertIsNone(cgroup.oom_kills(root=self._root()))
+
 
 class HeadroomTest(unittest.TestCase):
     def test_page_cache_is_not_memory_this_container_cannot_give_back(self):
