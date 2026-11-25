@@ -349,9 +349,13 @@ def _stream_blocking(payload, ref_path, chunk_size):
                                                    language=language, instruct=instruct,
                                                    chunk_size=chunk_size, **kw)
         samples, rate = 0, 0
-        for chunk, sr, _timing in it:
-            samples, rate = samples + _to_mono(chunk).shape[0], sr
-            yield chunk, sr
+        try:
+            for chunk, sr, _timing in it:
+                samples, rate = samples + _to_mono(chunk).shape[0], sr
+                yield chunk, sr
+        finally:
+            # A reader that leaves early closes this generator; the engine's must be closed before the lock goes.
+            it.close()
     _note_budget(kw, samples, rate)
 
 
