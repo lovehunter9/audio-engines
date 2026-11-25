@@ -114,8 +114,11 @@ class _OpenVINOQwen3TTS:
     """The method names _synthesize_blocking and _stream_blocking already call."""
 
     def __init__(self, ov, sample_rate):
+        from . import tts_ov_stream
+
         self._ov = ov
         self.sample_rate = int(sample_rate)
+        self._tap = tts_ov_stream.install(ov)
 
     def warmup(self, prefill_len=100):
         return None
@@ -135,31 +138,58 @@ class _OpenVINOQwen3TTS:
         self.sample_rate = int(sr)
         return self._audio(wav), int(sr)
 
-    def generate_custom_voice(self, text, speaker, language="Auto", instruct=None, **kw):
-        return self._speak(text=text, speaker=speaker, language=language or "Auto",
-                           instruct=instruct, **kw)
+    def _decode(self, codes):
+        import torch
 
-    def generate_voice_design(self, text, language="Auto", instruct=None, **kw):
-        return self._speak(text=text, language=language or "Auto", instruct=instruct, **kw)
+        decoder = self._ov.model.speech_tokenizer.model.decoder
+        with torch.inference_mode():
+            wav = decoder(torch.from_numpy(np.clip(codes, 0, None)))
+        return self._audio(wav).reshape(-1)
 
-    def generate_voice_clone(self, text, language="Auto", ref_audio=None, ref_text="",
-                             xvec_only=False, instruct=None, **kw):
+    def _stream(self, chunk_size=None, **kwargs):
+        from . import tts_ov_stream
+
+        decoder = self._ov.model.speech_tokenizer.model.decoder
+        sr = self.sample_rate
+        for audio in tts_ov_stream.stream(
+                lambda: self._ov.generate(**kwargs), self._decode,
+                int(decoder.total_upsample), chunk_size or tts.CHUNK_SIZE, self._tap,
+                _codec_bucket, log):
+            yield audio, sr, None
+
+    @staticmethod
+    def _custom_voice(text, speaker, language="Auto", instruct=None, **kw):
+        return dict(text=text, speaker=speaker, language=language or "Auto", instruct=instruct, **kw)
+
+    @staticmethod
+    def _voice_design(text, language="Auto", instruct=None, **kw):
+        return dict(text=text, language=language or "Auto", instruct=instruct, **kw)
+
+    @staticmethod
+    def _voice_clone(text, language="Auto", ref_audio=None, ref_text="", xvec_only=False,
+                     instruct=None, **kw):
         # faster-qwen3-tts spells this xvec_only; qwen_tts spells it x_vector_only_mode.
-        return self._speak(text=text, language=language or "Auto", ref_audio=ref_audio,
-                           ref_text=ref_text or None, x_vector_only_mode=bool(xvec_only),
-                           instruct=instruct, **kw)
+        return dict(text=text, language=language or "Auto", ref_audio=ref_audio,
+                    ref_text=ref_text or None, x_vector_only_mode=bool(xvec_only),
+                    instruct=instruct, **kw)
+
+    def generate_custom_voice(self, **kw):
+        return self._speak(**self._custom_voice(**kw))
+
+    def generate_voice_design(self, **kw):
+        return self._speak(**self._voice_design(**kw))
+
+    def generate_voice_clone(self, **kw):
+        return self._speak(**self._voice_clone(**kw))
 
     def generate_custom_voice_streaming(self, **kw):
-        audio, sr = self.generate_custom_voice(**kw)
-        yield audio, sr, None
+        return self._stream(**self._custom_voice(**kw))
 
     def generate_voice_design_streaming(self, **kw):
-        audio, sr = self.generate_voice_design(**kw)
-        yield audio, sr, None
+        return self._stream(**self._voice_design(**kw))
 
     def generate_voice_clone_streaming(self, **kw):
-        audio, sr = self.generate_voice_clone(**kw)
-        yield audio, sr, None
+        return self._stream(**self._voice_clone(**kw))
 
 
 def compress_frame_int8(xml):
