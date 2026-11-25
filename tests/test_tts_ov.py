@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
-import torch
 
 from wrapper.caps import tts
 from wrapper.caps import tts_ov
@@ -29,7 +28,7 @@ class _FakeDecoder:
     def __call__(self, codes):
         codes = codes.numpy() if hasattr(codes, "numpy") else codes
         self.windows.append(codes[0, 0].tolist())
-        return torch.from_numpy(np.repeat(codes[0, 0].astype("float32"), UP)[None, None])
+        return np.repeat(codes[0, 0].astype("float32"), UP)[None, None]
 
 
 class _FakeModel:
@@ -47,7 +46,7 @@ class _FakeModel:
 
     def _talker_forward(self, step):
         self.forwards += 1
-        codes = None if step == 0 else torch.full((1, GROUPS), step, dtype=torch.long)
+        codes = None if step == 0 else np.full((1, GROUPS), step, dtype=np.int64)
         return SimpleNamespace(hidden_states=((), codes))
 
     def generate(self, voice_clone_prompt=None, **_kw):
@@ -58,7 +57,7 @@ class _FakeModel:
                 raise RuntimeError("talker died")
             time.sleep(self.delay)
             self.talker.forward(step)
-        return [torch.arange(1, self.frames + 1)], None
+        return [np.arange(1, self.frames + 1)], None
 
 
 class _FakeOV:
@@ -71,12 +70,19 @@ class _FakeOV:
         self.calls.append(kwargs)
         prompt = None if self.ref is None else {"ref_code": [self.ref]}
         codes, _ = self.model.generate(voice_clone_prompt=prompt)
-        wav = self.model.decoder(codes[0].view(1, 1, -1).numpy())
+        wav = self.model.decoder(codes[0].reshape(1, 1, -1))
         return wav.reshape(-1), 24000
 
 
 def _frames(chunks):
     return [int(x) for chunk in chunks for x in chunk[0][::UP]]
+
+
+def _adapter(ov):
+    """The adapter with the codec fed numpy; the image hands the decoder a torch tensor."""
+    model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+    model._decode = lambda codes: ov.model.decoder(codes).reshape(-1)
+    return model
 
 
 class OpenVINOAdapterTest(unittest.TestCase):
@@ -86,7 +92,7 @@ class OpenVINOAdapterTest(unittest.TestCase):
 
     def test_custom_voice_and_clone_use_the_qwen_tts_spellings(self):
         ov = _FakeOV()
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        model = _adapter(ov)
         audio, sr = model.generate_custom_voice(
             text="你好", speaker="aiden", language="Chinese", instruct=None, chunk_size=8)
         self.assertEqual(sr, 24000)
@@ -105,7 +111,7 @@ class OpenVINOAdapterTest(unittest.TestCase):
 
     def test_streaming_decodes_each_chunk_as_its_frames_land(self):
         ov = _FakeOV(frames=20)
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        model = _adapter(ov)
         chunks = list(model.generate_custom_voice_streaming(
             text="Hi.", speaker="aiden", language="English", instruct=None, chunk_size=8))
         self.assertEqual([len(c[0]) for c in chunks], [8 * UP, 8 * UP, 4 * UP])
@@ -117,7 +123,7 @@ class OpenVINOAdapterTest(unittest.TestCase):
     def test_the_first_chunk_plays_before_the_sentence_is_done(self):
         release = threading.Event()
         ov = _FakeOV(frames=16, gate=(8, release))
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        model = _adapter(ov)
         it = model.generate_custom_voice_streaming(
             text="Hi.", speaker="aiden", language="English", instruct=None, chunk_size=8)
         first = next(it)
@@ -127,15 +133,15 @@ class OpenVINOAdapterTest(unittest.TestCase):
         self.assertEqual(_frames(list(it)), list(range(9, 17)))
 
     def test_a_clone_reference_is_context_and_never_played(self):
-        ov = _FakeOV(frames=4, ref=torch.full((5, GROUPS), 99, dtype=torch.long))
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        ov = _FakeOV(frames=4, ref=np.full((5, GROUPS), 99, dtype=np.int64))
+        model = _adapter(ov)
         chunks = list(model.generate_voice_clone_streaming(
             text="hi", language="English", ref_audio="/tmp/ref.wav", ref_text="hello", chunk_size=8))
         self.assertEqual(_frames(chunks), [1, 2, 3, 4])
         self.assertEqual(ov.model.decoder.windows, [[99] * 5 + [1, 2, 3, 4]])
 
     def test_a_failed_generation_reaches_the_reader(self):
-        model = tts_ov._OpenVINOQwen3TTS(_FakeOV(frames=20, fail_at=12), 24000)
+        model = _adapter(_FakeOV(frames=20, fail_at=12))
         it = model.generate_custom_voice_streaming(
             text="Hi.", speaker="aiden", language="English", instruct=None, chunk_size=8)
         self.assertEqual(_frames([next(it)]), list(range(1, 9)))
@@ -145,7 +151,7 @@ class OpenVINOAdapterTest(unittest.TestCase):
     def test_a_reader_that_leaves_stops_the_talker_and_frees_the_engine(self):
         release = threading.Event()
         ov = _FakeOV(frames=400, gate=(8, release), delay=0.002)
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        model = _adapter(ov)
         state = {"model": model, "voice_design": False}
 
         async def run():
@@ -169,7 +175,7 @@ class OpenVINOAdapterTest(unittest.TestCase):
 
     def test_plain_synthesis_still_decodes_the_whole_sentence(self):
         ov = _FakeOV(frames=20)
-        model = tts_ov._OpenVINOQwen3TTS(ov, 24000)
+        model = _adapter(ov)
         list(model.generate_custom_voice_streaming(
             text="Hi.", speaker="aiden", language="English", instruct=None, chunk_size=8))
         audio, _sr = model.generate_custom_voice(
