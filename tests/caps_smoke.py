@@ -3482,7 +3482,7 @@ def batch_over_cap(c, q, calls):
 
 
 def t_ov():
-    """OpenVINO base: same HTTP/WS contract, generate() only after the client stops."""
+    """OpenVINO base: same HTTP/WS contract; the stream re-decodes the take every chunk."""
     import json
     from fastapi.testclient import TestClient
     from wrapper.caps import stt_stream as q
@@ -3502,7 +3502,6 @@ def t_ov():
     pipe = Pipe()
     q._decode_to_16k_mono = lambda raw, fn: np.zeros(SR * 4, dtype="float32")
     q._state.update(ready=True, asr=pipe, error=None)
-    pcm = b"\x00\x00" * (SR // 10)
     with TestClient(q.build_app(["stt", "stt_stream"])) as c:
         spec = c.get("/api/engine-spec").json()
         check("ov align is implemented but not served on an stt-only instance",
@@ -3511,27 +3510,65 @@ def t_ov():
         check("ov still advertises the WS stream",
               ("WS", "/v1/audio/stream") in mounted(c))
         both_ways(c, "/v1/audio/transcriptions", WAV, {}, "ov stt", meters=("input",))
-        pipe.calls.clear()
-        with c.websocket_connect("/v1/audio/stream") as ws:
-            ready = json.loads(ws.receive_text())
-            check("ov stream ready", ready.get("type") == "ready", ready)
-            ws.send_bytes(pcm)
-            ws.send_bytes(pcm)
-            check("ov did not transcribe while audio was still arriving",
-                  pipe.calls == [])
-            ws.send_text(json.dumps({"type": "stop"}))
-            kinds = []
-            while True:
-                msg = json.loads(ws.receive_text())
-                kinds.append(msg["type"])
-                if msg["type"] in ("closed", "error"):
-                    break
-        check("ov generate ran once after stop", len(pipe.calls) == 1, pipe.calls)
-        check("ov generate used a streamer",
-              pipe.calls and pipe.calls[0]["has_streamer"])
-        check("ov stream token-streamed after stop",
-              "partial" in kinds and "final" in kinds and "closed" in kinds, kinds)
-        check("ov stream did not error", "error" not in kinds, kinds)
+    class Tokenizer:
+        def encode(self, text):
+            return list(text)
+
+        def decode(self, ids):
+            return "".join(ids)
+
+    class Batch:
+        """The batch engine a stream decodes through: the whole take so far under our prompt."""
+
+        processor = types.SimpleNamespace(tokenizer=Tokenizer())
+
+        def __init__(self):
+            self.calls = []
+
+        def continue_text(self, clip, text_prompt, max_new_tokens):
+            self.calls.append(len(clip))
+            return "hello world"[: 5 * len(self.calls)]
+
+    utils = types.ModuleType("qwen_asr.inference.utils")
+    utils.SAMPLE_RATE = SR
+    utils.parse_asr_output = lambda raw, user_language=None: (user_language or "", raw)
+    fakes = {"qwen_asr": types.ModuleType("qwen_asr"),
+             "qwen_asr.inference": types.ModuleType("qwen_asr.inference"),
+             "qwen_asr.inference.utils": utils}
+    saved = {name: sys.modules.get(name) for name in fakes}
+    sys.modules.update(fakes)
+    batch = Batch()
+    q._state.update(ov_batch=batch)
+    frame = b"\x00\x00" * (SR // 4)
+    try:
+        with TestClient(q.build_app(["stt", "stt_stream"])) as c:
+            with c.websocket_connect("/v1/audio/stream") as ws:
+                ready = json.loads(ws.receive_text())
+                check("ov stream ready", ready.get("type") == "ready", ready)
+                ws.send_text(json.dumps({"type": "start", "chunk_ms": 500}))
+                for _ in range(4):
+                    ws.send_bytes(frame)
+                live = [json.loads(ws.receive_text()) for _ in range(2)]
+                check("ov stream sends partials while audio is still arriving",
+                      [m["type"] for m in live] == ["partial", "partial"], live)
+                check("ov stream re-decodes the whole take each chunk",
+                      batch.calls[:2] == [SR // 2, SR], batch.calls)
+                ws.send_text(json.dumps({"type": "stop"}))
+                kinds = []
+                while True:
+                    msg = json.loads(ws.receive_text())
+                    kinds.append(msg["type"])
+                    if msg["type"] in ("closed", "error"):
+                        break
+            check("ov stream finishes after stop", "final" in kinds and "closed" in kinds, kinds)
+            check("ov stream did not error", "error" not in kinds, kinds)
+    finally:
+        for name, mod in saved.items():
+            if mod is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = mod
+        q._state.pop("ov_batch", None)
 
 
 class FakeTTS:

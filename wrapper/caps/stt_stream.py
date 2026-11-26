@@ -143,9 +143,14 @@ MAX_NEW_TOKENS = 32
 UNFIXED_CHUNK_NUM = 2
 UNFIXED_TOKEN_NUM = 5
 CHUNK_SIZE_SEC = 2.0
+# A `chunk_ms` in start may ask for a shorter decode interval, down to this.
+MIN_CHUNK_SEC = 0.2
 DEFAULT_STEP_MS = 500
 # Finalize + re-init this often, so a long session never overflows vLLM's ~8192-token encoder cache.
 ROLL_SEC = 240.0
+# OpenVINO re-encodes everything since the last roll on every step (no encoder cache), so a step
+# grows with it: measured on Arc Pro B70, 65 ms at 1 s and 210 ms at 8 s of audio.
+OV_ROLL_SEC = 30.0
 # qwen-asr silence-splits at this window; 540s keeps one call inside the ~600s encoder cache.
 OFFLINE_MAX_INPUT_SEC = 540
 OFFLINE_MAX_TOKENS = 4096
@@ -465,20 +470,31 @@ def _tf_generate(asr, prompt, wav, max_new_tokens):
     return decoded[0]
 
 
-def _stream_init(asr, language=None):
+def _stream_engine():
+    """What a stream decodes with: on OpenVINO the batch engine, whose text prompt is ours to build
+    (GenAI's ASRPipeline takes no prefix); qwen-asr's own load otherwise."""
+    return _state["ov_batch"] if _is_ov() else _state["asr"]
+
+
+def _stream_init(asr, language=None, context="", chunk_sec=CHUNK_SIZE_SEC):
     import numpy as np
     from qwen_asr.inference.utils import SAMPLE_RATE
 
     # Shared with the offline path so both halves accept the same spellings: "zh" used to be a
     # hard error on the socket and a no-op over there.
     force = resolve_language_or_auto(language, "websocket session")
-    n = max(1, int(round(float(CHUNK_SIZE_SEC) * SAMPLE_RATE)))
+    n = max(1, int(round(float(chunk_sec) * SAMPLE_RATE)))
+    if _is_ov():
+        from .. import ov_asr_batch
+        prompt_raw = ov_asr_batch._text_prompt(context or "", force)
+    else:
+        prompt_raw = asr._build_text_prompt(context=context or "", force_language=force)
     return types.SimpleNamespace(
         unfixed_chunk_num=UNFIXED_CHUNK_NUM, unfixed_token_num=UNFIXED_TOKEN_NUM,
         chunk_size_samples=n, chunk_id=0,
         buffer=np.zeros((0,), dtype=np.float32),
         audio_accum=np.zeros((0,), dtype=np.float32),
-        prompt_raw=asr._build_text_prompt(context="", force_language=force),
+        prompt_raw=prompt_raw,
         force_language=force, language="", text="", _raw_decoded="")
 
 
@@ -502,7 +518,10 @@ def _stream_decode(asr, state):
     from qwen_asr.inference.utils import parse_asr_output
 
     prefix = _stream_prefix(asr, state)
-    gen = _tf_generate(asr, state.prompt_raw + prefix, state.audio_accum, MAX_NEW_TOKENS)
+    if _is_ov():
+        gen = asr.continue_text(state.audio_accum, state.prompt_raw + prefix, MAX_NEW_TOKENS)
+    else:
+        gen = _tf_generate(asr, state.prompt_raw + prefix, state.audio_accum, MAX_NEW_TOKENS)
     state._raw_decoded = prefix + gen
     lang, txt = parse_asr_output(state._raw_decoded, user_language=state.force_language)
     state.language, state.text = lang, txt
@@ -1714,119 +1733,6 @@ def _batching_report(how, span_count, planned, calls, splits, refusals, replans,
     return line
 
 
-async def _ws_openvino(ws: WebSocket):
-    """OpenVINO output-side streaming: buffer PCM until stop, then token-stream partials.
-
-    Must not emit `partial` while the client is still sending audio — that would be the
-    fake live path we refuse. Decoder tokens after the utterance are the advertised stream.
-    """
-    import numpy as np
-
-    await ws.accept()
-    if not _state["ready"]:
-        await ws.send_text(json.dumps({"type": "error",
-                                       "detail": _state["error"] or "model not ready"}))
-        await ws.close()
-        return
-    sample_rate = 16000
-    language = None
-    pending = np.zeros((0,), dtype="float32")
-    total = 0
-    await ws.send_text(json.dumps({"type": "ready"}))
-    try:
-        while True:
-            msg = await ws.receive()
-            if msg.get("type") == "websocket.disconnect":
-                break
-            text = msg.get("text")
-            if text is not None:
-                try:
-                    obj = json.loads(text)
-                except Exception:
-                    obj = {}
-                t = obj.get("type")
-                if t == "start":
-                    language = obj.get("language") or None
-                    sample_rate = int(obj.get("sample_rate") or 16000)
-                    continue
-                if t in ("stop", "done", "finish"):
-                    break
-                continue
-            data = msg.get("bytes")
-            if not data:
-                continue
-            seg = resample_linear(pcm16_to_float32(data), sample_rate)
-            pending = np.concatenate([pending, seg]) if pending.size else seg
-            total += int(seg.shape[0])
-        if pending.size:
-            loop = asyncio.get_running_loop()
-            acc = [""]
-            out_q = asyncio.Queue()
-
-            def streamer(subword):
-                piece = subword if isinstance(subword, str) else str(subword)
-                acc[0] += piece
-                loop.call_soon_threadsafe(out_q.put_nowait, acc[0])
-                try:
-                    import openvino_genai as ov_genai
-                    return ov_genai.StreamingStatus.RUNNING
-                except Exception:
-                    return False
-
-            def work():
-                try:
-                    result = _ov_generate(pending, language=language, streamer=streamer)
-                    loop.call_soon_threadsafe(out_q.put_nowait, ("done", result))
-                except Exception as e:
-                    loop.call_soon_threadsafe(out_q.put_nowait, ("error", e))
-
-            async with _infer_lock:
-                worker = asyncio.create_task(asyncio.to_thread(_gated, work))
-                result = None
-                try:
-                    while True:
-                        item = await out_q.get()
-                        if isinstance(item, tuple) and item[0] == "done":
-                            result = item[1]
-                            break
-                        if isinstance(item, tuple) and item[0] == "error":
-                            raise item[1]
-                        await ws.send_text(json.dumps({
-                            "type": "partial",
-                            "text": item,
-                            "language": _ov_language(language),
-                        }))
-                finally:
-                    await worker
-            final_text = acc[0] or _ov_result_text(result)
-            lang = _ov_result_language(result, _ov_language(language))
-            if not acc[0] and final_text:
-                await ws.send_text(json.dumps({
-                    "type": "partial", "text": final_text, "language": lang,
-                }))
-            await ws.send_text(json.dumps({
-                "type": "final", "text": final_text, "language": lang,
-            }))
-        else:
-            await ws.send_text(json.dumps({
-                "type": "final", "text": "", "language": _ov_language(language),
-            }))
-        await ws.send_text(json.dumps({
-            "type": "closed",
-            "audio_seconds": round(total / 16000.0, 3),
-        }))
-        await ws.close()
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        log.exception("openvino stream error: %s", e)
-        try:
-            await ws.send_text(json.dumps({"type": "error", "detail": str(e)}))
-            await ws.close()
-        except Exception:
-            pass
-
-
 def build_app(supports):
     has_stt = "stt" in supports
     has_stream = "stt_stream" in supports
@@ -2014,9 +1920,6 @@ def build_app(supports):
     if has_stream:
         @app.websocket("/v1/audio/stream")
         async def stream(ws: WebSocket):
-            if _is_ov():
-                await _ws_openvino(ws)
-                return
             import numpy as np
 
             await ws.accept()
@@ -2025,17 +1928,19 @@ def build_app(supports):
                                                "detail": _state["error"] or "model not ready"}))
                 await ws.close()
                 return
-            asr = _state["asr"]
+            asr = _stream_engine()
             sample_rate = 16000
             step_ms = DEFAULT_STEP_MS
             language = None
+            context = ""
+            chunk_sec = CHUNK_SIZE_SEC
 
             def _new_state():
-                return _stream_init(asr, language=language)
+                return _stream_init(asr, language=language, context=context, chunk_sec=chunk_sec)
 
             # prefix = text finalized by earlier rolls; samples resets on a roll, total never does.
             S = {"st": _new_state(), "prefix": "", "samples": 0, "total": 0}
-            roll_samples = max(16000, int(ROLL_SEC * 16000))
+            roll_samples = max(16000, int((OV_ROLL_SEC if _is_ov() else ROLL_SEC) * 16000))
             pending = np.zeros((0,), dtype="float32")
             await ws.send_text(json.dumps({"type": "ready"}))
 
@@ -2100,6 +2005,9 @@ def build_app(supports):
                             language = obj.get("language") or None
                             sample_rate = int(obj.get("sample_rate") or 16000)
                             step_ms = int(obj.get("step_ms") or DEFAULT_STEP_MS)
+                            context = str(obj.get("context") or "")
+                            if obj.get("chunk_ms"):
+                                chunk_sec = max(MIN_CHUNK_SEC, int(obj["chunk_ms"]) / 1000.0)
                             # The state was built before start arrived, so its prompt still
                             # auto-detects; left alone, the language only lands at the next roll.
                             if not S["total"] and not pending.size:
