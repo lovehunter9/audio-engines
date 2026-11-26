@@ -252,12 +252,29 @@ class Engine:
         return cls(encoder, decoder, processor, device)
 
     def generate_many(self, clips, language=None, context="", max_new_tokens=64):
-        import numpy as np
         from qwen_asr.inference.utils import parse_asr_output
 
-        wavs = [np.asarray(c, dtype=np.float32).reshape(-1) for c in clips]
-        if not wavs:
+        if not clips:
             return []
+        raws = self._generate(clips, _text_prompt(context or "", language), max_new_tokens)
+        out = []
+        for raw in raws:
+            lang, text = parse_asr_output(raw or "", user_language=language)
+            out.append(((text or "").strip(), (lang or language or "").strip()))
+        return out
+
+    def continue_text(self, clip, text_prompt, max_new_tokens):
+        """One clip under a caller-built text prompt; returns the raw continuation, unparsed.
+
+        The official streaming step: the prompt is `_text_prompt` plus the rolled-back text
+        decoded so far, and the caller parses prefix + continuation.
+        """
+        return self._generate([clip], text_prompt, max_new_tokens)[0]
+
+    def _generate(self, clips, text_prompt, max_new_tokens):
+        import numpy as np
+
+        wavs = [np.asarray(c, dtype=np.float32).reshape(-1) for c in clips]
         # 16 s / 400-frame floors are for 1s-class T crashes, not for 9 s.
         short = max(len(w) for w in wavs) < MIN_GROUP_FLOOR_SAMPLES
         if short:
@@ -268,7 +285,7 @@ class Engine:
         t0 = time.monotonic()
         hidden = self._encode(padded, min_t=(MIN_INTEL_GPU_ENCODER_FRAMES if short else 0))
         encode_s = time.monotonic() - t0
-        prompt = extend_audio_tokens(_text_prompt(context or "", language), hidden.shape[1])
+        prompt = extend_audio_tokens(text_prompt, hidden.shape[1])
         t1 = time.monotonic()
         ids = self._prompt_ids([prompt] * len(padded))
         prompt_s = time.monotonic() - t1
@@ -277,11 +294,7 @@ class Engine:
         decode_s = time.monotonic() - t2
         print("[ov-asr] clips=%d encode=%.3fs prompt=%.3fs decode=%.3fs T=%d"
               % (len(padded), encode_s, prompt_s, decode_s, hidden.shape[1]), flush=True)
-        out = []
-        for raw in raws:
-            lang, text = parse_asr_output(raw or "", user_language=language)
-            out.append(((text or "").strip(), (lang or language or "").strip()))
-        return out
+        return raws
 
     def _encode(self, wavs, min_t=MIN_INTEL_GPU_ENCODER_FRAMES):
         import numpy as np

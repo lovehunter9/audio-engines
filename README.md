@@ -325,7 +325,9 @@ are two loads of different checkpoints, same recipe as the four pyannote caps
 on one image. Offline `stt` and WebSocket `stt_stream` share one ASR load,
 kept off each other with a `threading.Lock`. Official streaming is gated to
 vLLM; this wrapper runs the same 2s accumulate + prefix-rollback state machine
-on `model.generate`. Chart `ENGINE_ARGS` that named vLLM flags are still parsed
+on `model.generate`. The `start` frame may carry `chunk_ms` (decode interval,
+default 2000, floor 200; a voice turn wants about 500) and `context` (the same
+biasing text as offline `prompt`). Chart `ENGINE_ARGS` that named vLLM flags are still parsed
 so they do not show up as leftovers. `qwen-asr` is installed `--no-deps`;
 gradio / flask / sox stay out.
 
@@ -470,11 +472,16 @@ preferred (`openvino/` next to the HF snapshot); a missing IR is exported once
 with `optimum-cli` and reused. `--batch-max-spans` above 1 sends the group to
 one `generate()` (this image patches GenAI to accept a list of waveforms,
 encodes each clip, then one decoder.generate() after reshaping the decoder
-IR so `encoder_hidden_states` is not frozen at batch=1). `stt_stream` keeps the same WebSocket contract
-(`partial` / `final`) but **does not transcribe until the client stops** —
-OpenVINO streams decoder tokens after the utterance, which is the Intel
-tradeoff against vLLM's incremental encoder cache. Do not emit live partials
-while audio is still arriving. amd64 only: Intel GPU is x86_64, and CI passes a
+IR so `encoder_hidden_states` is not frozen at batch=1). `stt_stream` runs
+the same algorithm as the `qwen` base, which is qwen-asr's own streaming: every
+chunk, the whole audio so far is decoded again under the text already decoded
+(minus its last five tokens), and a `partial` goes out while audio is still
+arriving. On OpenVINO the decode goes through the batch engine above, because
+GenAI's `ASRPipeline` takes no text prefix. There is no encoder cache, so each
+step re-encodes everything since the last roll; the roll is 30 s here instead
+of 240 s. Measured on Arc Pro B70 (Qwen3-ASR 0.6B), a step costs 65 ms at 1 s
+of audio and about 210 ms at 8 s; one step every 0.5 s slowed a 35B LLM sharing
+the card by 13%. amd64 only: Intel GPU is x86_64, and CI passes a
 single-arch `slices` like `crispasr`. Align stays on the `qwen` base.
 The CUDA `qwen` batching measurement above does not apply here: OpenVINO runs
 spans serially.
