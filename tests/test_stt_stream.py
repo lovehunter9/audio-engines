@@ -198,6 +198,60 @@ class OpenVinoLiveStreamTest(unittest.TestCase):
         self._session(engine, {"language": "zh", "chunk_ms": 500, "context": "点点头 摇摇头"}, 1.0)
         self.assertIn("<|im_start|>system\n点点头 摇摇头<|im_end|>", engine.calls[0][1])
 
+    def _flush_session(self, base):
+        import json
+        from fastapi.testclient import TestClient
+        engine = self._Engine("帮我把灯变成绿色")
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": base}):
+            m = _stt()
+        if base == "ov":
+            loaded = {"ov_batch": engine, "asr": None}
+            decode = mock.patch.object(m, "_tf_generate", None)
+        else:
+            # The CUDA image decodes with qwen-asr's own load through `_tf_generate`.
+            engine._build_text_prompt = lambda context="", force_language=None: (
+                "language %s<asr_text>" % force_language)
+            loaded = {"asr": engine}
+            decode = mock.patch.object(
+                m, "_tf_generate", lambda asr, prompt, wav, n: asr.continue_text(wav, prompt, n))
+        frame = b"\x00\x00" * 4000
+        with mock.patch.dict(os.environ, {"AUDIO_BASE": base}), decode, \
+                mock.patch.dict(sys.modules, self._qwen_asr()), \
+                mock.patch.dict(m._state, {"ready": True, "error": None, **loaded}):
+            with TestClient(m.build_app(["stt", "stt_stream"])) as c:
+                with c.websocket_connect("/v1/audio/stream") as ws:
+                    self.assertEqual(json.loads(ws.receive_text())["type"], "ready")
+                    ws.send_text(json.dumps({"type": "start", "language": "zh", "chunk_ms": 500, "step_ms": 500}))
+                    for _ in range(3):
+                        ws.send_bytes(frame)
+                    self.assertEqual(json.loads(ws.receive_text())["type"], "partial")
+                    ws.send_text(json.dumps({"type": "flush"}))
+                    flushed = json.loads(ws.receive_text())
+                    # The quarter second short of a step is in it too: the decode covers the pause.
+                    self.assertEqual(flushed["type"], "flushed")
+                    self.assertEqual(flushed["text"], "帮我")
+                    self.assertEqual(engine.calls[-1][0], 12000)
+                    ws.send_text(json.dumps({"type": "flush"}))
+                    again = json.loads(ws.receive_text())
+                    self.assertEqual((again["type"], again["text"]), ("flushed", "帮我"))
+                    self.assertEqual(len(engine.calls), 2)
+                    for _ in range(2):
+                        ws.send_bytes(frame)
+                    later = json.loads(ws.receive_text())
+                    self.assertEqual(later["type"], "partial")
+                    self.assertEqual(engine.calls[-1][0], 20000)
+                    ws.send_text(json.dumps({"type": "stop"}))
+                    rest = []
+                    while not rest or rest[-1]["type"] not in ("closed", "error"):
+                        rest.append(json.loads(ws.receive_text()))
+        self.assertEqual([x["type"] for x in rest], ["final", "closed"])
+
+    def test_flush_decodes_everything_received_and_keeps_the_stream_open_on_openvino(self):
+        self._flush_session("ov")
+
+    def test_flush_decodes_everything_received_and_keeps_the_stream_open_on_cuda(self):
+        self._flush_session("qwen")
+
     def test_without_chunk_ms_a_decode_waits_for_the_default_chunk(self):
         engine = self._Engine("帮我把灯变成绿色")
         live, _ = self._session(engine, {"language": "zh"}, 2.0)

@@ -2013,6 +2013,16 @@ def build_app(supports):
                             if not S["total"] and not pending.size:
                                 S["st"] = _new_state()
                             continue
+                        if t == "flush":
+                            # The caller heard a pause: decode everything received, including the
+                            # part short of a step, and keep listening. Later words may still revise it.
+                            if pending.size:
+                                await _feed(pending)
+                                pending = np.zeros((0,), dtype="float32")
+                            async with _infer_lock:
+                                await asyncio.to_thread(_gated, _stream_finish, asr, S["st"])
+                            await _emit("flushed")
+                            continue
                         if t in ("stop", "done", "finish"):
                             break
                         continue

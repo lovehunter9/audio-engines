@@ -3553,6 +3553,12 @@ def t_ov():
                       [m["type"] for m in live] == ["partial", "partial"], live)
                 check("ov stream re-decodes the whole take each chunk",
                       batch.calls[:2] == [SR // 2, SR], batch.calls)
+                ws.send_bytes(frame)
+                ws.send_text(json.dumps({"type": "flush"}))
+                flushed = json.loads(ws.receive_text())
+                check("ov stream answers flush without closing", flushed.get("type") == "flushed", flushed)
+                check("ov stream flush decodes the part short of a step",
+                      batch.calls[-1] == SR + SR // 4, batch.calls)
                 ws.send_text(json.dumps({"type": "stop"}))
                 kinds = []
                 while True:
