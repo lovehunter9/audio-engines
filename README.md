@@ -327,7 +327,12 @@ kept off each other with a `threading.Lock`. Official streaming is gated to
 vLLM; this wrapper runs the same 2s accumulate + prefix-rollback state machine
 on `model.generate`. The `start` frame may carry `chunk_ms` (decode interval,
 default 2000, floor 200; a voice turn wants about 500) and `context` (the same
-biasing text as offline `prompt`). Chart `ENGINE_ARGS` that named vLLM flags are still parsed
+biasing text as offline `prompt`). A `{"type":"flush"}` frame decodes
+everything received so far, including audio short of a chunk, and answers
+`{"type":"flushed","text","language"}` with the stream left open: a caller
+that hears a pause asks for the words up to it instead of waiting for the next
+chunk. Later chunks may still revise them; only `final` after `stop` is final.
+The OpenVINO base serves the same frames. Chart `ENGINE_ARGS` that named vLLM flags are still parsed
 so they do not show up as leftovers. `qwen-asr` is installed `--no-deps`;
 gradio / flask / sox stay out.
 
