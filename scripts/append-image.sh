@@ -83,9 +83,16 @@ append_one() {
     local platform="$1"
     local dest="$2"
     local deps_digest
+    local selected_layer="$layer"
+    local hook="$repo_root/scripts/append-layers/$BASE.py"
+    if [ -f "$hook" ]; then
+        selected_layer="$stage/layer-${platform#*/}.tar"
+        cp "$layer" "$selected_layer"
+        python3 "$hook" --layer "$selected_layer" --platform "$platform"
+    fi
 
-    echo "appending $(du -sh "$layer" | cut -f1) layer to $BASE_IMAGE ($platform) -> $dest"
-    crane append --platform "$platform" -b "$BASE_IMAGE" -f "$layer" -t "$dest"
+    echo "appending $(du -sh "$selected_layer" | cut -f1) layer to $BASE_IMAGE ($platform) -> $dest"
+    crane append --platform "$platform" -b "$BASE_IMAGE" -f "$selected_layer" -t "$dest"
 
     deps_digest="$(crane digest --platform "$platform" "$BASE_IMAGE")"
 

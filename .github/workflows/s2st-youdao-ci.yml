@@ -1,0 +1,42 @@
+name: s2st-youdao-ci
+on:
+  push:
+    branches:
+      - codex/s2st-tencent-youdao
+    tags:
+      - v*
+      - s2st-youdao-*
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: Docker Hub namespace
+        required: false
+        default: beclab
+      deps_cache:
+        description: Optional immutable preverified dependency cache
+        required: false
+        default: ''
+      python_cache:
+        description: Optional immutable Python foundation cache
+        required: false
+        default: ''
+      image_tag:
+        description: Development image tag
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: s2st-youdao-ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    if: github.event_name != 'push' || github.ref_type == 'tag' || github.repository == 'beclab/audio-engines'
+    uses: ./.github/workflows/build-image.yml
+    with:
+      base: s2st-youdao
+      repo: audio-s2st-youdao
+      namespace: ${{ inputs.namespace || github.repository_owner }}
+      deps_cache: ${{ inputs.deps_cache || vars.S2ST_YOUDAO_DEPS_CACHE }}
+      python_cache: ${{ inputs.python_cache || vars.S2ST_PYTHON_CACHE }}
+      image_tag: ${{ inputs.image_tag || (github.ref_type == 'branch' && 'v1.0.0') || github.ref_name }}
+    secrets: inherit

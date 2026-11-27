@@ -1,0 +1,1079 @@
+{
+  "schema": 1,
+  "family": "youdao",
+  "profile_sha256": "5b3a8a9abf1a3b1eadf305a6720a32fcd76a4fd11468d184763ad929613db4f2",
+  "default_task_role": "s2st",
+  "files_sha256": {
+    "api/__init__.py": "cb4d9e41f4c7d0e854d49d6240c8f03520375a154b5dbe4dea0bed5b5cbf6399",
+    "api/api.py": "dab8e3bcc8db0574bfdc0768d6b7c87881065ce1c16f11ccf3074a4d1c942dde",
+    "api/file_session.py": "3518d341ff20ca8c9ea312c357583e9aff2cb3218ef413664b79935ca40f8e36",
+    "api/integrity.py": "8ff0a0317837198778b8cee3bb08b5b77de2c478a24d6f6678465cfd1b9c0b54",
+    "api/layout.py": "fccd418ec08f1c60806009b655af13eed519f6aa2f94c3cdaff58a532572f159",
+    "api/lifecycle.py": "04322ba3f6cb4a37bd77db759d39cfa734dd04ebeebef3d465d75d9d2b3c7021",
+    "api/live_session.py": "3eec663f8b150205a766f3fade71a8f204e5e2edf5a7bc67e38d4d8b1ab0bf02",
+    "common/frozen_ming_sink.py": "b6c3304eb810a12e79dc97e77ae50e11da9337078410808fba3ff4d59925e2f1",
+    "common/frozen_s2st/clause.py": "24e557b3c7012c85113ec8f797c97d27db1e5079498153eb158f7b7b6f68cdf7",
+    "common/frozen_s2st/delivery.py": "10867d8866664172ff96c4e1f111124eca2f734ac1d1a71ca4268b5d8b7ec12b",
+    "common/frozen_s2st/ming_worker.py": "70af27c5ce944086ab975339eadf8ade76ec6173acefdb5a44caf2ae8aade9b2",
+    "common/frozen_s2st/playout.py": "53973b7a7cf3ffefd818755ca7a32400b1a574f4b5cc0f63a3febb0785ebae90",
+    "common/frozen_s2st/speech.py": "9b7b1ee6e1cad475c5605e84b8dc7bf452462716b925731de99266dac31a8a5f",
+    "common/frozen_s2st/spoken_numbers.py": "f5273740b3bb77595143a95636b51df0b4b4d648d863e730b5c8d030c0012fae",
+    "common/frozen_s2st/spoken_scores.py": "8be3173fd55a433e9986dc82eadb524ae133c6796fb3e71a2a6cfc658ee96c9a",
+    "common/ming_independent_fragment_worker.py": "a19bce188c625b6a1bc59cc38067cedf6be6ff38ca0c99a8927af554ab464928",
+    "common/warm_frozen_ming.py": "0b7396f82dc04283c1473d006c8de3c895e9d83b4944c8d2bed4e69c9099e823",
+    "common/youdao_receive.py": "f37adf4a91062481586daa5a6b31a19a771d5c53015f2aa7f90b86e55d3d9fa9",
+    "ming-native/audio_tokenizer/audio_encoder.py": "e4abe68040b5b5ed49994a323a09dafbbb6c0e7c56dfa67d65711a5df68392b6",
+    "ming-native/audio_tokenizer/configuration_audio_vae.py": "9d4f25c6a14310fc00ba3e84aaadcda8be5e8de5a67a39afda674fd54ed44702",
+    "ming-native/audio_tokenizer/istft.py": "de1e5f569e34a5cb05d088310a78d1dba60ef4f2ed403b37b21238c188f6d252",
+    "ming-native/audio_tokenizer/modeling_audio_vae.py": "b38a5f4854f5796fea5b7de77a3d19aa0f4af33ff599df3cbd14529c27d0e9e0",
+    "ming-native/audio_tokenizer/rope.py": "37227967b08d631dcb89ebcf46352cea10b0537f6166a3212e59063d201e970a",
+    "ming-native/audio_tokenizer/vae_modules.py": "8a84286e17fc8dfa95a0320d86b5e2a446b798be66309aaaeb70e2b0681cb831",
+    "ming-native/configuration_bailingmm.py": "4583284dbcba4e07b0e3c276dcdfabe5682f9f666dd3379ff2870b584e6c3a0e",
+    "ming-native/fm/CFM.py": "6428645e55c0a2fa7c2316cf309423c1cb66c35ed5e472644bb18c1b685385da",
+    "ming-native/fm/dit.py": "84683edf660888efe088254512781154c948726a4aff9c12fa158791853880f7",
+    "ming-native/fm/flowloss.py": "4c0e1de2ee328383550ed6b3c74f47c616105ac460612e1485e27ff37c4d7e4f",
+    "ming-native/fm/modules.py": "22463538f8d8d4a18d833a87123d69c391773845476516fe6f5674b97871f92c",
+    "ming-native/frontend/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ming-native/frontend/number_en.py": "299caced391e34d927cd021193dfcf83b2d953516bf45ba4f2f6b15372aa225e",
+    "ming-native/frontend/talker_tn/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ming-native/frontend/talker_tn/normalizer.py": "4cfb9ace57cc6ec0513064462492af228b2a30eac570b0bc836129709aba7b2d",
+    "ming-native/frontend/talker_tn/re_utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ming-native/frontend/talker_tn/re_utils/re_base.py": "a4dc10de92962968e809cd176eab57b1270ade13345888b2c8e2ef462320e3c0",
+    "ming-native/frontend/talker_tn/re_utils/re_char.py": "1feea80004e335a0e933f14ee4dfeaccb1471c23c26604878337dae6179a77ba",
+    "ming-native/frontend/talker_tn/re_utils/re_date.py": "9a74e3f6d6b0f71279ff26f95ff9fb828c25056f13090c5c74dfaadd5d901d36",
+    "ming-native/frontend/talker_tn/re_utils/re_decimal.py": "a4b46e04be43f224ab72a5c4c5e73d52a3910a97754c03a969ceb525164bcb80",
+    "ming-native/frontend/talker_tn/re_utils/re_digit.py": "776c068038a9af221ba6bef74c981760fb3da75ea06e074af569ed65ee2ec493",
+    "ming-native/frontend/talker_tn/re_utils/re_formula.py": "c99358d4194bf58ac618a29be6bbca21f44d8edb41109463f4b94970901f1a84",
+    "ming-native/frontend/talker_tn/re_utils/re_frac.py": "bb03feaa73113e92fcdf3d8b21f65139b1f6cb51caa09e625acfebf8bf21f1c2",
+    "ming-native/frontend/talker_tn/re_utils/re_ip.py": "f380da6380e17ab597112b7176087c0a64a1f760772da8096ff3fd100b368c3d",
+    "ming-native/frontend/talker_tn/re_utils/re_measure.py": "709ab5f5abbffae5941c831d3f101b1cb32a8b27cfd6cc40c452985128a3c141",
+    "ming-native/frontend/talker_tn/re_utils/re_money.py": "e3bca9586b2619f8e9b9b2b7ccee6309efb66b683a653d6e20bfb44dfa37974e",
+    "ming-native/frontend/talker_tn/re_utils/re_order.py": "f4a1b4a2c261acfa30baf0a74c042b86ae69bb23ee8ab7bd1ba043268f63b718",
+    "ming-native/frontend/talker_tn/re_utils/re_percent.py": "ee91269e7dcc6759442592a86dfa7e417e2ccca3159941e2329adb718b37f3af",
+    "ming-native/frontend/talker_tn/re_utils/re_phone_dash.py": "b88fb8163f280d8e8eedf201b59603637c89a07fbc92317ca895acf70ee8c163",
+    "ming-native/frontend/talker_tn/re_utils/re_punc.py": "c5f2fe4b8241dc23cd5dc82020b8c89d7e17149c3c76335589078403fd19caf4",
+    "ming-native/frontend/talker_tn/re_utils/re_serial.py": "e9692f3858b57625e110cc0919691348860417d38f81cd26464e81b21ea0f17e",
+    "ming-native/frontend/talker_tn/re_utils/re_sn.py": "7a9c7467593a5f282cafc245440a9c40d9e752123f7ff0ffa4ea2203577e30e6",
+    "ming-native/frontend/talker_tn/re_utils/re_time.py": "65c0d3a48347b7698ff18cb075f049d63cbef80e0a2e42d49e73dc7291eec7ab",
+    "ming-native/frontend/talker_tn/re_utils/re_utils.py": "7e60608a6c9836517080bdc04885348befbe79e1f442ffe53c69212b796a0c9e",
+    "ming-native/frontend/talker_tn/re_utils/re_version.py": "e045a67a9381238b051fbf451c5bb3f6125afb60490dc7386f0433de355e1117",
+    "ming-native/frontend/talker_tn/talker_pre_processor.py": "19fc6dabcf51aae9646d28e83b8a3bfc3f3618e723f8754e0e28b4c3ff044aa2",
+    "ming-native/frontend/talker_tn/talker_re.py": "999cb876f6d5cb154f139bbbd2d254983cd8f4e085e8f44745dbf8a58ee03ee7",
+    "ming-native/frontend/talker_tn/talker_tn.py": "1e8246c666f50203aa41b0296c333b9248b204f37db3bfc22f9308d8c491c678",
+    "ming-native/frontend/talker_tn/token_parser.py": "9ec4d8cee83e82ad876274c91e36bf1d79eda11557de0213400948f73f16bd65",
+    "ming-native/frontend/text_segment_cut.py": "2dbd59c1eabe618d4f4c96586e14d37a1bffd5798b957a91ff6bdc02044341ea",
+    "ming-native/frontend/toolkit.py": "76b01ea60160e79c7bdb04157f1a7930cf223137d074ad6eff40865805e88ef8",
+    "ming-native/infer.py": "5aa53988f88d09d5f12197e06513cf4e2b9f7e625abf1d01c4e071da31cc4498",
+    "ming-native/infer_tiny.py": "18fd6d0ec63f00e0a3f5f80355e2dc4dddd32a1d6e52e1609b547d30a686df64",
+    "ming-native/ming_tiny/CFM.py": "e42bf5f7b30b0e6196ea6e13998371e382c6bd87ef5108da7ef08f3c5ac5eb8b",
+    "ming-native/ming_tiny/__init__.py": "2ab5e2a64de9a96e18580b40b8b59a451fd882c23a6173c81ce95f944278001e",
+    "ming-native/ming_tiny/aggregator.py": "aab3a7b609040996961aea405f256b41df002868bfe644224c6bf1ca9fd0f90a",
+    "ming-native/ming_tiny/api.py": "e1f9d1d8ae8a86ad547dcd64ab2d00a6bb06b46cad544a20829d51e8bb81f407",
+    "ming-native/ming_tiny/configuration_audio_vae.py": "9d4f25c6a14310fc00ba3e84aaadcda8be5e8de5a67a39afda674fd54ed44702",
+    "ming-native/ming_tiny/configuration_bailing_moe_v3.py": "f2c048966aec8a2f042cfeb1351f74d51a28589b409c55baae7d24e841c1f6c4",
+    "ming-native/ming_tiny/configuration_lingv3_tts.py": "ce982431a55e09168e4ba83e073d240c250f6426342acd880b1c38f51b11ff07",
+    "ming-native/ming_tiny/dit.py": "1b12857a0cb5913068272eec22498dbcbf49a3c94ced822e45990375c1859bc7",
+    "ming-native/ming_tiny/flowloss.py": "9bf7af2a07398e974a4bb6540e01cbb4564814cd5f30f2354b393d38aca95d87",
+    "ming-native/ming_tiny/fm_utils.py": "f9763eb057ccbb2c87cef42cd5f3438a832298cfdc0226cd6a5e7063184be0c8",
+    "ming-native/ming_tiny/inference.py": "a085faa42d48041b815ad6f7b663b247bbfa1830d988ca4af36b5fa9572513f0",
+    "ming-native/ming_tiny/istft.py": "de1e5f569e34a5cb05d088310a78d1dba60ef4f2ed403b37b21238c188f6d252",
+    "ming-native/ming_tiny/mlp.py": "4359fc1b82e36496892772c495760aaf5961628af49205da722f8906a85782e7",
+    "ming-native/ming_tiny/modeling_audio_vae.py": "8c3d9717f54a3e32c023d4474550e4b0a2ef7777380ca6cd71e3f5a76a731ce4",
+    "ming-native/ming_tiny/modeling_bailing_moe_v3.py": "198ba2b9d112c0964c00524a23296d047c75e9c4371b270d5c20181c0100ff06",
+    "ming-native/ming_tiny/modeling_lingv3_tts.py": "3210ab6f62e0b9826301510855ae0fbaa14f4edfa76c7ae9dadff1c86ee27135",
+    "ming-native/ming_tiny/modules.py": "0744fc966806916abfdfaa307e32c52ee3de1b5c53a1caea2bb0c435094601fe",
+    "ming-native/ming_tiny/prompt_contract.py": "7efa6c7a242acc774896fd75e567a0aef5aeafd10e08405f74361732f15fd3d8",
+    "ming-native/ming_tiny/spkemb_extractor.py": "6e53a812fd9620d1e3c8a6d16c38fb63624c22743c518fd30189c4015e039a3d",
+    "ming-native/ming_tiny/task_protocol.py": "0728817f05314bcd06f1b10748ea62f4539b24030c170bde5348f2c7d227548a",
+    "ming-native/ming_tiny/vae_modules.py": "c564c635c9948ea5619693d9479cc9287b606a3d36e831c7d21e3e307cc36bc8",
+    "ming-native/ming_tts.py": "faf0d407081d710f5015c35c9bd651689db4ebe2d7ea5220193259ddbc2a03ea",
+    "ming-native/modeling_bailingmm.py": "61f80e8fb7b82c40f48165e1a667a2812af29c67c44ee4cb24a5e8fcea7c3b7f",
+    "ming-native/prompt_contract.py": "c0062c06d49004c13daebdccf5effee5e6d2c0059779d4c8f9dd714944c9fb46",
+    "ming-native/spkemb_extractor.py": "6e53a812fd9620d1e3c8a6d16c38fb63624c22743c518fd30189c4015e039a3d",
+    "ming-native/tools/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "ming-native/tools/convert_deploy_to_opensource.py": "d2a2002f705633876430681c3f2172fb4fa1a2219a77cd102a5630f01e76670f",
+    "ming-native/tools/preflight.py": "9e58a0705f9d4b173e5a1d4638849b6eb04414cb55ac97377f39cf868e3ba5e9",
+    "ming-native/tools/preflight_tiny.py": "5e9ead6deea1bae6cdbffc48f1abd7c888420146e21182c1a60f38bb4af8aca0",
+    "ming-native/tts_tasks.py": "cd27e176dcc865ab9bf88bb7b7a226d89893e0fd4e6d2a23516b34f769a08b90",
+    "native-loader-env.json": "5c9eeb27bdedcb55eb4021287e7a609ce6d8aded56633a46cb744ec1b1491f68",
+    "official/Confucius4-R2T2/LICENSE": "14e7c118524c62f53bbbaeacd3a1097f080a0a39e941bd00cfaace9a55fa2d24",
+    "official/Confucius4-R2T2/r2t2/__init__.py": "817b86e1276f57d8b7bb5841ecf4e31196ad22c94c7bf9658ea0455d7a5d8b21",
+    "official/Confucius4-R2T2/r2t2/r2t2_asr.py": "711627d76a3ab610ba3651409e25c8358d0d874aaf07c61c51555ff84d123614",
+    "official/Confucius4-R2T2/ws_server.py": "8e67c1c6aafee68d67861cb37b3f8e0716700d8b803cbc34502a5c55203d0e3c",
+    "official/Confucius4-T3PO/LICENSE": "588f127c057cc5aab3b8a6fe658e49d9ec39868c83607395fae34e779f2dad74",
+    "official/Confucius4-T3PO/inference/__init__.py": "4256a6900fd3edf1a4329ed7428e72b6eb55b4150c410aaca114d77e8e62aff9",
+    "official/Confucius4-T3PO/inference/asr.py": "f612bed7070f50ff7f3d8f93c1500a6f8e797ff5e5f157d5c64ac4011944dc4c",
+    "official/Confucius4-T3PO/inference/config.py": "8b55d136c91085c2f5e1bceeecdb83c7e98dcfba2d2936a963e90fb7c4b22812",
+    "official/Confucius4-T3PO/inference/download_models.py": "507716029e8ce17747f80b8a426acf20094cfc953929e1c860c0e9458e2400ed",
+    "official/Confucius4-T3PO/inference/glossary.py": "11015b3b9fc18ede7eb8c6ad7d556fa53ccbcf7b8f245260fd4fd014e268f6b9",
+    "official/Confucius4-T3PO/inference/latency.py": "896dedc358eedac80c859764857b0f4b9091374b21c56dbf6f2f9f08b674b9f9",
+    "official/Confucius4-T3PO/inference/prompts.py": "8d4da9e0223592c8387869dda889f81d6a486d56be40211224057a41b53ef6cc",
+    "official/Confucius4-T3PO/inference/runtime.py": "3d56212cabd8c9f9d3ef98116e9995d9d1b5ddf60b350b4f6e66ad5df8898215",
+    "official/Confucius4-T3PO/inference/server.py": "a199e553967b7560a3a7e2b587d853a8bbdb791069f3c7c549e58dc0ec84a952",
+    "official/Confucius4-T3PO/inference/static/app.js": "63f47f245945fcf7951730daec3768bb3b54d80c5c10e947487f3f343d6ac92e",
+    "official/Confucius4-T3PO/inference/static/index.html": "7acbcd89dff7235005830e185374123255c4a8a57129150fcfe177a71ad29923",
+    "official/Confucius4-T3PO/inference/static/style.css": "8be2a10964e451ced15739c066d87325eb4ddda79906a20c477574de612dba5e",
+    "official/Confucius4-T3PO/inference/text_inference.py": "4a1f5ab629c1551aa8b4e99945eabda06fbd6e96590d85b6dc3e244fa0734011",
+    "official/Confucius4-T3PO/inference/translation.py": "7b43b93c70db571acda1bd3215d77a432498ba9267318ed1ec556e25689bbf10",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/__init__.py": "ef3342faad1a51dbfe69f641c2f3915b7e60179bb8f4b02e188af82191eb3c60",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/app.py": "25836e2f439e1178fd2b9085c0316db8c65745a33b9cc0f438a3aa3068bc2c0e",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/audio.py": "6ce480175f8e4f846a7e9a722f1972d65733da59b16dbbf3ba6452e1720d5bae",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/budget.py": "df6cf22a7cc6165b851f9060ad204e8436e60c6d91c468a689ba74e2ec534540",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/client.py": "a4e277288aeca9bd076fb8770e4f4857e33a77223f442712dcbae35779aa3d99",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/config.py": "c8284d816eff5e601a4dadf1d5942feaaf558ab8a48f40fd086d0d0c20401ad6",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/default_config.toml": "3ff078cbd2ab31b114ec2bfbbf9064d8d5ab666b567b80721c524060180e8f1c",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/deploy.py": "dd1e1550721f5e1b12200a04c4dc318e7e5254312a56e26e1a42dc089498fb83",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/events.py": "a139b576d290512289462682db7b1c02a3c43b9a9a55053e1182914d6dbd9948",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/file_jobs.py": "0fe443b34aaa2de82c5035f420a8d2f7fad6de765e7260ef374cfa368841f924",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/launch.py": "a703582aa547ff5f1b989d094717ab2131d725564a508195756d87d0601be231",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/logits_plugins.py": "6c1b82abc9c878dc60c22bb04c40001c2f044f16247b512a2b6b42531304c3ef",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/logits_v2.py": "a4b7a799f309fc0d9c8dd1146fcf604979bfcbf5cecf5daa870ca4378f21eb68",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/model_discovery.py": "5c767a40ef3697544682f6992b23483709f4410039cf95e08e684510b0fc1e33",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/noise.py": "d8fe10905361095d1359573bb84c55036e1879f1128641963689dec43f5faf8a",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/preflight.py": "a3951704c2672c160833daac932dac487c5ef5089eb0f9cc0e0006daee047665",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/prepare_model.py": "06627bc4769f6f8b869eb2adabf2756d7f931d185f6da26597c7382cb008e1dc",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/repetition.py": "4bea4f49046dc9e5d701189c492ea3ed93addc5f1fe14d583bed79b40c33e717",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/app.js": "8333152c1d0e6dedc93ead11f0d4085c0966ccd9a8cfa697107e2131282b4d56",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/file-upload.js": "38ed45e7263242a8b4fb8d594b471bdb97e76c907e06edc2688757b838345219",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/i18n.js": "912a9d72ecd6792b4a70e29803460d25874355c449185fac8dd0d570dfecab6b",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/index.html": "efd86ae20018ebe58a9039aaa8adae949763199081991d63415a3e5d395d51fa",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/recorder.js": "eb0a056c5545276a574ac8f0f4d81fd382f72ab9166d193e38242a53310d0263",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/style.css": "550243ad3ce609325b5b91ac6b0464c2f970e2792676eaf086e37138712dec07",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/static/urls.js": "10a88ade5ed7c71ae8ee32acb4b19d7efeff7f57b547e7da3eab23da69c53217",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/target_language.py": "1832a50222bf3f42cad2f18d3983ffb202bb458148fa036d5fb26d5e8549f2c6",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/translation.py": "d506ee8b699d5418722e408e80c6dfecab19973bef194112232b467d0f5122b7",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts.py": "3820c224f1d407796843949fcb4bdaa762ba2c91b533ac69ca333e764b1b6067",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_audio.py": "8c0bbde88abf1ae51f9ad754cfe8c29addc948fdb87201b07e35bfa1086b92bf",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/__init__.py": "edb5678b6068aa075ef32baecfe41bb854ecd2df18352278a196f796e58535ea",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen.py": "e2b4fcb1601749d5c3ae7438a35c13c53532158fd6a0e148be7f9c765ad58885",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen_acceleration.py": "9ec2cc0cf6306dcabcc02f4723db16092c0dd8dcc2d1b04b9871e6cd6222fa1f",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_history.py": "fee500421e6590e512e65f3b2260f5a9307d4c92c461025f99cec121d4685fa6",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_launch.py": "3e4ecf305e560283818757338279638efb7a4cf88bd0c1ce26eb2357e6f2383f",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_plugin.py": "194aa8492bdb6dd638824be91ad7a159ee6ba0b78dca8f99277be81d025f057f",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_source.py": "a5d1df674d6908c8c740ec443ba1b83747285c5d5079ab32dcaa7e32b69bf020",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_source.py": "fde0a484c8b677db8d8d9f9fb123a6efa287383dd3956df2bc2f27d85d0f8085",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/tts_tail.py": "e8e1654cf0546b078f1f57d780552767004a847010581688f1aa8f27b7614601",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/vad.py": "79dcb8689bb21684f2885ac38aa8810473ae8564ecc8dfdbbcc9cf559384c582",
+    "official/Hy-SimulMT/SimulInfer/simulinfer/vad_firered.py": "2845245057cf3ebca4fab045a15b6d37a8091ce67a62f00e9a5cef006af4c157",
+    "official/simulst/simulst_mm/model/processing.py": "999a35f26a01db13d865c375c2aee98f17cafe78d4e77848af49c8699ad79569",
+    "official-runtime-source-files-20261125.json": "c13b33c9d9529c8399426b150f8908776a8c4b61df4ec1e84e5aca1deb2d9512",
+    "profile.json": "5b3a8a9abf1a3b1eadf305a6720a32fcd76a4fd11468d184763ad929613db4f2",
+    "s2st-runtime-20261125.json": "704fa2b3772d923cf1c160699f43dac2cf655ac59bcbf940bf5a83981c617778",
+    "tencent-reference.toml": "9ed0f440e69d4e1197bf78c2433b530a5278bace34e8c8ac82f0786782d1d566",
+    "youdao/asr_capacity_observer.py": "70ac727d7ffc025427bdf211154092571694273e5d34c6eebe4ddea8c05352a3",
+    "youdao/live_resource_observer.py": "a8a724ab1d7e7c9367bb52b776a2a2d085a4edddad627b4da86b8b2e0c59a024",
+    "youdao/live_tencent_app.py": "84f3229a40474075dc441f936f862a24bd0e5b80704a7ca954bd71925951ced2",
+    "youdao/ming_services.py": "0047324676a68035faee2e775e3f00fca0b5df4e7c1b134c987b12dcc2348702",
+    "youdao/official_audio_features.py": "a62291644ffb2e5846f6020b6f3d6e06e8a0705e69b07bc32593ae40477446bd",
+    "youdao/official_runtime_source_identity.py": "a9f8c3416843ff2a4d60475f92d069d314f63dd45c47010e203594ab0f60ea26",
+    "youdao/r2t2_chunk_model.py": "7a7acb4a717c9f939728ee3dfc7ea13c2f3e4ec22b02a67e3b13d2917708a380",
+    "youdao/r2t2_ws_capacity.py": "cce9989a0e06247d1cb5b923285f253a91b13544d84fd662e4da1015e8e364f8",
+    "youdao/r6_asr_admission.py": "4e4a9f37138f5dfee7a17d807b81739da5859c18bea169b0b38d6b88c39b6f4a",
+    "youdao/r6_gpu_queue.py": "a13d78bd97a3d4ff2ac539be55156041af98474c07646873622a38ce7b6f6e2b",
+    "youdao/r6_stage_proxy.py": "74e0acd754587dd97c72564f5097ecff13abad35daa93986bb257219998698f9",
+    "youdao/runtime_cuda_libraries.py": "3a56b9e3357efa7d4cbef5de380bb7531d14ce7a3303d042e725457e58ae1a77",
+    "youdao/source_bridge.py": "0f71e95e57d1d01bd12ece75117cc195def9c29601a4a33670b7d6a9290a1217",
+    "youdao/start_bridge.sh": "c6549e5f221c5ca438ecdfa7a67fcce066dcef0573ec57d5e44f7160a0aeaec7",
+    "youdao/tencent_revised_rpc.py": "54d04a09c997efa931e1f1d7b9eab85362c4e95bac4e20e8c738b7ed45e8bcfe",
+    "youdao/upstream_services.py": "c1fec3d95523e5f59821ef40931ad1b3e962f92593d63e847d50854fcebabb68",
+    "youdao/youdao_official_webfile_host_client.py": "d149cbe9e32d234b9f1834dad2d0d874506ffc201f44df25d420229571979f3a",
+    "youdao/youdao_gpu_client.py": "7111f65733c1685c445fccb7a8a409c587d7ffa4b0fe909e71fc30577b28ac69"
+  },
+  "sources": [
+    {
+      "source": "src/quantized/conformance_20261125/runtime_cuda_libraries.py",
+      "target": "youdao/runtime_cuda_libraries.py",
+      "sha256": "3a56b9e3357efa7d4cbef5de380bb7531d14ce7a3303d042e725457e58ae1a77"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/youdao/tencent_revised_rpc.py",
+      "target": "youdao/tencent_revised_rpc.py",
+      "sha256": "54d04a09c997efa931e1f1d7b9eab85362c4e95bac4e20e8c738b7ed45e8bcfe"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/official_audio_features.py",
+      "target": "youdao/official_audio_features.py",
+      "sha256": "a62291644ffb2e5846f6020b6f3d6e06e8a0705e69b07bc32593ae40477446bd"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/youdao/live_tencent_app.py",
+      "target": "youdao/live_tencent_app.py",
+      "sha256": "84f3229a40474075dc441f936f862a24bd0e5b80704a7ca954bd71925951ced2"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/official_runtime_source_identity.py",
+      "target": "youdao/official_runtime_source_identity.py",
+      "sha256": "a9f8c3416843ff2a4d60475f92d069d314f63dd45c47010e203594ab0f60ea26"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/live_resource_observer.py",
+      "target": "youdao/live_resource_observer.py",
+      "sha256": "a8a724ab1d7e7c9367bb52b776a2a2d085a4edddad627b4da86b8b2e0c59a024"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/youdao/r2t2_ws_capacity.py",
+      "target": "youdao/r2t2_ws_capacity.py",
+      "sha256": "cce9989a0e06247d1cb5b923285f253a91b13544d84fd662e4da1015e8e364f8"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/asr_capacity_observer.py",
+      "target": "youdao/asr_capacity_observer.py",
+      "sha256": "70ac727d7ffc025427bdf211154092571694273e5d34c6eebe4ddea8c05352a3"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/chunk2000/r2t2_chunk_model.py",
+      "target": "youdao/r2t2_chunk_model.py",
+      "sha256": "7a7acb4a717c9f939728ee3dfc7ea13c2f3e4ec22b02a67e3b13d2917708a380"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/youdao/source_bridge.py",
+      "target": "youdao/source_bridge.py",
+      "sha256": "0f71e95e57d1d01bd12ece75117cc195def9c29601a4a33670b7d6a9290a1217"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/sentence-complete/start_bridge.sh",
+      "target": "youdao/start_bridge.sh",
+      "sha256": "c6549e5f221c5ca438ecdfa7a67fcce066dcef0573ec57d5e44f7160a0aeaec7"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/r6-ming-protection/r6_asr_admission.py",
+      "target": "youdao/r6_asr_admission.py",
+      "sha256": "4e4a9f37138f5dfee7a17d807b81739da5859c18bea169b0b38d6b88c39b6f4a"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/r6-ming-protection/r6_gpu_queue.py",
+      "target": "youdao/r6_gpu_queue.py",
+      "sha256": "a13d78bd97a3d4ff2ac539be55156041af98474c07646873622a38ce7b6f6e2b"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/r6-ming-protection/r6_stage_proxy.py",
+      "target": "youdao/r6_stage_proxy.py",
+      "sha256": "74e0acd754587dd97c72564f5097ecff13abad35daa93986bb257219998698f9"
+    },
+    {
+      "source": "src/common/frozen_s2st/clause.py",
+      "target": "common/frozen_s2st/clause.py",
+      "sha256": "24e557b3c7012c85113ec8f797c97d27db1e5079498153eb158f7b7b6f68cdf7"
+    },
+    {
+      "source": "src/common/frozen_s2st/delivery.py",
+      "target": "common/frozen_s2st/delivery.py",
+      "sha256": "10867d8866664172ff96c4e1f111124eca2f734ac1d1a71ca4268b5d8b7ec12b"
+    },
+    {
+      "source": "src/common/frozen_s2st/ming_worker.py",
+      "target": "common/frozen_s2st/ming_worker.py",
+      "sha256": "70af27c5ce944086ab975339eadf8ade76ec6173acefdb5a44caf2ae8aade9b2"
+    },
+    {
+      "source": "src/common/frozen_s2st/playout.py",
+      "target": "common/frozen_s2st/playout.py",
+      "sha256": "53973b7a7cf3ffefd818755ca7a32400b1a574f4b5cc0f63a3febb0785ebae90"
+    },
+    {
+      "source": "src/common/frozen_s2st/speech.py",
+      "target": "common/frozen_s2st/speech.py",
+      "sha256": "9b7b1ee6e1cad475c5605e84b8dc7bf452462716b925731de99266dac31a8a5f"
+    },
+    {
+      "source": "src/common/frozen_s2st/spoken_numbers.py",
+      "target": "common/frozen_s2st/spoken_numbers.py",
+      "sha256": "f5273740b3bb77595143a95636b51df0b4b4d648d863e730b5c8d030c0012fae"
+    },
+    {
+      "source": "src/common/frozen_s2st/spoken_scores.py",
+      "target": "common/frozen_s2st/spoken_scores.py",
+      "sha256": "8be3173fd55a433e9986dc82eadb524ae133c6796fb3e71a2a6cfc658ee96c9a"
+    },
+    {
+      "source": "src/common/frozen_ming_sink.py",
+      "target": "common/frozen_ming_sink.py",
+      "sha256": "b6c3304eb810a12e79dc97e77ae50e11da9337078410808fba3ff4d59925e2f1"
+    },
+    {
+      "source": "src/common/ming_independent_fragment_worker.py",
+      "target": "common/ming_independent_fragment_worker.py",
+      "sha256": "a19bce188c625b6a1bc59cc38067cedf6be6ff38ca0c99a8927af554ab464928"
+    },
+    {
+      "source": "src/common/warm_frozen_ming.py",
+      "target": "common/warm_frozen_ming.py",
+      "sha256": "0b7396f82dc04283c1473d006c8de3c895e9d83b4944c8d2bed4e69c9099e823"
+    },
+    {
+      "source": "src/common/youdao_receive.py",
+      "target": "common/youdao_receive.py",
+      "sha256": "f37adf4a91062481586daa5a6b31a19a771d5c53015f2aa7f90b86e55d3d9fa9"
+    },
+    {
+      "source": "src/common/ming_native/configuration_bailingmm.py",
+      "target": "ming-native/configuration_bailingmm.py",
+      "sha256": "4583284dbcba4e07b0e3c276dcdfabe5682f9f666dd3379ff2870b584e6c3a0e"
+    },
+    {
+      "source": "src/common/ming_native/prompt_contract.py",
+      "target": "ming-native/prompt_contract.py",
+      "sha256": "c0062c06d49004c13daebdccf5effee5e6d2c0059779d4c8f9dd714944c9fb46"
+    },
+    {
+      "source": "src/common/ming_native/modeling_bailingmm.py",
+      "target": "ming-native/modeling_bailingmm.py",
+      "sha256": "61f80e8fb7b82c40f48165e1a667a2812af29c67c44ee4cb24a5e8fcea7c3b7f"
+    },
+    {
+      "source": "src/common/ming_native/infer.py",
+      "target": "ming-native/infer.py",
+      "sha256": "5aa53988f88d09d5f12197e06513cf4e2b9f7e625abf1d01c4e071da31cc4498"
+    },
+    {
+      "source": "src/common/ming_native/infer_tiny.py",
+      "target": "ming-native/infer_tiny.py",
+      "sha256": "18fd6d0ec63f00e0a3f5f80355e2dc4dddd32a1d6e52e1609b547d30a686df64"
+    },
+    {
+      "source": "src/common/ming_native/tts_tasks.py",
+      "target": "ming-native/tts_tasks.py",
+      "sha256": "cd27e176dcc865ab9bf88bb7b7a226d89893e0fd4e6d2a23516b34f769a08b90"
+    },
+    {
+      "source": "src/common/ming_native/spkemb_extractor.py",
+      "target": "ming-native/spkemb_extractor.py",
+      "sha256": "6e53a812fd9620d1e3c8a6d16c38fb63624c22743c518fd30189c4015e039a3d"
+    },
+    {
+      "source": "src/common/ming_native/ming_tts.py",
+      "target": "ming-native/ming_tts.py",
+      "sha256": "faf0d407081d710f5015c35c9bd651689db4ebe2d7ea5220193259ddbc2a03ea"
+    },
+    {
+      "source": "src/common/ming_native/tools/__init__.py",
+      "target": "ming-native/tools/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source": "src/common/ming_native/tools/convert_deploy_to_opensource.py",
+      "target": "ming-native/tools/convert_deploy_to_opensource.py",
+      "sha256": "d2a2002f705633876430681c3f2172fb4fa1a2219a77cd102a5630f01e76670f"
+    },
+    {
+      "source": "src/common/ming_native/tools/preflight_tiny.py",
+      "target": "ming-native/tools/preflight_tiny.py",
+      "sha256": "5e9ead6deea1bae6cdbffc48f1abd7c888420146e21182c1a60f38bb4af8aca0"
+    },
+    {
+      "source": "src/common/ming_native/tools/preflight.py",
+      "target": "ming-native/tools/preflight.py",
+      "sha256": "9e58a0705f9d4b173e5a1d4638849b6eb04414cb55ac97377f39cf868e3ba5e9"
+    },
+    {
+      "source": "src/common/ming_native/frontend/toolkit.py",
+      "target": "ming-native/frontend/toolkit.py",
+      "sha256": "76b01ea60160e79c7bdb04157f1a7930cf223137d074ad6eff40865805e88ef8"
+    },
+    {
+      "source": "src/common/ming_native/frontend/text_segment_cut.py",
+      "target": "ming-native/frontend/text_segment_cut.py",
+      "sha256": "2dbd59c1eabe618d4f4c96586e14d37a1bffd5798b957a91ff6bdc02044341ea"
+    },
+    {
+      "source": "src/common/ming_native/frontend/__init__.py",
+      "target": "ming-native/frontend/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source": "src/common/ming_native/frontend/number_en.py",
+      "target": "ming-native/frontend/number_en.py",
+      "sha256": "299caced391e34d927cd021193dfcf83b2d953516bf45ba4f2f6b15372aa225e"
+    },
+    {
+      "source": "src/common/ming_native/fm/CFM.py",
+      "target": "ming-native/fm/CFM.py",
+      "sha256": "6428645e55c0a2fa7c2316cf309423c1cb66c35ed5e472644bb18c1b685385da"
+    },
+    {
+      "source": "src/common/ming_native/fm/flowloss.py",
+      "target": "ming-native/fm/flowloss.py",
+      "sha256": "4c0e1de2ee328383550ed6b3c74f47c616105ac460612e1485e27ff37c4d7e4f"
+    },
+    {
+      "source": "src/common/ming_native/fm/modules.py",
+      "target": "ming-native/fm/modules.py",
+      "sha256": "22463538f8d8d4a18d833a87123d69c391773845476516fe6f5674b97871f92c"
+    },
+    {
+      "source": "src/common/ming_native/fm/dit.py",
+      "target": "ming-native/fm/dit.py",
+      "sha256": "84683edf660888efe088254512781154c948726a4aff9c12fa158791853880f7"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/vae_modules.py",
+      "target": "ming-native/audio_tokenizer/vae_modules.py",
+      "sha256": "8a84286e17fc8dfa95a0320d86b5e2a446b798be66309aaaeb70e2b0681cb831"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/istft.py",
+      "target": "ming-native/audio_tokenizer/istft.py",
+      "sha256": "de1e5f569e34a5cb05d088310a78d1dba60ef4f2ed403b37b21238c188f6d252"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/configuration_audio_vae.py",
+      "target": "ming-native/audio_tokenizer/configuration_audio_vae.py",
+      "sha256": "9d4f25c6a14310fc00ba3e84aaadcda8be5e8de5a67a39afda674fd54ed44702"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/rope.py",
+      "target": "ming-native/audio_tokenizer/rope.py",
+      "sha256": "37227967b08d631dcb89ebcf46352cea10b0537f6166a3212e59063d201e970a"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/modeling_audio_vae.py",
+      "target": "ming-native/audio_tokenizer/modeling_audio_vae.py",
+      "sha256": "b38a5f4854f5796fea5b7de77a3d19aa0f4af33ff599df3cbd14529c27d0e9e0"
+    },
+    {
+      "source": "src/common/ming_native/audio_tokenizer/audio_encoder.py",
+      "target": "ming-native/audio_tokenizer/audio_encoder.py",
+      "sha256": "e4abe68040b5b5ed49994a323a09dafbbb6c0e7c56dfa67d65711a5df68392b6"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/vae_modules.py",
+      "target": "ming-native/ming_tiny/vae_modules.py",
+      "sha256": "c564c635c9948ea5619693d9479cc9287b606a3d36e831c7d21e3e307cc36bc8"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/task_protocol.py",
+      "target": "ming-native/ming_tiny/task_protocol.py",
+      "sha256": "0728817f05314bcd06f1b10748ea62f4539b24030c170bde5348f2c7d227548a"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/istft.py",
+      "target": "ming-native/ming_tiny/istft.py",
+      "sha256": "de1e5f569e34a5cb05d088310a78d1dba60ef4f2ed403b37b21238c188f6d252"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/aggregator.py",
+      "target": "ming-native/ming_tiny/aggregator.py",
+      "sha256": "aab3a7b609040996961aea405f256b41df002868bfe644224c6bf1ca9fd0f90a"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/configuration_audio_vae.py",
+      "target": "ming-native/ming_tiny/configuration_audio_vae.py",
+      "sha256": "9d4f25c6a14310fc00ba3e84aaadcda8be5e8de5a67a39afda674fd54ed44702"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/CFM.py",
+      "target": "ming-native/ming_tiny/CFM.py",
+      "sha256": "e42bf5f7b30b0e6196ea6e13998371e382c6bd87ef5108da7ef08f3c5ac5eb8b"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/__init__.py",
+      "target": "ming-native/ming_tiny/__init__.py",
+      "sha256": "2ab5e2a64de9a96e18580b40b8b59a451fd882c23a6173c81ce95f944278001e"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/mlp.py",
+      "target": "ming-native/ming_tiny/mlp.py",
+      "sha256": "4359fc1b82e36496892772c495760aaf5961628af49205da722f8906a85782e7"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/flowloss.py",
+      "target": "ming-native/ming_tiny/flowloss.py",
+      "sha256": "9bf7af2a07398e974a4bb6540e01cbb4564814cd5f30f2354b393d38aca95d87"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/configuration_bailing_moe_v3.py",
+      "target": "ming-native/ming_tiny/configuration_bailing_moe_v3.py",
+      "sha256": "f2c048966aec8a2f042cfeb1351f74d51a28589b409c55baae7d24e841c1f6c4"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/api.py",
+      "target": "ming-native/ming_tiny/api.py",
+      "sha256": "e1f9d1d8ae8a86ad547dcd64ab2d00a6bb06b46cad544a20829d51e8bb81f407"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/prompt_contract.py",
+      "target": "ming-native/ming_tiny/prompt_contract.py",
+      "sha256": "7efa6c7a242acc774896fd75e567a0aef5aeafd10e08405f74361732f15fd3d8"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/fm_utils.py",
+      "target": "ming-native/ming_tiny/fm_utils.py",
+      "sha256": "f9763eb057ccbb2c87cef42cd5f3438a832298cfdc0226cd6a5e7063184be0c8"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/configuration_lingv3_tts.py",
+      "target": "ming-native/ming_tiny/configuration_lingv3_tts.py",
+      "sha256": "ce982431a55e09168e4ba83e073d240c250f6426342acd880b1c38f51b11ff07"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/inference.py",
+      "target": "ming-native/ming_tiny/inference.py",
+      "sha256": "a085faa42d48041b815ad6f7b663b247bbfa1830d988ca4af36b5fa9572513f0"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/modules.py",
+      "target": "ming-native/ming_tiny/modules.py",
+      "sha256": "0744fc966806916abfdfaa307e32c52ee3de1b5c53a1caea2bb0c435094601fe"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/modeling_lingv3_tts.py",
+      "target": "ming-native/ming_tiny/modeling_lingv3_tts.py",
+      "sha256": "3210ab6f62e0b9826301510855ae0fbaa14f4edfa76c7ae9dadff1c86ee27135"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/modeling_bailing_moe_v3.py",
+      "target": "ming-native/ming_tiny/modeling_bailing_moe_v3.py",
+      "sha256": "198ba2b9d112c0964c00524a23296d047c75e9c4371b270d5c20181c0100ff06"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/spkemb_extractor.py",
+      "target": "ming-native/ming_tiny/spkemb_extractor.py",
+      "sha256": "6e53a812fd9620d1e3c8a6d16c38fb63624c22743c518fd30189c4015e039a3d"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/dit.py",
+      "target": "ming-native/ming_tiny/dit.py",
+      "sha256": "1b12857a0cb5913068272eec22498dbcbf49a3c94ced822e45990375c1859bc7"
+    },
+    {
+      "source": "src/common/ming_native/ming_tiny/modeling_audio_vae.py",
+      "target": "ming-native/ming_tiny/modeling_audio_vae.py",
+      "sha256": "8c3d9717f54a3e32c023d4474550e4b0a2ef7777380ca6cd71e3f5a76a731ce4"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/talker_tn.py",
+      "target": "ming-native/frontend/talker_tn/talker_tn.py",
+      "sha256": "1e8246c666f50203aa41b0296c333b9248b204f37db3bfc22f9308d8c491c678"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/talker_re.py",
+      "target": "ming-native/frontend/talker_tn/talker_re.py",
+      "sha256": "999cb876f6d5cb154f139bbbd2d254983cd8f4e085e8f44745dbf8a58ee03ee7"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/__init__.py",
+      "target": "ming-native/frontend/talker_tn/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/normalizer.py",
+      "target": "ming-native/frontend/talker_tn/normalizer.py",
+      "sha256": "4cfb9ace57cc6ec0513064462492af228b2a30eac570b0bc836129709aba7b2d"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/talker_pre_processor.py",
+      "target": "ming-native/frontend/talker_tn/talker_pre_processor.py",
+      "sha256": "19fc6dabcf51aae9646d28e83b8a3bfc3f3618e723f8754e0e28b4c3ff044aa2"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/token_parser.py",
+      "target": "ming-native/frontend/talker_tn/token_parser.py",
+      "sha256": "9ec4d8cee83e82ad876274c91e36bf1d79eda11557de0213400948f73f16bd65"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_time.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_time.py",
+      "sha256": "65c0d3a48347b7698ff18cb075f049d63cbef80e0a2e42d49e73dc7291eec7ab"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_phone_dash.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_phone_dash.py",
+      "sha256": "b88fb8163f280d8e8eedf201b59603637c89a07fbc92317ca895acf70ee8c163"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_ip.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_ip.py",
+      "sha256": "f380da6380e17ab597112b7176087c0a64a1f760772da8096ff3fd100b368c3d"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_punc.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_punc.py",
+      "sha256": "c5f2fe4b8241dc23cd5dc82020b8c89d7e17149c3c76335589078403fd19caf4"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_char.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_char.py",
+      "sha256": "1feea80004e335a0e933f14ee4dfeaccb1471c23c26604878337dae6179a77ba"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/__init__.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_sn.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_sn.py",
+      "sha256": "7a9c7467593a5f282cafc245440a9c40d9e752123f7ff0ffa4ea2203577e30e6"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_frac.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_frac.py",
+      "sha256": "bb03feaa73113e92fcdf3d8b21f65139b1f6cb51caa09e625acfebf8bf21f1c2"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_utils.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_utils.py",
+      "sha256": "7e60608a6c9836517080bdc04885348befbe79e1f442ffe53c69212b796a0c9e"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_serial.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_serial.py",
+      "sha256": "e9692f3858b57625e110cc0919691348860417d38f81cd26464e81b21ea0f17e"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_percent.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_percent.py",
+      "sha256": "ee91269e7dcc6759442592a86dfa7e417e2ccca3159941e2329adb718b37f3af"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_measure.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_measure.py",
+      "sha256": "709ab5f5abbffae5941c831d3f101b1cb32a8b27cfd6cc40c452985128a3c141"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_money.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_money.py",
+      "sha256": "e3bca9586b2619f8e9b9b2b7ccee6309efb66b683a653d6e20bfb44dfa37974e"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_version.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_version.py",
+      "sha256": "e045a67a9381238b051fbf451c5bb3f6125afb60490dc7386f0433de355e1117"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_digit.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_digit.py",
+      "sha256": "776c068038a9af221ba6bef74c981760fb3da75ea06e074af569ed65ee2ec493"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_formula.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_formula.py",
+      "sha256": "c99358d4194bf58ac618a29be6bbca21f44d8edb41109463f4b94970901f1a84"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_order.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_order.py",
+      "sha256": "f4a1b4a2c261acfa30baf0a74c042b86ae69bb23ee8ab7bd1ba043268f63b718"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_base.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_base.py",
+      "sha256": "a4dc10de92962968e809cd176eab57b1270ade13345888b2c8e2ef462320e3c0"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_decimal.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_decimal.py",
+      "sha256": "a4b46e04be43f224ab72a5c4c5e73d52a3910a97754c03a969ceb525164bcb80"
+    },
+    {
+      "source": "src/common/ming_native/frontend/talker_tn/re_utils/re_date.py",
+      "target": "ming-native/frontend/talker_tn/re_utils/re_date.py",
+      "sha256": "9a74e3f6d6b0f71279ff26f95ff9fb828c25056f13090c5c74dfaadd5d901d36"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/__init__.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/__init__.py",
+      "sha256": "ef3342faad1a51dbfe69f641c2f3915b7e60179bb8f4b02e188af82191eb3c60"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/app.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/app.py",
+      "sha256": "25836e2f439e1178fd2b9085c0316db8c65745a33b9cc0f438a3aa3068bc2c0e"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/audio.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/audio.py",
+      "sha256": "6ce480175f8e4f846a7e9a722f1972d65733da59b16dbbf3ba6452e1720d5bae"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/budget.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/budget.py",
+      "sha256": "df6cf22a7cc6165b851f9060ad204e8436e60c6d91c468a689ba74e2ec534540"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/client.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/client.py",
+      "sha256": "a4e277288aeca9bd076fb8770e4f4857e33a77223f442712dcbae35779aa3d99"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/config.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/config.py",
+      "sha256": "c8284d816eff5e601a4dadf1d5942feaaf558ab8a48f40fd086d0d0c20401ad6"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/default_config.toml",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/default_config.toml",
+      "sha256": "3ff078cbd2ab31b114ec2bfbbf9064d8d5ab666b567b80721c524060180e8f1c"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/deploy.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/deploy.py",
+      "sha256": "dd1e1550721f5e1b12200a04c4dc318e7e5254312a56e26e1a42dc089498fb83"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/events.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/events.py",
+      "sha256": "a139b576d290512289462682db7b1c02a3c43b9a9a55053e1182914d6dbd9948"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/file_jobs.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/file_jobs.py",
+      "sha256": "0fe443b34aaa2de82c5035f420a8d2f7fad6de765e7260ef374cfa368841f924"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/launch.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/launch.py",
+      "sha256": "a703582aa547ff5f1b989d094717ab2131d725564a508195756d87d0601be231"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/logits_plugins.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/logits_plugins.py",
+      "sha256": "6c1b82abc9c878dc60c22bb04c40001c2f044f16247b512a2b6b42531304c3ef"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/logits_v2.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/logits_v2.py",
+      "sha256": "a4b7a799f309fc0d9c8dd1146fcf604979bfcbf5cecf5daa870ca4378f21eb68"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/model_discovery.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/model_discovery.py",
+      "sha256": "5c767a40ef3697544682f6992b23483709f4410039cf95e08e684510b0fc1e33"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/noise.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/noise.py",
+      "sha256": "d8fe10905361095d1359573bb84c55036e1879f1128641963689dec43f5faf8a"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/preflight.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/preflight.py",
+      "sha256": "a3951704c2672c160833daac932dac487c5ef5089eb0f9cc0e0006daee047665"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/prepare_model.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/prepare_model.py",
+      "sha256": "06627bc4769f6f8b869eb2adabf2756d7f931d185f6da26597c7382cb008e1dc"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/repetition.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/repetition.py",
+      "sha256": "4bea4f49046dc9e5d701189c492ea3ed93addc5f1fe14d583bed79b40c33e717"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/app.js",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/app.js",
+      "sha256": "8333152c1d0e6dedc93ead11f0d4085c0966ccd9a8cfa697107e2131282b4d56"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/file-upload.js",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/file-upload.js",
+      "sha256": "38ed45e7263242a8b4fb8d594b471bdb97e76c907e06edc2688757b838345219"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/i18n.js",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/i18n.js",
+      "sha256": "912a9d72ecd6792b4a70e29803460d25874355c449185fac8dd0d570dfecab6b"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/index.html",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/index.html",
+      "sha256": "efd86ae20018ebe58a9039aaa8adae949763199081991d63415a3e5d395d51fa"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/recorder.js",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/recorder.js",
+      "sha256": "eb0a056c5545276a574ac8f0f4d81fd382f72ab9166d193e38242a53310d0263"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/style.css",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/style.css",
+      "sha256": "550243ad3ce609325b5b91ac6b0464c2f970e2792676eaf086e37138712dec07"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/static/urls.js",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/static/urls.js",
+      "sha256": "10a88ade5ed7c71ae8ee32acb4b19d7efeff7f57b547e7da3eab23da69c53217"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/target_language.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/target_language.py",
+      "sha256": "1832a50222bf3f42cad2f18d3983ffb202bb458148fa036d5fb26d5e8549f2c6"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/translation.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/translation.py",
+      "sha256": "d506ee8b699d5418722e408e80c6dfecab19973bef194112232b467d0f5122b7"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts.py",
+      "sha256": "3820c224f1d407796843949fcb4bdaa762ba2c91b533ac69ca333e764b1b6067"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_audio.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_audio.py",
+      "sha256": "8c0bbde88abf1ae51f9ad754cfe8c29addc948fdb87201b07e35bfa1086b92bf"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/__init__.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/__init__.py",
+      "sha256": "edb5678b6068aa075ef32baecfe41bb854ecd2df18352278a196f796e58535ea"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen.py",
+      "sha256": "e2b4fcb1601749d5c3ae7438a35c13c53532158fd6a0e148be7f9c765ad58885"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen_acceleration.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_backends/qwen_acceleration.py",
+      "sha256": "9ec2cc0cf6306dcabcc02f4723db16092c0dd8dcc2d1b04b9871e6cd6222fa1f"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_history.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_history.py",
+      "sha256": "fee500421e6590e512e65f3b2260f5a9307d4c92c461025f99cec121d4685fa6"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_launch.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_launch.py",
+      "sha256": "3e4ecf305e560283818757338279638efb7a4cf88bd0c1ce26eb2357e6f2383f"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_plugin.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_plugin.py",
+      "sha256": "194aa8492bdb6dd638824be91ad7a159ee6ba0b78dca8f99277be81d025f057f"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_source.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_omni_source.py",
+      "sha256": "a5d1df674d6908c8c740ec443ba1b83747285c5d5079ab32dcaa7e32b69bf020"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_source.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_source.py",
+      "sha256": "fde0a484c8b677db8d8d9f9fb123a6efa287383dd3956df2bc2f27d85d0f8085"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/tts_tail.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/tts_tail.py",
+      "sha256": "e8e1654cf0546b078f1f57d780552767004a847010581688f1aa8f27b7614601"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/vad.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/vad.py",
+      "sha256": "79dcb8689bb21684f2885ac38aa8810473ae8564ecc8dfdbbcc9cf559384c582"
+    },
+    {
+      "source": "src/official/vendor_20261126/Hy-SimulMT/SimulInfer/simulinfer/vad_firered.py",
+      "target": "official/Hy-SimulMT/SimulInfer/simulinfer/vad_firered.py",
+      "sha256": "2845245057cf3ebca4fab045a15b6d37a8091ce67a62f00e9a5cef006af4c157"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/__init__.py",
+      "target": "official/Confucius4-T3PO/inference/__init__.py",
+      "sha256": "4256a6900fd3edf1a4329ed7428e72b6eb55b4150c410aaca114d77e8e62aff9"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/asr.py",
+      "target": "official/Confucius4-T3PO/inference/asr.py",
+      "sha256": "f612bed7070f50ff7f3d8f93c1500a6f8e797ff5e5f157d5c64ac4011944dc4c"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/config.py",
+      "target": "official/Confucius4-T3PO/inference/config.py",
+      "sha256": "8b55d136c91085c2f5e1bceeecdb83c7e98dcfba2d2936a963e90fb7c4b22812"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/download_models.py",
+      "target": "official/Confucius4-T3PO/inference/download_models.py",
+      "sha256": "507716029e8ce17747f80b8a426acf20094cfc953929e1c860c0e9458e2400ed"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/glossary.py",
+      "target": "official/Confucius4-T3PO/inference/glossary.py",
+      "sha256": "11015b3b9fc18ede7eb8c6ad7d556fa53ccbcf7b8f245260fd4fd014e268f6b9"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/latency.py",
+      "target": "official/Confucius4-T3PO/inference/latency.py",
+      "sha256": "896dedc358eedac80c859764857b0f4b9091374b21c56dbf6f2f9f08b674b9f9"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/prompts.py",
+      "target": "official/Confucius4-T3PO/inference/prompts.py",
+      "sha256": "8d4da9e0223592c8387869dda889f81d6a486d56be40211224057a41b53ef6cc"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/runtime.py",
+      "target": "official/Confucius4-T3PO/inference/runtime.py",
+      "sha256": "3d56212cabd8c9f9d3ef98116e9995d9d1b5ddf60b350b4f6e66ad5df8898215"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/server.py",
+      "target": "official/Confucius4-T3PO/inference/server.py",
+      "sha256": "a199e553967b7560a3a7e2b587d853a8bbdb791069f3c7c549e58dc0ec84a952"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/static/app.js",
+      "target": "official/Confucius4-T3PO/inference/static/app.js",
+      "sha256": "63f47f245945fcf7951730daec3768bb3b54d80c5c10e947487f3f343d6ac92e"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/static/index.html",
+      "target": "official/Confucius4-T3PO/inference/static/index.html",
+      "sha256": "7acbcd89dff7235005830e185374123255c4a8a57129150fcfe177a71ad29923"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/static/style.css",
+      "target": "official/Confucius4-T3PO/inference/static/style.css",
+      "sha256": "8be2a10964e451ced15739c066d87325eb4ddda79906a20c477574de612dba5e"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/text_inference.py",
+      "target": "official/Confucius4-T3PO/inference/text_inference.py",
+      "sha256": "4a1f5ab629c1551aa8b4e99945eabda06fbd6e96590d85b6dc3e244fa0734011"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/inference/translation.py",
+      "target": "official/Confucius4-T3PO/inference/translation.py",
+      "sha256": "7b43b93c70db571acda1bd3215d77a432498ba9267318ed1ec556e25689bbf10"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-R2T2/r2t2/__init__.py",
+      "target": "official/Confucius4-R2T2/r2t2/__init__.py",
+      "sha256": "817b86e1276f57d8b7bb5841ecf4e31196ad22c94c7bf9658ea0455d7a5d8b21"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-R2T2/r2t2/r2t2_asr.py",
+      "target": "official/Confucius4-R2T2/r2t2/r2t2_asr.py",
+      "sha256": "711627d76a3ab610ba3651409e25c8358d0d874aaf07c61c51555ff84d123614"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-R2T2/ws_server.py",
+      "target": "official/Confucius4-R2T2/ws_server.py",
+      "sha256": "8e67c1c6aafee68d67861cb37b3f8e0716700d8b803cbc34502a5c55203d0e3c"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-T3PO/LICENSE",
+      "target": "official/Confucius4-T3PO/LICENSE",
+      "sha256": "588f127c057cc5aab3b8a6fe658e49d9ec39868c83607395fae34e779f2dad74"
+    },
+    {
+      "source": "src/official/vendor_20261126/Confucius4-R2T2/LICENSE",
+      "target": "official/Confucius4-R2T2/LICENSE",
+      "sha256": "14e7c118524c62f53bbbaeacd3a1097f080a0a39e941bd00cfaace9a55fa2d24"
+    },
+    {
+      "source": "src/official/vendor_20261126/simulst/simulst_mm/model/processing.py",
+      "target": "official/simulst/simulst_mm/model/processing.py",
+      "sha256": "999a35f26a01db13d865c375c2aee98f17cafe78d4e77848af49c8699ad79569"
+    },
+    {
+      "source": "src/official/youdao_official_webfile_host_client.py",
+      "target": "youdao/youdao_official_webfile_host_client.py",
+      "sha256": "d149cbe9e32d234b9f1834dad2d0d874506ffc201f44df25d420229571979f3a"
+    },
+    {
+      "source": "src/quantized/conformance_20261125/candidates/sentence-complete/start_bridge.sh",
+      "target": "youdao/start_bridge.sh",
+      "sha256": "c6549e5f221c5ca438ecdfa7a67fcce066dcef0573ec57d5e44f7160a0aeaec7"
+    },
+    {
+      "source": "configs/locks/official-runtime-source-files-20261125.json",
+      "target": "official-runtime-source-files-20261125.json",
+      "sha256": "c13b33c9d9529c8399426b150f8908776a8c4b61df4ec1e84e5aca1deb2d9512"
+    },
+    {
+      "source": "configs/locks/s2st-runtime-20261125.json",
+      "target": "s2st-runtime-20261125.json",
+      "sha256": "704fa2b3772d923cf1c160699f43dac2cf655ac59bcbf940bf5a83981c617778"
+    },
+    {
+      "source": "src/engine/reference/tencent-reference.toml",
+      "target": "tencent-reference.toml",
+      "sha256": "9ed0f440e69d4e1197bf78c2433b530a5278bace34e8c8ac82f0786782d1d566"
+    },
+    {
+      "source": "src/engine/reference/native-loader-env.json",
+      "target": "native-loader-env.json",
+      "sha256": "5c9eeb27bdedcb55eb4021287e7a609ce6d8aded56633a46cb744ec1b1491f68"
+    },
+    {
+      "source": "configs/youdao-R7-20261126.json",
+      "target": "profile.json",
+      "sha256": "5b3a8a9abf1a3b1eadf305a6720a32fcd76a4fd11468d184763ad929613db4f2"
+    },
+    {
+      "source": "src/engine/locked/live_session.py",
+      "target": "api/live_session.py",
+      "sha256": "3eec663f8b150205a766f3fade71a8f204e5e2edf5a7bc67e38d4d8b1ab0bf02"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/api/layout.py",
+      "target": "api/layout.py",
+      "sha256": "fccd418ec08f1c60806009b655af13eed519f6aa2f94c3cdaff58a532572f159"
+    },
+    {
+      "source": "src/engine/locked/__init__.py",
+      "target": "api/__init__.py",
+      "sha256": "cb4d9e41f4c7d0e854d49d6240c8f03520375a154b5dbe4dea0bed5b5cbf6399"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/api/file_session.py",
+      "target": "api/file_session.py",
+      "sha256": "3518d341ff20ca8c9ea312c357583e9aff2cb3218ef413664b79935ca40f8e36"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/api/api.py",
+      "target": "api/api.py",
+      "sha256": "dab8e3bcc8db0574bfdc0768d6b7c87881065ce1c16f11ccf3074a4d1c942dde"
+    },
+    {
+      "source": "src/engine/release_20261127/wrapper/s2st/locked_payload/youdao/api/lifecycle.py",
+      "target": "api/lifecycle.py",
+      "sha256": "04322ba3f6cb4a37bd77db759d39cfa734dd04ebeebef3d465d75d9d2b3c7021"
+    },
+    {
+      "source": "src/engine/locked/integrity.py",
+      "target": "api/integrity.py",
+      "sha256": "8ff0a0317837198778b8cee3bb08b5b77de2c478a24d6f6678465cfd1b9c0b54"
+    },
+    {
+      "source": "src/engine/locked/youdao/upstream_services.py",
+      "target": "youdao/upstream_services.py",
+      "sha256": "c1fec3d95523e5f59821ef40931ad1b3e962f92593d63e847d50854fcebabb68"
+    },
+    {
+      "source": "src/engine/youdao_gpu_client.py",
+      "target": "youdao/youdao_gpu_client.py",
+      "sha256": "7111f65733c1685c445fccb7a8a409c587d7ffa4b0fe909e71fc30577b28ac69"
+    },
+    {
+      "source": "src/engine/locked/youdao/ming_services.py",
+      "target": "youdao/ming_services.py",
+      "sha256": "0047324676a68035faee2e775e3f00fca0b5df4e7c1b134c987b12dcc2348702"
+    }
+  ],
+  "inference_sources_rewritten": false,
+  "MING_model_or_delivery_modified": false,
+  "wrapper_scope": "Exact service lifetimes and measured original file clients, external lossless live PCM transport, container filesystem aliases only.",
+  "pending": [
+    "Actual CUDA image tests",
+    "Actual Chart Benchmark",
+    "ARM64 CUDA runtime execution"
+  ],
+  "runtime_adaptation": {
+    "candidate": "youdao-experience10",
+    "scope": "ASR/MT andMINGworkerprocess-localofficialclient; noMINGmodel/generationchange",
+    "MING_changed": "worker_GPU_client_only",
+    "node_changed": false,
+    "source_plan": "configs/youdao-experience-gpu-handoff-ming-20261127.json"
+  },
+  "release_cleanup": {
+    "behavior_change": false,
+    "unused_harnesses_removed": true,
+    "comments": "Authored Python comments compacted with AST equality; official sources and license notices preserved"
+  }
+}

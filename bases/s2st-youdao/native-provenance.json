@@ -1,0 +1,46 @@
+{
+  "state": "tested_private_source_and_binary_receipt_matched",
+  "repository": "https://github.com/ggml-org/llama.cpp",
+  "revision": "ad6c66839af3c5646fba8c6c2e2087a1e4e38948",
+  "source_identity_proof": "results/night_20261126/R7-native-revision-match.json",
+  "changes": [
+    "Implement explicit request min_tokens: block EOG only before its minimum, default zero leaves ordinary requests unchanged",
+    "Disable backend/draft sampling only for min_tokens requests; experiment has no draft model"
+  ],
+  "unchanged": [
+    "Model weights",
+    "Prompt",
+    "Ordinary WAIT policy",
+    "ASR",
+    "MING",
+    "Native stream cadence"
+  ],
+  "files": [
+    {
+      "source": "src/engine/native/youdao/server-task.h",
+      "sha256": "54c85ded120f91a46ba3a7f09a34b82986824b677b2f26a7dd9aeb820ba497b8",
+      "original_sha256": "413733f2c47897e9a531dbc382a72e7676d46164d92996da1f008185f059bcf2",
+      "target": "tools/server/server-task.h"
+    },
+    {
+      "source": "src/engine/native/youdao/server-schema.cpp",
+      "sha256": "eaae7074a06c56e39a09f858e0033ad0ae78f627e8a6155b07093762c5c6e9cc",
+      "original_sha256": "0bab859883207554fb724774892e8756ec0c956252b7653424756a0ee582efa8",
+      "target": "tools/server/server-schema.cpp"
+    },
+    {
+      "source": "src/engine/native/youdao/server-context.cpp",
+      "sha256": "5c45830e53d0e4bc6ba48da8281655eb534e7c0982332fd68d5b4233d67dd72e",
+      "original_sha256": "2f5d65ce6ef0504b5c8cf55a74c68d3959c49784ba380ef836566b7a7d5fa12b",
+      "target": "tools/server/server-context.cpp"
+    }
+  ],
+  "patch": "src/engine/native/youdao/min-tokens.patch",
+  "patch_sha256": "328e84b9df523ab1b83678b21c2f5c554aa35024437aa870e0c9dc809074de2c",
+  "tested_binary_sha256": "b247f7cca0ceab72d2e485402af90c41ffcd8e5232783ece5df49a7fb9e256d1",
+  "original_build_recipe": "src/quantized/host_prototypes/003/source/003/host-probe-code/build_youdao_min_tokens_probe.py",
+  "image_build": "Rebuild the same pinned native sources with these three tested compatibility files; portable CUDA architecture selection is an explicit build-only adapter.",
+  "GPU_work_started": false,
+  "binaries_retained_locally": false,
+  "observed_utc": "2026-11-26T17:11:25.063121+00:00"
+}

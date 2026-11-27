@@ -3,6 +3,8 @@ from . import tasks
 
 # base -> ordered [(caps served together, module)]; first match wins, one instance = one model.
 BASES = {
+    "s2st-tencent": [(("audio_s2s",), "s2st")],
+    "s2st-youdao": [(("audio_s2s",), "s2st")],
     "qwen": [
         (("stt", "stt_stream"), "stt_stream"),
         (("align",), "align"),
@@ -131,11 +133,12 @@ BASES = {
     "mingov": [
         (("tts", "tts_clone", "tts_design"), "ming"),
     ],
-    # audio_llm and audio_s2s stay reserved names: no base implements them yet.
+    # audio_llm remains reserved.
 }
 
 # module -> the model family it runs; parameter size is read off the model id instead.
 FAMILIES = {
+    "s2st": "speech-to-speech-translation",
     "stt_stream": "qwen3-asr",
     "align": "qwen3-forced-aligner",
     "whisper": "faster-whisper",
@@ -231,6 +234,10 @@ _MOUNTS = {
     ],
     ("diar_nemotron", "diar_stream"): [
         ("WS", "/v1/audio/diarize/stream", "Streaming speaker diarization (WebSocket)", False),
+    ],
+    ("s2st", "audio_s2s"): [
+        ("POST", "/v1/audio/translations", "Speech-to-speech translation; stream=false returns complete JSON/WAV, stream=true NDJSON", True),
+        ("WS", "/v1/audio/translations/stream", "Live speech translation: 16k PCM input; translated text and24k PCM output", False),
     ],
     ("tts", "tts"): [
         ("POST", "/v1/audio/speech",
@@ -531,6 +538,8 @@ def _protocol(path):
 
 
 def _operation_id(module, cap, method, path):
+    if module == "s2st" and path in ("/v1/audio/translations", "/v1/audio/translations/stream"):
+        return "audio.translate.speech.stream" if method == "WS" else "audio.translate.speech"
     if cap == "tts_dialogue" and path == "/v1/audio/speech":
         return "speech.dialogue"
     if cap == "sound_fx":
@@ -543,6 +552,8 @@ def _operation_id(module, cap, method, path):
 
 
 def _modalities(operation_id):
+    if operation_id.startswith("audio.translate.speech"):
+        return ["audio"], ["text", "audio"]
     if operation_id.startswith("speech.synthesize.reference"):
         return ["text", "audio"], ["audio"]
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
@@ -558,6 +569,14 @@ def _modalities(operation_id):
 
 def _parameters(module, operation_id, path=""):
     params = []
+    if module == "s2st" and operation_id.startswith("audio.translate.speech"):
+        params.extend([
+            {"name": "direction", "type": "string", "enum": ["zh2en", "en2zh"]},
+            {"name": "stream", "type": "boolean", "default": False},
+            {"name": "source_lang", "type": "string", "enum": ["English", "Chinese"]},
+            {"name": "target_lang", "type": "string", "enum": ["English", "Chinese"]},
+            {"name": "response_format", "type": "string", "default": "json", "enum": ["json", "text", "wav", "pcm"]},
+        ])
     # `segments` is the protocol-level batching signal consumed by clients.
     # Keep it tied to the implementations that actually accept the multipart
     # field: a future single-clip recogniser must not inherit the claim merely
@@ -587,6 +606,8 @@ def _parameters(module, operation_id, path=""):
 
 def _constraints(module, operation_id, path=""):
     formats, rates, limits = [], [], {}
+    if module == "s2st" and operation_id.startswith("audio.translate.speech"):
+        formats, rates = ["wav", "pcm_s16le"], [24000]
     if operation_id.startswith(("speech.synthesize", "speech.dialogue", "sound.generate")):
         if module in ("firered", "breeze") and not path.startswith("/v1/audio/"):
             formats = ["pcm_24000", "wav_24000", "mp3_44100_128"]
@@ -619,7 +640,7 @@ def describe_endpoint(module, cap, method, path, is_async):
         "protocol": _protocol(path),
         "transport": "websocket" if method == "WS" else "http",
         "sync_supported": method != "WS",
-        "streaming": method == "WS" or path.endswith("/stream"),
+        "streaming": method == "WS" or path.endswith("/stream") or (module == "s2st" and method == "POST"),
         "async_supported": is_async,
         "required_supports": [cap] if cap else [],
         "input_modalities": inputs,

@@ -1,0 +1,49 @@
+{
+  "state": "official_CUDA128_artifacts_pinned_by_SHA256",
+  "source": "s2st_benchmark/results/night_20261126/ASR-official-CUDA-wheel-names.json",
+  "wheels": [
+    {
+      "package": "torch",
+      "base_version": "2.9.1",
+      "arch": "aarch64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=1176f250311fa95cc3bca8077af323e0d73ea385ba266e096af82e7e2b91f256",
+      "filename": "torch-2.9.1+cu128-cp312-cp312-manylinux_2_28_aarch64.whl"
+    },
+    {
+      "package": "torch",
+      "base_version": "2.9.1",
+      "arch": "x86_64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torch-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=7cb4018f4ce68b61fd3ef87dc1c4ca520731c7b5b200e360ad47b612d7844063",
+      "filename": "torch-2.9.1+cu128-cp312-cp312-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "package": "torchaudio",
+      "base_version": "2.9.1",
+      "arch": "aarch64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.9.1-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=59f70f6aa6a7e77a1fd51756d7d25fec22bead0b50ce7bed4ede75a5fa6b21d1",
+      "filename": "torchaudio-2.9.1-cp312-cp312-manylinux_2_28_aarch64.whl"
+    },
+    {
+      "package": "torchaudio",
+      "base_version": "2.9.1",
+      "arch": "x86_64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torchaudio-2.9.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=54eb19e634b8c567886a1b53b4184506d943c3ba5139198e9fe1b941bc566f30",
+      "filename": "torchaudio-2.9.1+cu128-cp312-cp312-manylinux_2_28_x86_64.whl"
+    },
+    {
+      "package": "torchvision",
+      "base_version": "0.24.1",
+      "arch": "aarch64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torchvision-0.24.1-cp312-cp312-manylinux_2_28_aarch64.whl#sha256=bd33a7cc32122bc92919f95ea0e7bf73588e71be0ca2c5cad8fb7eebd333e8dd",
+      "filename": "torchvision-0.24.1-cp312-cp312-manylinux_2_28_aarch64.whl"
+    },
+    {
+      "package": "torchvision",
+      "base_version": "0.24.1",
+      "arch": "x86_64",
+      "url": "https://download-r2.pytorch.org/whl/cu128/torchvision-0.24.1%2Bcu128-cp312-cp312-manylinux_2_28_x86_64.whl#sha256=cf84eae1d2d12a7d261a7496eca00dd927b71792011b1e84d4162c950eb3201d",
+      "filename": "torchvision-0.24.1+cu128-cp312-cp312-manylinux_2_28_x86_64.whl"
+    }
+  ],
+  "scope": "Exact2.9.1/0.24.1versions; ARMtorchaudio/torchvisionofficialCUDAwheels omit local+cu128filename suffix. InspectedELFlinksrequirelibtorch_cuda/libcudart; no CPUwheel substitution. No model/MING setting change."
+}

@@ -22,6 +22,16 @@ on:
         required: false
         default: ''
         type: string
+      deps_cache:
+        description: Optional preverified S2ST dependency image
+        required: false
+        default: ''
+        type: string
+      python_cache:
+        description: Optional preverified S2ST Python foundation
+        required: false
+        default: ''
+        type: string
       slices:
         description: 'Arch slices to build, as JSON [{arch, platform, runner}]. Default builds both.'
         required: false
@@ -41,7 +51,7 @@ jobs:
         with:
           # The images run newer, but 3.10 is the floor the wrapper is written to (`X | Y`
           # annotations in caps/tts_el.py); linting below pins the same floor.
-          python-version: '3.11'
+          python-version: ${{ startsWith(inputs.base, 's2st-') && '3.12' || '3.11' }}
       - name: install test dependencies
         # onnx is here for the same reason ffmpeg is below: without it the OpenVINO
         # model-derivation case returns early and its assertions never run, while the
@@ -61,6 +71,9 @@ jobs:
         # whole point of which is that the two readers disagree about which containers they
         # can measure, was running against one reader. Both printed pass.
         run: python -m pip install -q fastapi httpx numpy onnx==1.22.0 python-multipart soundfile uvicorn
+      - name: install S2ST protocol dependencies
+        if: startsWith(inputs.base, 's2st-')
+        run: python -m pip install -q websockets==15.0.1
       - name: install ffmpeg
         # The tempo assertions for FireRed/Breeze long text shell out to ffmpeg, and skipped
         # themselves on every run without it -- on the one path where a wrong filter chain is
@@ -198,6 +211,22 @@ jobs:
           curl -sSfL "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_${CRANE_ARCH}.tar.gz" \
             | sudo tar -xz -C /usr/local/bin crane
           crane version
+
+      - name: import verified S2ST dependency cache
+        if: startsWith(inputs.base, 's2st-') && inputs.deps_cache != ''
+        env:
+          SOURCE_CACHE: ${{ inputs.deps_cache }}
+          PYTHON_CACHE: ${{ inputs.python_cache }}
+          TARGET_REPO: ${{ inputs.namespace }}/${{ inputs.repo }}
+          CACHE_BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          if [ -n "$PYTHON_CACHE" ]; then
+            FOUNDATION=$(python3 -c 'import pathlib,sys; print(next(x.split()[1] for x in pathlib.Path(sys.argv[1]).read_text().splitlines() if x.endswith(" AS python")))' "bases/$CACHE_BASE/deps.Dockerfile")
+            crane copy "$PYTHON_CACHE" "$FOUNDATION"
+          fi
+          TARGET=$(./scripts/deps-image.sh "$CACHE_BASE" "$TARGET_REPO")
+          crane copy "$SOURCE_CACHE" "$TARGET"
 
       - name: does this base's deps image exist for this arch
         id: deps

@@ -1,0 +1,90 @@
+{
+  "scope": "Runtime source only; no weights or dependency binaries",
+  "repositories": {
+    "Hy-SimulMT": {
+      "revision": "7efcb18c521a7025b37d4bc2230a1df8ade83950",
+      "prefixes": [
+        "SimulInfer/simulinfer"
+      ],
+      "files": {
+        "SimulInfer/simulinfer/__init__.py": "ef3342faad1a51dbfe69f641c2f3915b7e60179bb8f4b02e188af82191eb3c60",
+        "SimulInfer/simulinfer/app.py": "25836e2f439e1178fd2b9085c0316db8c65745a33b9cc0f438a3aa3068bc2c0e",
+        "SimulInfer/simulinfer/audio.py": "6ce480175f8e4f846a7e9a722f1972d65733da59b16dbbf3ba6452e1720d5bae",
+        "SimulInfer/simulinfer/budget.py": "df6cf22a7cc6165b851f9060ad204e8436e60c6d91c468a689ba74e2ec534540",
+        "SimulInfer/simulinfer/client.py": "a4e277288aeca9bd076fb8770e4f4857e33a77223f442712dcbae35779aa3d99",
+        "SimulInfer/simulinfer/config.py": "c8284d816eff5e601a4dadf1d5942feaaf558ab8a48f40fd086d0d0c20401ad6",
+        "SimulInfer/simulinfer/default_config.toml": "3ff078cbd2ab31b114ec2bfbbf9064d8d5ab666b567b80721c524060180e8f1c",
+        "SimulInfer/simulinfer/deploy.py": "dd1e1550721f5e1b12200a04c4dc318e7e5254312a56e26e1a42dc089498fb83",
+        "SimulInfer/simulinfer/events.py": "a139b576d290512289462682db7b1c02a3c43b9a9a55053e1182914d6dbd9948",
+        "SimulInfer/simulinfer/file_jobs.py": "0fe443b34aaa2de82c5035f420a8d2f7fad6de765e7260ef374cfa368841f924",
+        "SimulInfer/simulinfer/launch.py": "a703582aa547ff5f1b989d094717ab2131d725564a508195756d87d0601be231",
+        "SimulInfer/simulinfer/logits_plugins.py": "6c1b82abc9c878dc60c22bb04c40001c2f044f16247b512a2b6b42531304c3ef",
+        "SimulInfer/simulinfer/logits_v2.py": "a4b7a799f309fc0d9c8dd1146fcf604979bfcbf5cecf5daa870ca4378f21eb68",
+        "SimulInfer/simulinfer/model_discovery.py": "5c767a40ef3697544682f6992b23483709f4410039cf95e08e684510b0fc1e33",
+        "SimulInfer/simulinfer/noise.py": "d8fe10905361095d1359573bb84c55036e1879f1128641963689dec43f5faf8a",
+        "SimulInfer/simulinfer/preflight.py": "a3951704c2672c160833daac932dac487c5ef5089eb0f9cc0e0006daee047665",
+        "SimulInfer/simulinfer/prepare_model.py": "06627bc4769f6f8b869eb2adabf2756d7f931d185f6da26597c7382cb008e1dc",
+        "SimulInfer/simulinfer/repetition.py": "4bea4f49046dc9e5d701189c492ea3ed93addc5f1fe14d583bed79b40c33e717",
+        "SimulInfer/simulinfer/static/app.js": "8333152c1d0e6dedc93ead11f0d4085c0966ccd9a8cfa697107e2131282b4d56",
+        "SimulInfer/simulinfer/static/file-upload.js": "38ed45e7263242a8b4fb8d594b471bdb97e76c907e06edc2688757b838345219",
+        "SimulInfer/simulinfer/static/i18n.js": "912a9d72ecd6792b4a70e29803460d25874355c449185fac8dd0d570dfecab6b",
+        "SimulInfer/simulinfer/static/index.html": "efd86ae20018ebe58a9039aaa8adae949763199081991d63415a3e5d395d51fa",
+        "SimulInfer/simulinfer/static/recorder.js": "eb0a056c5545276a574ac8f0f4d81fd382f72ab9166d193e38242a53310d0263",
+        "SimulInfer/simulinfer/static/style.css": "550243ad3ce609325b5b91ac6b0464c2f970e2792676eaf086e37138712dec07",
+        "SimulInfer/simulinfer/static/urls.js": "10a88ade5ed7c71ae8ee32acb4b19d7efeff7f57b547e7da3eab23da69c53217",
+        "SimulInfer/simulinfer/target_language.py": "1832a50222bf3f42cad2f18d3983ffb202bb458148fa036d5fb26d5e8549f2c6",
+        "SimulInfer/simulinfer/translation.py": "d506ee8b699d5418722e408e80c6dfecab19973bef194112232b467d0f5122b7",
+        "SimulInfer/simulinfer/tts.py": "3820c224f1d407796843949fcb4bdaa762ba2c91b533ac69ca333e764b1b6067",
+        "SimulInfer/simulinfer/tts_audio.py": "8c0bbde88abf1ae51f9ad754cfe8c29addc948fdb87201b07e35bfa1086b92bf",
+        "SimulInfer/simulinfer/tts_backends/__init__.py": "edb5678b6068aa075ef32baecfe41bb854ecd2df18352278a196f796e58535ea",
+        "SimulInfer/simulinfer/tts_backends/qwen.py": "e2b4fcb1601749d5c3ae7438a35c13c53532158fd6a0e148be7f9c765ad58885",
+        "SimulInfer/simulinfer/tts_backends/qwen_acceleration.py": "9ec2cc0cf6306dcabcc02f4723db16092c0dd8dcc2d1b04b9871e6cd6222fa1f",
+        "SimulInfer/simulinfer/tts_history.py": "fee500421e6590e512e65f3b2260f5a9307d4c92c461025f99cec121d4685fa6",
+        "SimulInfer/simulinfer/tts_launch.py": "3e4ecf305e560283818757338279638efb7a4cf88bd0c1ce26eb2357e6f2383f",
+        "SimulInfer/simulinfer/tts_omni_plugin.py": "194aa8492bdb6dd638824be91ad7a159ee6ba0b78dca8f99277be81d025f057f",
+        "SimulInfer/simulinfer/tts_omni_source.py": "a5d1df674d6908c8c740ec443ba1b83747285c5d5079ab32dcaa7e32b69bf020",
+        "SimulInfer/simulinfer/tts_source.py": "fde0a484c8b677db8d8d9f9fb123a6efa287383dd3956df2bc2f27d85d0f8085",
+        "SimulInfer/simulinfer/tts_tail.py": "e8e1654cf0546b078f1f57d780552767004a847010581688f1aa8f27b7614601",
+        "SimulInfer/simulinfer/vad.py": "79dcb8689bb21684f2885ac38aa8810473ae8564ecc8dfdbbcc9cf559384c582",
+        "SimulInfer/simulinfer/vad_firered.py": "2845245057cf3ebca4fab045a15b6d37a8091ce67a62f00e9a5cef006af4c157"
+      },
+      "reference_git_clean": true
+    },
+    "Confucius4-T3PO": {
+      "revision": "0ac9d0c806f8f139ebaa83d394ffbd5057ff3ae3",
+      "prefixes": [
+        "inference"
+      ],
+      "files": {
+        "inference/__init__.py": "4256a6900fd3edf1a4329ed7428e72b6eb55b4150c410aaca114d77e8e62aff9",
+        "inference/asr.py": "f612bed7070f50ff7f3d8f93c1500a6f8e797ff5e5f157d5c64ac4011944dc4c",
+        "inference/config.py": "8b55d136c91085c2f5e1bceeecdb83c7e98dcfba2d2936a963e90fb7c4b22812",
+        "inference/download_models.py": "507716029e8ce17747f80b8a426acf20094cfc953929e1c860c0e9458e2400ed",
+        "inference/glossary.py": "11015b3b9fc18ede7eb8c6ad7d556fa53ccbcf7b8f245260fd4fd014e268f6b9",
+        "inference/latency.py": "896dedc358eedac80c859764857b0f4b9091374b21c56dbf6f2f9f08b674b9f9",
+        "inference/prompts.py": "8d4da9e0223592c8387869dda889f81d6a486d56be40211224057a41b53ef6cc",
+        "inference/runtime.py": "3d56212cabd8c9f9d3ef98116e9995d9d1b5ddf60b350b4f6e66ad5df8898215",
+        "inference/server.py": "a199e553967b7560a3a7e2b587d853a8bbdb791069f3c7c549e58dc0ec84a952",
+        "inference/static/app.js": "63f47f245945fcf7951730daec3768bb3b54d80c5c10e947487f3f343d6ac92e",
+        "inference/static/index.html": "7acbcd89dff7235005830e185374123255c4a8a57129150fcfe177a71ad29923",
+        "inference/static/style.css": "8be2a10964e451ced15739c066d87325eb4ddda79906a20c477574de612dba5e",
+        "inference/text_inference.py": "4a1f5ab629c1551aa8b4e99945eabda06fbd6e96590d85b6dc3e244fa0734011",
+        "inference/translation.py": "7b43b93c70db571acda1bd3215d77a432498ba9267318ed1ec556e25689bbf10"
+      },
+      "reference_git_clean": true
+    },
+    "Confucius4-R2T2": {
+      "revision": "62757213befa282e7fbfe1bfde3c29577781527c",
+      "prefixes": [
+        "r2t2",
+        "ws_server.py"
+      ],
+      "files": {
+        "r2t2/__init__.py": "817b86e1276f57d8b7bb5841ecf4e31196ad22c94c7bf9658ea0455d7a5d8b21",
+        "r2t2/r2t2_asr.py": "711627d76a3ab610ba3651409e25c8358d0d874aaf07c61c51555ff84d123614",
+        "ws_server.py": "8e67c1c6aafee68d67861cb37b3f8e0716700d8b803cbc34502a5c55203d0e3c"
+      },
+      "reference_git_clean": true
+    }
+  }
+}

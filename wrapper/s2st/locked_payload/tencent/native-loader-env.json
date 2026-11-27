@@ -1,0 +1,4 @@
+{
+  "LD_LIBRARY_PATH": "/opt/tencent-native:/opt/youdao-native",
+  "OMP_NUM_THREADS": "4"
+}
